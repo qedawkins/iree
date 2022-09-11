@@ -147,11 +147,11 @@ class OpenCLSPIRVTargetBackend : public TargetBackend {
       return variantOp.emitError() << "failed to serialize spv.module";
     }
 
-    // if (!options.dumpBinariesPath.empty()) {
-    //   dumpDataToPath<uint32_t>(options.dumpBinariesPath,
-    //   options.dumpBaseName,
-    //                            variantOp.getName(), ".spv", spvBinary);
-    // }
+    if (!options.dumpBinariesPath.empty()) {
+      dumpDataToPath<uint32_t>(options.dumpBinariesPath,
+      options.dumpBaseName,
+                               variantOp.getName(), ".spv", spvBinary);
+    }
 
     auto spvCodeRef = flatbuffers_uint32_vec_create(builder, spvBinary.data(),
                                                     spvBinary.size());
