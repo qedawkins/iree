@@ -278,7 +278,7 @@ struct HALInterfaceWorkgroupIdAndCount64BitConverter final
     auto spirvBuiltinExt = rewriter.create<spirv::CompositeExtractOp>(op.getLoc(),
         i64Type, spirvBuiltin, rewriter.getI32ArrayAttr({index}));
     auto i32Type = rewriter.getIntegerType(32);
-    rewriter.replaceOpWithNewOp<spirv::SConvertOp>(
+    rewriter.replaceOpWithNewOp<spirv::UConvertOp>(
         op, i32Type, spirvBuiltinExt);
     return success();
   }
@@ -400,7 +400,7 @@ struct HALInterfaceBindingSubspanToArgPointerConverter final
       if (offsetVal != 0) {
         SmallVector<Value, 2> emptyIndices;
         Value byteOffset = adaptor.getByteOffset();
-        byteOffset = rewriter.create<spirv::SConvertOp>(
+        byteOffset = rewriter.create<spirv::UConvertOp>(
                 subspanOp.getLoc(), rewriter.getIntegerType(64), byteOffset);
         dataPtr = rewriter.create<spirv::PtrAccessChainOp>(
             subspanOp.getLoc(), dataPtr, byteOffset, emptyIndices);
