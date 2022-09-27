@@ -124,6 +124,13 @@ def RemoveSingleIterationLoop :
   let constructor = "mlir::iree_compiler::createRemoveSingleIterationLoopPass()";
 }
 
+def LinalgConvNCHWToNHWC :
+    Pass<"iree-codegen-convert-conv-nchw-to-nhwc", "func::FuncOp"> {
+  let summary = "Convert NCHW Convolutions to NHWC";
+  let constructor =
+      "mlir::iree_compiler::createLinalgConvNCHWToNHWCPass()";
+}
+
 def TensorToVectorVectorizePad :
     Pass<"iree-codegen-vectorize-tensor-pad", "func::FuncOp"> {
   let summary = "Vectorize a very specific form of tensor.pad with "
