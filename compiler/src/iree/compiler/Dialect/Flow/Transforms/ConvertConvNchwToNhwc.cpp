@@ -6,8 +6,8 @@
 
 #include <iostream>
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Dialect/Flow/Transforms/PassDetail.h"
+#include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
@@ -16,14 +16,15 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectResourceBlobManager.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-#define DEBUG_TYPE "iree-convert-conv-nchw-to-nhwc"
+#define DEBUG_TYPE "iree-flow-convert-conv-nchw-to-nhwc"
 
 #define TRANSPOSE_ATTR_NAME "_ConvNchwToNhwcTranspose"
 #define GENERIC_ATTR_NAME "_NormalGeneric"
@@ -35,6 +36,8 @@
 
 namespace mlir {
 namespace iree_compiler {
+namespace IREE {
+namespace Flow {
 
 // Utils ----------------------------------------------
 
@@ -540,14 +543,17 @@ struct CancelNCHWToNHWCTranspose : OpRewritePattern<linalg::GenericOp> {
   }
 };
 
-struct LinalgConvNCHWToNHWCPass
-    : public LinalgConvNCHWToNHWCBase<LinalgConvNCHWToNHWCPass> {
+struct ConvertConvNchwToNhwcPass
+    : public ConvertConvNchwToNhwcBase<ConvertConvNchwToNhwcPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<linalg::LinalgDialect>();
+    registry.insert<arith::ArithmeticDialect>();
+    registry.insert<tensor::TensorDialect>();
   }
 
   void runOnOperation() override {
-    func::FuncOp funcOp = getOperation();
+    //func::FuncOp funcOp = getOperation();
+    Operation *funcOp = getOperation();
     MLIRContext *context = &getContext();
 
     {
@@ -560,19 +566,23 @@ struct LinalgConvNCHWToNHWCPass
       }
     }
 
-    auto transposePropagationFn = [&](Operation *op) -> WalkResult {
-      return TypeSwitch<Operation *, LogicalResult>(op)
-          .Case<tensor::PadOp, linalg::FillOp, linalg::InitTensorOp,
-                // linalg::GenericOp, arith::ConstantOp>([&](auto taggableOp) {
-                linalg::GenericOp>([&](auto taggableOp) {
-            return propagateTagThroughOp(taggableOp);
-          })
-          .Default([&](Operation *op) -> LogicalResult { return success(); });
-    };
+    {
+      auto transposePropagationFn = [&](Operation *op) -> WalkResult {
+        return TypeSwitch<Operation *, LogicalResult>(op)
+            .Case<tensor::PadOp, linalg::FillOp, linalg::InitTensorOp,
+                  // linalg::GenericOp, arith::ConstantOp>([&](auto taggableOp) {
+                  linalg::GenericOp>([&](auto taggableOp) {
+              return propagateTagThroughOp(taggableOp);
+            })
+            .Default([&](Operation *op) -> LogicalResult { return success(); });
+      };
 
-    for (Block &block : llvm::reverse(funcOp.getBody().getBlocks())) {
-      for (Operation &op : llvm::reverse(block.getOperations())) {
-        transposePropagationFn(&op);
+      for (Region &region : llvm::reverse(funcOp->getRegions())) {
+        for (Block &block : llvm::reverse(region.getBlocks())) {
+          for (Operation &op : llvm::reverse(block.getOperations())) {
+            transposePropagationFn(&op);
+          }
+        }
       }
     }
 
@@ -600,9 +610,11 @@ struct LinalgConvNCHWToNHWCPass
 
 }  // namespace
 
-std::unique_ptr<OperationPass<func::FuncOp>> createLinalgConvNCHWToNHWCPass() {
-  return std::make_unique<LinalgConvNCHWToNHWCPass>();
+std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>> createConvertConvNchwToNhwcPass() {
+  return std::make_unique<ConvertConvNchwToNhwcPass>();
 }
 
+}  // namespace Flow
+}  // namespace IREE
 }  // namespace iree_compiler
 }  // namespace mlir

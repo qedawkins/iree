@@ -89,7 +89,6 @@ iree_cc_library(
     "TestPartitionableLoopsInterface.cpp"
     "TileAndDistributeToWorkgroupsPass.cpp"
     "TypePropagationPass.cpp"
-    "ConvNCHWToNHWCPass.cpp"
     "VectorizePad.cpp"
   DEPS
     IREELinalgExtDialect

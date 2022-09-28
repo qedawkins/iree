@@ -114,7 +114,6 @@ iree_compiler_cc_library(
         "TileAndDistributeToWorkgroupsPass.cpp",
         "TypePropagationPass.cpp",
         "VectorizePad.cpp",
-        "ConvNCHWToNHWCPass.cpp",
     ],
     hdrs = [
         "BufferizationAnalysis.h",
