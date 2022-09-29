@@ -39,8 +39,10 @@ namespace iree_compiler {
 namespace IREE {
 namespace Flow {
 
-// Utils ----------------------------------------------
 
+// Helper function for propagating transpose tags to ops that can handle them. This assumes propagation
+// happens moving up the use-def chain because we want to make sure to hit the highest level ops possible, then
+// when applying the propagations we can reach most ops not caught by this (mainly inputs to linalg.generics).
 static LogicalResult propagateTagThroughOp(Operation *op) {
   // We don't want to overwrite existing tags
   if (op->hasAttr(TRANSPOSE_ATTR_NAME)) return success();
@@ -54,19 +56,25 @@ static LogicalResult propagateTagThroughOp(Operation *op) {
   if (!outputType || outputType.getRank() != 4) return success();
 
   MLIRContext *context = op->getContext();
+  Attribute tag;
 
-  auto owner = result.use_begin()->getOwner();
-  if (!owner->hasAttr(TRANSPOSE_ATTR_NAME)) return success();
-
-  Attribute tag = owner->getAttr(TRANSPOSE_ATTR_NAME);
-
-  if (llvm::all_of(op->getResults()[0].getUses(), [&tag](const OpOperand &use) {
+  if (llvm::any_of(op->getResults()[0].getUses(), [&tag](const OpOperand &use) {
         auto owner = use.getOwner();
-        return owner->getAttr(TRANSPOSE_ATTR_NAME) == tag;
+        bool propagate = owner->hasAttr(TRANSPOSE_ATTR_NAME);
+        if (propagate)
+          tag = owner->getAttr(TRANSPOSE_ATTR_NAME);
+        return propagate;
       })) {
-    op->setAttr(TRANSPOSE_ATTR_NAME, tag);
-    if (dyn_cast<linalg::GenericOp>(op)) {
-      op->setAttr(GENERIC_ATTR_NAME, UnitAttr::get(context));
+    if (llvm::all_of(op->getResults()[0].getUses(), [&tag](const OpOperand &use) {
+          auto owner = use.getOwner();
+          return (owner->getAttr(TRANSPOSE_ATTR_NAME) == tag) || dyn_cast<linalg::GenericOp>(owner);
+        })) {
+      op->setAttr(TRANSPOSE_ATTR_NAME, tag);
+
+      // We have to mark naturally occuring linalg.generics separately from ones we generate when transposing
+      if (dyn_cast<linalg::GenericOp>(op)) {
+        op->setAttr(GENERIC_ATTR_NAME, UnitAttr::get(context));
+      }
     }
   }
   return success();
@@ -87,10 +95,37 @@ static SmallVector<uint64_t> getShuffleIndicesFromTag(MLIRContext *context,
   return targetIndices;
 }
 
+static bool isPropagatingTag(MLIRContext *context, Attribute tag) {
+  if (tag == StringAttr::get(context, CLAST) ||
+      tag == StringAttr::get(context, FLAST) ||
+      tag == StringAttr::get(context, CFIRST) ||
+      tag == StringAttr::get(context, FFIRST)) {
+    return true;
+  }
+  return false;
+}
+
+static Attribute invertTag(MLIRContext *context, Attribute tag) {
+  if (tag == StringAttr::get(context, CLAST)) {
+    return StringAttr::get(context, CFIRST);
+  } else if (tag == StringAttr::get(context, FLAST)) {
+    return StringAttr::get(context, FFIRST);
+  } else if (tag == StringAttr::get(context, CFIRST)) {
+    return StringAttr::get(context, CLAST);
+  } else if (tag == StringAttr::get(context, FFIRST)) {
+    return StringAttr::get(context, FLAST);
+  }
+  return tag;
+}
+
+// Helper to shuffle vectors according to the tag type
 template <typename T>
 static SmallVector<T> shuffle4DFromTag(MLIRContext *context,
                                        SmallVector<T> unshuffled,
-                                       Attribute tag) {
+                                       Attribute tag, bool invert) {
+  if (invert)
+    tag = invertTag(context, tag);
+
   SmallVector<uint64_t> targetIndices = getShuffleIndicesFromTag(context, tag);
   SmallVector<T> shuffled(
       {unshuffled[targetIndices[0]], unshuffled[targetIndices[1]],
@@ -98,6 +133,17 @@ static SmallVector<T> shuffle4DFromTag(MLIRContext *context,
   return shuffled;
 }
 
+static Attribute oneWayTagDown(MLIRContext *context, Attribute tag) {
+  if (tag == StringAttr::get(context, CFIRST)) {
+    tag = StringAttr::get(context, CLAST);
+  } else if (tag == StringAttr::get(context, FFIRST)) {
+    tag = StringAttr::get(context, FLAST);
+  }
+  return tag;
+}
+
+// Transpose the input tensor based on the given tag. The tensor being transposed by this 
+// helper should always be rank 4.
 static Value create4DTransposeWithAttr(PatternRewriter &rewriter, Location loc,
                                        Value input,
                                        SmallVector<uint64_t> targetIndices,
@@ -115,9 +161,9 @@ static Value create4DTransposeWithAttr(PatternRewriter &rewriter, Location loc,
     idExprs.push_back(getAffineDimExpr(i, context));
 
   SmallVector<int64_t> outputShape =
-      shuffle4DFromTag<int64_t>(context, inputShape, tag);
+      shuffle4DFromTag<int64_t>(context, inputShape, tag, false);
   SmallVector<AffineExpr> swapExprs =
-      shuffle4DFromTag<AffineExpr>(context, idExprs, tag);
+      shuffle4DFromTag<AffineExpr>(context, idExprs, tag, false);
 
   Value output =
       rewriter.create<linalg::InitTensorOp>(loc, outputShape, elementType);
@@ -138,6 +184,8 @@ static Value create4DTransposeWithAttr(PatternRewriter &rewriter, Location loc,
   return transpose.getResult(0);
 }
 
+// if inputIsNchw {0, 1, 2, 3} -> {0, 3, 1, 2}
+// else           {0, 1, 2, 3} -> {0, 2, 3, 1}
 static Value createNchwTransposeWithAttr(PatternRewriter &rewriter,
                                          Location loc, Value input,
                                          bool inputIsNchw) {
@@ -152,6 +200,8 @@ static Value createNchwTransposeWithAttr(PatternRewriter &rewriter,
   return create4DTransposeWithAttr(rewriter, loc, input, targetIndices, tag);
 }
 
+// if inputIsFchw {0, 1, 2, 3} -> {2, 3, 1, 0}
+// else           {0, 1, 2, 3} -> {3, 2, 0, 1}
 static Value createFchwTransposeWithAttr(PatternRewriter &rewriter,
                                          Location loc, Value input,
                                          bool inputIsFchw) {
@@ -176,11 +226,18 @@ static Value createTransposeWithAttrFromTag(PatternRewriter &rewriter,
     } else if (tag == StringAttr::get(context, FLAST)) {
       tag = StringAttr::get(context, FFIRST);
     }
+  } else {
+    if (tag == StringAttr::get(context, CFIRST)) {
+      tag = StringAttr::get(context, CLAST);
+    } else if (tag == StringAttr::get(context, FFIRST)) {
+      tag = StringAttr::get(context, FLAST);
+    }
   }
   SmallVector<uint64_t> targetIndices = getShuffleIndicesFromTag(context, tag);
   return create4DTransposeWithAttr(rewriter, loc, input, targetIndices, tag);
 }
 
+// Supports conv and pooling ops, where pooling ops don't transpose the filter
 template <typename ConvOpTy, typename ConvTargetOpTy>
 static LogicalResult convertConvLikeNchwToNhwc(PatternRewriter &rewriter,
                                                ConvOpTy convOp,
@@ -188,16 +245,6 @@ static LogicalResult convertConvLikeNchwToNhwc(PatternRewriter &rewriter,
   LLVM_DEBUG(llvm::dbgs() << "inspecting " << convOp << "\n");
 
   Location loc = convOp.getLoc();
-
-  // This pattern does not handle convolutions with dilation?
-  if (auto dilations = convOp.getDilations()) {
-    auto values = dilations.template getValues<APInt>();
-    if (llvm::any_of(values, [](const APInt &value) {
-          return value.getSExtValue() != 1;
-        })) {
-      return failure();
-    }
-  }
 
   Value input = convOp.image();
   Value filter = convOp.filter();
@@ -207,24 +254,10 @@ static LogicalResult convertConvLikeNchwToNhwc(PatternRewriter &rewriter,
   auto filterType = filter.getType().cast<RankedTensorType>();
   auto outputType = output.getType().cast<RankedTensorType>();
 
-  // The filter/input/output view should have static sizes to convert.
-  if (!inputType.hasStaticShape() || !filterType.hasStaticShape() ||
-      !outputType.hasStaticShape()) {
-    return failure();
-  }
-
-  // Require rank 4 (might already be in the verifier)
+  // Require rank 4
   if (inputType.getRank() != 4 ||
-      (transposeFilter && filterType.getRank() != 4)) {
-    return failure();
-  }
-
-  // Require uniform stride for now
-  auto strides = convOp.getStrides().template getValues<int64_t>();
-  int64_t commonStride = strides[0];
-  if (llvm::any_of(strides, [&commonStride](const int64_t &stride) {
-        return stride != commonStride;
-      })) {
+      (transposeFilter && filterType.getRank() != 4) ||
+      outputType.getRank() != 4) {
     return failure();
   }
 
@@ -255,7 +288,7 @@ static LogicalResult convertConvLikeNchwToNhwc(PatternRewriter &rewriter,
 namespace {
 
 /*
- *  Convolution conversion
+ *  Convolution conversion patterns
  */
 
 struct ConvertLinalgConvNchwFchw : OpRewritePattern<linalg::Conv2DNchwFchwOp> {
@@ -294,7 +327,7 @@ struct ConvertLinalgPoolingNchwSum
 };
 
 /*
- *  Transpose propagation
+ *  Transpose propagation patterns
  */
 
 struct PropagateThroughTensorPad : OpRewritePattern<tensor::PadOp> {
@@ -311,16 +344,16 @@ struct PropagateThroughTensorPad : OpRewritePattern<tensor::PadOp> {
 
     auto input = padOp.getSource();
     SmallVector<OpFoldResult> mixedLow =
-        shuffle4DFromTag<OpFoldResult>(context, padOp.getMixedLowPad(), tag);
+        shuffle4DFromTag<OpFoldResult>(context, padOp.getMixedLowPad(), tag, false);
     SmallVector<OpFoldResult> mixedHigh =
-        shuffle4DFromTag<OpFoldResult>(context, padOp.getMixedHighPad(), tag);
+        shuffle4DFromTag<OpFoldResult>(context, padOp.getMixedHighPad(), tag, false);
 
     auto transposedInput =
         createTransposeWithAttrFromTag(rewriter, loc, input, tag, true);
 
     SmallVector<int64_t> outputShape(padOp.getResultType().getShape());
     SmallVector<int64_t> transposedOutputShape =
-        shuffle4DFromTag<int64_t>(context, outputShape, tag);
+        shuffle4DFromTag<int64_t>(context, outputShape, tag, false);
     RankedTensorType transposedOutputType = RankedTensorType::get(
         transposedOutputShape, padOp.getResultType().getElementType());
 
@@ -372,7 +405,8 @@ struct PropagateThroughLinalgGeneric : OpRewritePattern<linalg::GenericOp> {
 
   LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
                                 PatternRewriter &rewriter) const override {
-    if (!genericOp->hasAttr(GENERIC_ATTR_NAME)) {
+    bool propagateThrough = genericOp->hasAttr(TRANSPOSE_ATTR_NAME);
+    if (!genericOp->hasAttr(GENERIC_ATTR_NAME) && propagateThrough) {
       return failure();
     }
     LLVM_DEBUG(llvm::dbgs() << "propagating " << genericOp << "\n");
@@ -382,36 +416,56 @@ struct PropagateThroughLinalgGeneric : OpRewritePattern<linalg::GenericOp> {
     MLIRContext *context = rewriter.getContext();
 
     // For now we are restricting to single outputs.
-    auto output = genericOp.getOutputs()[0];
-    auto transposedOutput =
-        createTransposeWithAttrFromTag(rewriter, loc, output, tag, true);
-
+    auto transposedOutput = genericOp.getOutputs()[0];
     auto indexingMaps = genericOp.getIndexingMapsArray();
-    AffineMap outMap = indexingMaps.back();
-    SmallVector<AffineExpr> outExprs(outMap.getResults());
-    SmallVector<AffineExpr> exprs =
-        shuffle4DFromTag<AffineExpr>(context, outExprs, tag);
-    indexingMaps[indexingMaps.size() - 1] =
-        AffineMap::get(outMap.getNumDims(), outMap.getNumSymbols(), exprs,
-                       genericOp->getContext());
+
+    if (transposedOutput.getDefiningOp()->hasAttr(TRANSPOSE_ATTR_NAME)) {
+      if (!propagateThrough) {
+        auto tmpTag = transposedOutput.getDefiningOp()->getAttr(TRANSPOSE_ATTR_NAME);
+        if (isPropagatingTag(context, tmpTag)) {
+          tag = tmpTag;
+          propagateThrough = true;
+        }
+      }
+    }
+
+    if (propagateThrough) {
+      transposedOutput =
+          createTransposeWithAttrFromTag(rewriter, loc, transposedOutput, tag, true);
+
+      AffineMap outMap = indexingMaps.back();
+      SmallVector<AffineExpr> outExprs(outMap.getResults());
+      SmallVector<AffineExpr> exprs =
+          shuffle4DFromTag<AffineExpr>(context, outExprs, tag, false);
+      indexingMaps[indexingMaps.size() - 1] =
+          AffineMap::get(outMap.getNumDims(), outMap.getNumSymbols(), exprs,
+                         genericOp->getContext());
+    }
 
     SmallVector<Value> newInputs;
+    bool needsUpdate = false;
     for (auto input : llvm::enumerate(genericOp.getInputs())) {
-      if (input.value().getDefiningOp()->hasAttr(TRANSPOSE_ATTR_NAME)) {
+      auto parentOp = input.value().getDefiningOp();
+      if (parentOp->hasAttr(TRANSPOSE_ATTR_NAME)) {
+        Attribute inputTag = oneWayTagDown(context, parentOp->getAttr(TRANSPOSE_ATTR_NAME));
         auto transposedInput = createTransposeWithAttrFromTag(
-            rewriter, loc, input.value(), tag, true);
+            rewriter, loc, input.value(), inputTag, true);
         AffineMap inMap = indexingMaps[input.index()];
         SmallVector<AffineExpr> inputExprs(inMap.getResults());
         SmallVector<AffineExpr> shuffledInputExprs =
-            shuffle4DFromTag<AffineExpr>(context, inputExprs, tag);
+            shuffle4DFromTag<AffineExpr>(context, inputExprs, inputTag, false);
         indexingMaps[input.index()] =
             AffineMap::get(inMap.getNumDims(), inMap.getNumSymbols(),
-                           shuffledInputExprs, genericOp->getContext());
+                           shuffledInputExprs, context);
         newInputs.push_back(transposedInput);
+        needsUpdate = true;
       } else {
         newInputs.push_back(input.value());
       }
     }
+
+    if (!(needsUpdate || propagateThrough))
+      return failure();
 
     SmallVector<StringRef> iteratorTypes = llvm::to_vector(llvm::map_range(
         genericOp.getIteratorTypes(),
@@ -422,11 +476,14 @@ struct PropagateThroughLinalgGeneric : OpRewritePattern<linalg::GenericOp> {
         transposedOutput, indexingMaps, iteratorTypes);
     BlockAndValueMapping mapper;
     genericOp.getRegion().cloneInto(&newGeneric.getRegion(), mapper);
-    newGeneric->removeAttr(TRANSPOSE_ATTR_NAME);
     newGeneric->removeAttr(GENERIC_ATTR_NAME);
+    newGeneric->setAttr(TRANSPOSE_ATTR_NAME, StringAttr::get(context, "Transposed"));
 
-    auto returnToNCHW = createTransposeWithAttrFromTag(
-        rewriter, loc, newGeneric.getResult(0), tag, false);
+    Value returnToNCHW = newGeneric.getResult(0);
+    if (propagateThrough) {
+      returnToNCHW = createTransposeWithAttrFromTag(
+          rewriter, loc, returnToNCHW, tag, false);
+    }
 
     rewriter.replaceOp(genericOp, returnToNCHW);
     return success();
@@ -451,7 +508,7 @@ struct PropagateThroughLinalgInitTensor
     MLIRContext *context = rewriter.getContext();
 
     SmallVector<OpFoldResult> mixedSizes = shuffle4DFromTag<OpFoldResult>(
-        context, initTensorOp.getMixedSizes(), tag);
+        context, initTensorOp.getMixedSizes(), tag, false);
 
     auto newTensor = rewriter.create<linalg::InitTensorOp>(
         loc, mixedSizes, initTensorOp.getType().getElementType());
@@ -463,6 +520,7 @@ struct PropagateThroughLinalgInitTensor
   }
 };
 
+// Currently doesn't do the static transposing of weights so this pattern is disabled
 struct PropagateThroughArithConstant : OpRewritePattern<arith::ConstantOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -482,7 +540,7 @@ struct PropagateThroughArithConstant : OpRewritePattern<arith::ConstantOp> {
 
     SmallVector<int64_t> outputShape(outputType.getShape());
     SmallVector<int64_t> transposedOutputShape =
-        shuffle4DFromTag<int64_t>(context, outputShape, tag);
+        shuffle4DFromTag<int64_t>(context, outputShape, tag, false);
     RankedTensorType transposedOutputType = RankedTensorType::get(
         transposedOutputShape, outputType.getElementType());
 
@@ -506,6 +564,7 @@ struct PropagateThroughArithConstant : OpRewritePattern<arith::ConstantOp> {
  *  Folding away cancelling transposes
  */
 
+// Cancel if this transpose is tagged with a propagating tag and the defining op for the input is the inverse of this transpose
 struct CancelNCHWToNHWCTranspose : OpRewritePattern<linalg::GenericOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -518,22 +577,16 @@ struct CancelNCHWToNHWCTranspose : OpRewritePattern<linalg::GenericOp> {
     MLIRContext *context = transposeOp->getContext();
 
     Attribute transposeType = transposeOp->getAttr(TRANSPOSE_ATTR_NAME);
-    StringAttr cLastAttr = StringAttr::get(context, CLAST);
-    StringAttr cFirstAttr = StringAttr::get(context, CFIRST);
-    StringAttr fLastAttr = StringAttr::get(context, FLAST);
-    StringAttr fFirstAttr = StringAttr::get(context, FFIRST);
 
-    if (transposeType == cLastAttr) {
-      auto parentOp =
-          transposeOp->getOperand(0).getDefiningOp<linalg::GenericOp>();
-      if (parentOp && parentOp->getAttr(TRANSPOSE_ATTR_NAME) == cFirstAttr) {
-        rewriter.replaceOp(transposeOp, parentOp->getOperand(0));
-        return success();
-      }
-    } else if (transposeType == fLastAttr) {
-      auto parentOp =
-          transposeOp->getOperand(0).getDefiningOp<linalg::GenericOp>();
-      if (parentOp && parentOp->getAttr(TRANSPOSE_ATTR_NAME) == fFirstAttr) {
+    if (!isPropagatingTag(context, transposeType)) {
+      return failure();
+    }
+
+    auto parentOp =
+        transposeOp->getOperand(0).getDefiningOp<linalg::GenericOp>();
+    if (parentOp) {
+      Attribute tag = invertTag(context, parentOp->getAttr(TRANSPOSE_ATTR_NAME));
+      if (transposeType == tag) {
         rewriter.replaceOp(transposeOp, parentOp->getOperand(0));
         return success();
       }
@@ -543,6 +596,11 @@ struct CancelNCHWToNHWCTranspose : OpRewritePattern<linalg::GenericOp> {
   }
 };
 
+// The high level strategy for this pass is as follows:
+//     1. Do the conversions for all conv_nchw_fchw ops (and pooling ops) and wrap the converted convolutions in transposes. Each transpose is tagged to indicate whether it is transposing into channels last or back to channels first.
+//     2. Propagate the tags from transposes that do nchw -> nhwc up their use-def chains through ops where there is support for propagating transposes.
+//     3. Rewrite all of the ops tagged with propagating transposes and wrap them in transposes same as with the convolutions.
+//     4. Canonicalize out all adjacent cancelling transposes.
 struct ConvertConvNchwToNhwcPass
     : public ConvertConvNchwToNhwcBase<ConvertConvNchwToNhwcPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -552,7 +610,6 @@ struct ConvertConvNchwToNhwcPass
   }
 
   void runOnOperation() override {
-    //func::FuncOp funcOp = getOperation();
     Operation *funcOp = getOperation();
     MLIRContext *context = &getContext();
 
@@ -570,7 +627,7 @@ struct ConvertConvNchwToNhwcPass
       auto transposePropagationFn = [&](Operation *op) -> WalkResult {
         return TypeSwitch<Operation *, LogicalResult>(op)
             .Case<tensor::PadOp, linalg::FillOp, linalg::InitTensorOp,
-                  // linalg::GenericOp, arith::ConstantOp>([&](auto taggableOp) {
+                  //linalg::GenericOp, arith::ConstantOp>([&](auto taggableOp) {
                   linalg::GenericOp>([&](auto taggableOp) {
               return propagateTagThroughOp(taggableOp);
             })
@@ -592,7 +649,7 @@ struct ConvertConvNchwToNhwcPass
       patterns.insert<PropagateThroughLinalgInitTensor>(context);
       patterns.insert<PropagateThroughLinalgFill>(context);
       patterns.insert<PropagateThroughLinalgGeneric>(context);
-      // patterns.insert<PropagateThroughArithConstant>(context);
+      //patterns.insert<PropagateThroughArithConstant>(context);
       if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
         return signalPassFailure();
       }
