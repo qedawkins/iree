@@ -7,12 +7,12 @@
 
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
-TENSORFLOW_COMMIT = "56233b2d176893f90e34f220681341d2fff9cde4"
+TENSORFLOW_COMMIT = "dde4a6a8e4fd21db9eb71ee7e949d38da5a3302f"
 
 git_repository(
     name = "org_tensorflow",
     commit = TENSORFLOW_COMMIT,
-    remote = "https://github.com/iree-org/iree-tf-fork.git",
+    remote = "https://github.com/qedawkins/tensorflow.git",
 )
 
 # Import all of the tensorflow dependencies.
