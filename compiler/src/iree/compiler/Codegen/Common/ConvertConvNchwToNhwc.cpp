@@ -6,8 +6,8 @@
 
 #include <iostream>
 
-#include "iree/compiler/Dialect/Flow/Transforms/PassDetail.h"
-#include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
+#include "iree/compiler/Codegen/PassDetail.h"
+#include "iree/compiler/Codegen/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
@@ -23,7 +23,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-#define DEBUG_TYPE "iree-flow-convert-conv-nchw-to-nhwc"
+#define DEBUG_TYPE "iree-convert-conv-nchw-to-nhwc"
 
 #define TRANSPOSE_ATTR_NAME "_ConvNchwToNhwcTranspose"
 #define GENERIC_ATTR_NAME "_NormalGeneric"
@@ -35,8 +35,6 @@
 
 namespace mlir {
 namespace iree_compiler {
-namespace IREE {
-namespace Flow {
 
 // Helper function for propagating transpose tags to ops that can handle them.
 // This assumes propagation happens moving up the use-def chain because we want
@@ -622,7 +620,7 @@ struct ConvertConvNchwToNhwcPass
   }
 
   void runOnOperation() override {
-    Operation *funcOp = getOperation();
+    func::FuncOp funcOp = getOperation();
     MLIRContext *context = &getContext();
 
     {
@@ -647,11 +645,9 @@ struct ConvertConvNchwToNhwcPass
             .Default([&](Operation *op) -> LogicalResult { return success(); });
       };
 
-      for (Region &region : llvm::reverse(funcOp->getRegions())) {
-        for (Block &block : llvm::reverse(region.getBlocks())) {
-          for (Operation &op : llvm::reverse(block.getOperations())) {
-            transposePropagationFn(&op);
-          }
+      for (Block &block : llvm::reverse(funcOp.getBody().getBlocks())) {
+        for (Operation &op : llvm::reverse(block.getOperations())) {
+          transposePropagationFn(&op);
         }
       }
     }
@@ -680,12 +676,10 @@ struct ConvertConvNchwToNhwcPass
 
 }  // namespace
 
-std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 createConvertConvNchwToNhwcPass() {
   return std::make_unique<ConvertConvNchwToNhwcPass>();
 }
 
-}  // namespace Flow
-}  // namespace IREE
 }  // namespace iree_compiler
 }  // namespace mlir

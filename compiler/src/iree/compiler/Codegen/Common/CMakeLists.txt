@@ -91,6 +91,7 @@ iree_cc_library(
     "TypePropagationPass.cpp"
     "VectorizePad.cpp"
     "WorkgroupSpecializationPass.cpp"
+    "ConvertConvNchwToNhwc.cpp"
   DEPS
     IREELinalgExtDialect
     IREELinalgExtPasses

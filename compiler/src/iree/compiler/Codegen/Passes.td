@@ -124,6 +124,13 @@ def TypePropagation :
   let constructor = "mlir::iree_compiler::createTypePropagationPass()";
 }
 
+def ConvertConvNchwToNhwc :
+    Pass<"iree-codegen-convert-conv-nchw-to-nhwc", "func::FuncOp"> {
+  let summary = "Convert NCHW Convolutions to NHWC";
+  let constructor =
+      "mlir::iree_compiler::createConvertConvNchwToNhwcPass()";
+}
+
 def RemoveSingleIterationLoop :
     Pass<"iree-codegen-remove-single-iteration-loop", "func::FuncOp"> {
   let summary = "Remove distributed loop with single iteration.";
