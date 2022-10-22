@@ -412,6 +412,9 @@ class ConvertConv2DNchwFchw final
     : public OpRewritePattern<linalg::Conv2DNchwFchwOp> {
  public:
   using OpRewritePattern::OpRewritePattern;
+  ConvertConv2DNchwFchw(MLIRContext *context, bool useBatchMatmul)
+      : OpRewritePattern<linalg::Conv2DNchwFchwOp>(context, useBatchMatmul),
+        useBatchMatmul(useBatchMatmul) {}
 
   LogicalResult matchAndRewrite(linalg::Conv2DNchwFchwOp convOp,
                                 PatternRewriter &rewriter) const override {
@@ -477,6 +480,12 @@ class ConvertConv2DNchwFchw final
           nestedBuilder.create<linalg::YieldOp>(nestedLoc, args[0]);
         });
 
+    SmallVector<ReassociationIndices> filterReassocIndices = {{0}, {1, 2, 3}};
+    auto reshapedFilterType =
+        RankedTensorType::get({oc, fh * fw * ic}, inputType.getElementType());
+    Value reshapedFilter = rewriter.create<tensor::CollapseShapeOp>(
+        loc, reshapedFilterType, filter, filterReassocIndices);
+
     SmallVector<ReassociationIndices> img2ColTensorReassocIndices;
     SmallVector<ReassociationIndices> outputReassocIndices;
     RankedTensorType reshapedImg2ColTensorType, reshapedOutputType;
@@ -496,18 +505,34 @@ class ConvertConv2DNchwFchw final
           {n, fh * fw * ic, oh * ow}, inputType.getElementType());
       reshapedOutputType =
           RankedTensorType::get({n, oc, oh * ow}, outputType.getElementType());
-    }
 
-    SmallVector<ReassociationIndices> filterReassocIndices = {{0}, {1, 2, 3}};
-    auto reshapedFilterType =
-        RankedTensorType::get({oc, fh * fw * ic}, inputType.getElementType());
+      if (useBatchMatmul) {
+        // Broadcast the filter to the batch size if we want to use batch matmul
+        SmallVector<int64_t, 4> broadcastFilterShape = {n, oc, fh * fw * ic};
+        Value broadcastFilterTensor = rewriter.create<tensor::EmptyOp>(
+            loc, broadcastFilterShape, inputType.getElementType());
+
+        AffineExpr nDim, ocDim, mDim;
+        bindDims(getContext(), nDim, ocDim, mDim);
+        SmallVector<AffineExpr, 4> filterInputExprs = {ocDim, mDim};
+        SmallVector<AffineMap, 4> filterIndexingMaps = {
+            AffineMap::get(3, 0, filterInputExprs, rewriter.getContext()),
+            AffineMap::getMultiDimIdentityMap(3, rewriter.getContext())};
+        SmallVector<StringRef, 3> filterIterators(3, parallel);
+
+        reshapedFilter = rewriter.create<linalg::GenericOp>(
+            loc, broadcastFilterTensor.getType(),
+            /*inputs=*/reshapedFilter, /*outputs=*/broadcastFilterTensor,
+            filterIndexingMaps, filterIterators,
+            [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+              nestedBuilder.create<linalg::YieldOp>(nestedLoc, args[0]);
+            }).getResult(0);
+      }
+    }
 
     Value reshapedImg2ColTensor = rewriter.create<tensor::CollapseShapeOp>(
         loc, reshapedImg2ColTensorType, img2ColTensor.getResult(0),
         img2ColTensorReassocIndices);
-
-    Value reshapedFilter = rewriter.create<tensor::CollapseShapeOp>(
-        loc, reshapedFilterType, filter, filterReassocIndices);
 
     Value reshapedOutput = rewriter.create<tensor::CollapseShapeOp>(
         loc, reshapedOutputType, output, outputReassocIndices);
@@ -520,29 +545,39 @@ class ConvertConv2DNchwFchw final
           ArrayRef<Value>{reshapedOutput});
       result = matmulOp.getResults().front();
     } else {
-      // For cases where batch is not 1, we need to keep the batch dimension
-      // separate. However the batch dimension is only used in indexing the
-      // input and output. So we cannot use existing linalg named ops like
-      // linalg.batch_matmul; doing it with a linalg.generic instead.
-      AffineExpr bDim, mDim, nDim, kDim;
-      bindDims(getContext(), bDim, mDim, nDim, kDim);
-      auto lhsMap = AffineMap::get(4, 0, {mDim, kDim}, getContext());
-      auto rhsMap = AffineMap::get(4, 0, {bDim, kDim, nDim}, getContext());
-      auto resultMap = AffineMap::get(4, 0, {bDim, mDim, nDim}, getContext());
-      SmallVector<StringRef> genericIterators = {parallel, parallel, parallel,
-                                                 reduction};
-      bool isInt = outputType.getElementType().isa<IntegerType>();
-      auto genericOp = rewriter.create<linalg::GenericOp>(
-          loc, reshapedOutputType,
-          /*inputs=*/ValueRange{reshapedFilter, reshapedImg2ColTensor},
-          /*outputs=*/ValueRange{reshapedOutput},
-          ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators,
-          [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-            Value mul = createMul(loc, args[0], args[1], isInt, nestedBuilder);
-            Value add = createAdd(loc, mul, args[2], isInt, nestedBuilder);
-            nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
-          });
-      result = genericOp.getResults().front();
+      if (useBatchMatmul) {
+        // We can use a batch matmul if the filter is broadcasted to
+        // have the same initial dim as the input.
+        auto batchMatmulOp = rewriter.create<linalg::BatchMatmulOp>(
+            loc, reshapedOutputType,
+            ArrayRef<Value>{reshapedFilter, reshapedImg2ColTensor},
+            ArrayRef<Value>{reshapedOutput});
+        result = batchMatmulOp.getResults().front();
+      } else {
+        // For cases where batch is not 1, we need to keep the batch dimension
+        // separate. However the batch dimension is only used in indexing the
+        // input and output. So we cannot use existing linalg named ops like
+        // linalg.batch_matmul; doing it with a linalg.generic instead.
+        AffineExpr bDim, mDim, nDim, kDim;
+        bindDims(getContext(), bDim, mDim, nDim, kDim);
+        auto lhsMap = AffineMap::get(4, 0, {mDim, kDim}, getContext());
+        auto rhsMap = AffineMap::get(4, 0, {bDim, kDim, nDim}, getContext());
+        auto resultMap = AffineMap::get(4, 0, {bDim, mDim, nDim}, getContext());
+        SmallVector<StringRef> genericIterators = {parallel, parallel, parallel,
+                                                   reduction};
+        bool isInt = outputType.getElementType().isa<IntegerType>();
+        auto genericOp = rewriter.create<linalg::GenericOp>(
+            loc, reshapedOutputType,
+            /*inputs=*/ValueRange{reshapedFilter, reshapedImg2ColTensor},
+            /*outputs=*/ValueRange{reshapedOutput},
+            ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators,
+            [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+              Value mul = createMul(loc, args[0], args[1], isInt, nestedBuilder);
+              Value add = createAdd(loc, mul, args[2], isInt, nestedBuilder);
+              nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
+            });
+        result = genericOp.getResults().front();
+      }
     }
 
     auto reshapedResult = rewriter.create<tensor::ExpandShapeOp>(
@@ -552,29 +587,38 @@ class ConvertConv2DNchwFchw final
 
     return success();
   }
+
+ private:
+  bool useBatchMatmul = false;
 };
 
 struct ConvertConv2DToImg2ColPass
     : ConvertConv2DToImg2ColBase<ConvertConv2DToImg2ColPass> {
+  ConvertConv2DToImg2ColPass(bool useBatchMatmul)
+      : useBatchMatmul(useBatchMatmul) {}
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<linalg::LinalgDialect>();
   }
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(&getContext());
-    patterns.insert<ConvertConv2DNhwcHwcf, ConvertDepthwiseConv2DNhwcHwc, ConvertConv2DNchwFchw>(
+    patterns.insert<ConvertConv2DNhwcHwcf, ConvertDepthwiseConv2DNhwcHwc>(
         context);
+    patterns.insert<ConvertConv2DNchwFchw>(context, useBatchMatmul);
     if (failed(applyPatternsAndFoldGreedily(getOperation(),
                                             std::move(patterns)))) {
       return signalPassFailure();
     }
   }
+
+ private:
+  bool useBatchMatmul;
 };
 
 }  // namespace
 
-std::unique_ptr<Pass> createConvertConv2DToImg2ColPass() {
-  return std::make_unique<ConvertConv2DToImg2ColPass>();
+std::unique_ptr<Pass> createConvertConv2DToImg2ColPass(bool useBatchMatmul) {
+  return std::make_unique<ConvertConv2DToImg2ColPass>(useBatchMatmul);
 }
 
 }  // namespace Flow
