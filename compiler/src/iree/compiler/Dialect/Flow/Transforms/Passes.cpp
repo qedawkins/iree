@@ -77,6 +77,11 @@ static llvm::cl::opt<bool> clEnablePaddingLinalgOps(
                    "flow-padding-size"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> clEnableCollapseDims(
+    "iree-flow-enable-collapse-dims",
+    llvm::cl::desc("Enable collapsing dims for multi-reductions"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> clEnableFusePaddingIntoLinalgConsumerOps(
     "iree-flow-enable-fuse-padding-into-linalg-consumer-ops",
     llvm::cl::desc("Enable fusing tensor.pad ops into Linalg consumer ops"),
@@ -269,7 +274,7 @@ void buildFlowTransformPassPipeline(OpPassManager &passManager,
                          mlir::createLinalgDetensorizePass)
       .addPass(mlir::createCanonicalizerPass)
       .addPass(mlir::createCSEPass)
-      .addPass(createCollapseDimsPass)
+      .addPredicatedPass(clEnableCollapseDims, createCollapseDimsPass)
       // Split reduction operations into parallel and reduction.
       .addPass(createSplitReductionPass)
       // SplitReductionPass may create reduction dimension that are not the last
