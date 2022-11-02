@@ -29,6 +29,8 @@ constexpr unsigned numSubgroupsPerWorkgroup = 4;
 // The default number of tiles along each dimension to use per workgroup.
 constexpr unsigned numTilesPerSubgroupDim = 2;
 
+constexpr unsigned AMDSoftwarePipelineDepth = 2;
+
 namespace mlir {
 namespace iree_compiler {
 namespace detail {
@@ -280,7 +282,7 @@ static LogicalResult setAMDMatmulConfig(linalg::LinalgOp op,
     threadMNK = {4, 4, 32};
   }
   return setMatmulOpConfig(limits, op, workgroupXY, threadMNK,
-                           /*enablePromotion=*/true);
+                           /*enablePromotion=*/true, AMDSoftwarePipelineDepth);
 }
 
 // RDNA architecture:
