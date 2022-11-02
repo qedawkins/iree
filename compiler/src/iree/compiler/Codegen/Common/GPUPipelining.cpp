@@ -23,7 +23,7 @@ namespace mlir {
 namespace iree_compiler {
 
 static const StringLiteral kPipeliningLoopMarker = "__pipelining_K_loop__";
-static const StringLiteral kPipeliningGlobalLoad = "__pipelining_global_load__";
+static const StringLiteral kPipeliningFirstStage = "__pipelining_global_load__";
 
 // Returns a new predicated operation to support unpeeled epilogue. Unpeeled
 // epilogue needs to handle the last iterations within the mainloop which
@@ -103,7 +103,7 @@ static void getPipelineStages(scf::ForOp forOp,
   // Track dependencies of the global memory load.
   llvm::SmallDenseSet<Operation*> loadDep;
   for (Operation& op : forOp.getBody()->getOperations()) {
-    if (op.hasAttr(kPipeliningGlobalLoad)) {
+    if (op.hasAttr(kPipeliningFirstStage)) {
       addDepOps(loadDep, &op, forOp.getBody());
     }
   }
@@ -163,10 +163,10 @@ struct GPUPipeliningPass : public GPUPipeliningBase<GPUPipeliningPass> {
         if (isa<nvgpu::DeviceAsyncCopyOp, nvgpu::DeviceAsyncCreateGroupOp>(
                 op)) {
           copyToWorkgroupMemory = true;
-          op.setAttr(kPipeliningGlobalLoad, builder.getUnitAttr());
+          op.setAttr(kPipeliningFirstStage, builder.getUnitAttr());
           // async copy ops need to be moved along with previous barrier.
           for (Operation* barrier : barriers) {
-            barrier->setAttr(kPipeliningGlobalLoad, builder.getUnitAttr());
+            barrier->setAttr(kPipeliningFirstStage, builder.getUnitAttr());
           }
           barriers.clear();
           continue;
@@ -183,7 +183,8 @@ struct GPUPipeliningPass : public GPUPipeliningBase<GPUPipeliningPass> {
             st.getSource().getType().cast<MemRefType>().getMemorySpaceAsInt();
         if (stAddSpace != 3) continue;
         copyToWorkgroupMemory = true;
-        ld->setAttr(kPipeliningGlobalLoad, builder.getUnitAttr());
+        ld->setAttr(kPipeliningFirstStage, builder.getUnitAttr());
+        st->setAttr(kPipeliningFirstStage, builder.getUnitAttr());
       }
       if (copyToWorkgroupMemory) {
         forOp->setAttr(kPipeliningLoopMarker, builder.getUnitAttr());
