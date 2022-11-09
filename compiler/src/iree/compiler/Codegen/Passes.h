@@ -144,7 +144,7 @@ std::unique_ptr<OperationPass<func::FuncOp>> createGPUMultiBuffering(
 
 /// Apply software pipelining.
 std::unique_ptr<OperationPass<func::FuncOp>> createGPUPipeliningPass(
-    bool epiloguePeeling = true, unsigned depth = 1);
+    bool epiloguePeeling = true, unsigned depth = 1, unsigned storeStage = 1);
 
 /// Converts vector ops to gpu dialect.
 std::unique_ptr<OperationPass<func::FuncOp>> createWorkGroupSwizzle(
@@ -466,7 +466,8 @@ void addSPIRVCooperativeMatrixVectorizePassPipeline(OpPassManager &pm);
 /// distributing to invocations and vectorizing. Each invocation handles a
 /// vector.
 void addSPIRVMatmulPromoteVectorizePassPipeline(OpPassManager &pm,
-                                                unsigned pipelineDepth);
+                                                unsigned pipelineDepth,
+                                                unsigned storeStage);
 
 /// Pass pipeline to lower IREE HAL executables by tiling and distributing
 /// reduction to workgroups and then subgroups.

@@ -26,6 +26,7 @@ namespace iree_compiler {
 
 // By default don't do any pipelining
 constexpr unsigned defaultSoftwarePipelineDepth = 1;
+constexpr unsigned defaultSoftwarePipelineStoreStage = 1;
 
 namespace detail {
 
@@ -42,7 +43,8 @@ LogicalResult setMatmulOpConfig(
     spirv::ResourceLimitsAttr limits, linalg::LinalgOp linalgOp,
     std::array<int64_t, 2> bestWorkgroupSizeXY,
     std::array<int64_t, 3> bestThreadTileSizeMNK, bool enablePromotion = false,
-    unsigned softwarePipelineDepth = defaultSoftwarePipelineDepth);
+    unsigned softwarePipelineDepth = defaultSoftwarePipelineDepth,
+    unsigned softwarePipelineStoreStage = defaultSoftwarePipelineStoreStage);
 
 /// Sets CodeGen configuration for GPUs from a specific vendor.
 ///

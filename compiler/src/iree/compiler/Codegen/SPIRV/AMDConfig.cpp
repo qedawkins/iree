@@ -30,6 +30,7 @@ constexpr unsigned numSubgroupsPerWorkgroup = 4;
 constexpr unsigned numTilesPerSubgroupDim = 2;
 
 constexpr unsigned AMDSoftwarePipelineDepth = 2;
+constexpr unsigned AMDSoftwarePipelineStoreStage = 0;
 
 namespace mlir {
 namespace iree_compiler {
@@ -282,7 +283,8 @@ static LogicalResult setAMDMatmulConfig(linalg::LinalgOp op,
     threadMNK = {4, 4, 32};
   }
   return setMatmulOpConfig(limits, op, workgroupXY, threadMNK,
-                           /*enablePromotion=*/true, AMDSoftwarePipelineDepth);
+                           /*enablePromotion=*/true, AMDSoftwarePipelineDepth,
+                           AMDSoftwarePipelineStoreStage);
 }
 
 // RDNA architecture:
