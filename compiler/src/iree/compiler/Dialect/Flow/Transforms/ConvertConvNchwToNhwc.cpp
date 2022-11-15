@@ -33,11 +33,10 @@ namespace Flow {
 
 using TransposeIndices = SmallVector<int64_t, 4>;
 
+static const StringLiteral transposeEmptyMarker = "__nchw_to_nhwc_init__";
 static const StringLiteral transposePropagateUpMarker = "__nchw_to_nhwc_up__";
 static const StringLiteral transposePropagateDownMarker =
     "__nchw_to_nhwc_down__";
-static const StringLiteral transposeEmptyMarker =
-    "__nchw_to_nhwc_tensor_empty__";
 
 static TransposeIndices invertIndices(TransposeIndices targetIndices) {
   auto rank = targetIndices.size();
@@ -52,6 +51,7 @@ static TransposeIndices getTransposeIndices(linalg::TransposeOp op) {
   return llvm::to_vector(op.getPermutation());
 }
 
+// Get the transpose indices if the given input comes from a transpose and is marked to propagate down.
 static Optional<TransposeIndices> getIndicesFromInput(Value input) {
   auto parent = input.getDefiningOp<linalg::TransposeOp>();
   if (parent && parent->hasAttr(transposePropagateDownMarker))
@@ -59,6 +59,7 @@ static Optional<TransposeIndices> getIndicesFromInput(Value input) {
   return llvm::None;
 }
 
+// Get the transpose indices if the given output is used by at least one transpose and that transpose is marked to propagate up. Additionally don't propagate if there are conflicting transposes.
 static Optional<TransposeIndices> getIndicesFromOutput(Value output) {
   Optional<linalg::TransposeOp> transposedOut;
   if (llvm::all_of(output.getUses(), [&transposedOut](const OpOperand &use) {
@@ -81,7 +82,7 @@ static Optional<TransposeIndices> getIndicesFromOutput(Value output) {
   return llvm::None;
 }
 
-// Helper to shuffle vectors according to the tag type
+// Helper to shuffle vectors according to the transpose indices.
 template <typename T>
 static SmallVector<T> shuffleFromIndices(SmallVector<T> unshuffled,
                                          TransposeIndices targetIndices) {
@@ -96,7 +97,7 @@ static SmallVector<T> shuffleFromIndices(SmallVector<T> unshuffled,
   return shuffled;
 }
 
-// Transpose the input tensor based on the given permutation indices.
+// Transpose the given tensor based on the given transpose indices. Marks the created transpose based on the propagation direction.
 static Value createTranspose(PatternRewriter &rewriter, Location loc,
                              Value input, TransposeIndices targetIndices,
                              bool propagateUp) {
@@ -493,6 +494,7 @@ struct ConvertConvNchwToNhwcPass
     Operation *funcOp = getOperation();
     MLIRContext *context = &getContext();
 
+
     {
       RewritePatternSet patterns(context);
       patterns.insert<ConvertLinalgConvNchwFchw>(context);
@@ -516,9 +518,7 @@ struct ConvertConvNchwToNhwcPass
       FrozenRewritePatternSet frozenPatterns(std::move(patterns));
 
       SmallVector<Operation *> reverseOps(llvm::reverse(ops));
-      if (!applyOpPatternsAndFold(reverseOps, frozenPatterns, false)) {
-        return signalPassFailure();
-      }
+      (void)applyOpPatternsAndFold(reverseOps, frozenPatterns, false);
     }
 
     // Propagate transposes down the graph.
@@ -526,25 +526,21 @@ struct ConvertConvNchwToNhwcPass
       RewritePatternSet patterns(context);
       patterns.insert<PropagateThroughTensorPadPattern>(context, false);
       patterns.insert<PropagateThroughLinalgFillPattern>(context, false);
-      if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
-        return signalPassFailure();
-      }
+      (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
     }
 
+    // Cancel out transposes.
     {
       RewritePatternSet patterns(context);
       patterns.insert<CancelNCHWToNHWCTransposePattern>(context);
-      if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
-        return signalPassFailure();
-      }
+      (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
     }
 
+    // Generalize remaining transposes to allow fusion with other ops.
     {
       RewritePatternSet patterns(context);
       patterns.insert<GeneralizeTransposeOpPattern>(context);
-      if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
-        return signalPassFailure();
-      }
+      (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
     }
   }
 };
