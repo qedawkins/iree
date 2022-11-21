@@ -74,7 +74,7 @@ static bool isFusedWithUnbufferableOp(linalg::LinalgOp matmul) {
     }
 
     // This is a conservative approach in case bufferization produces an intermediate buffer that prevents multi-buffering from working.
-    if (linalgOp->getNumResults() != 1 || !OpTrait::hasElementwiseMappableTraits(linalgOp) || getResultBits(linalgOp) != matmulResultBits) {
+    if (linalgOp->getNumResults() != 1 || getResultBits(linalgOp) != matmulResultBits) {
       fusedWithUnbufferableOps = true;
       return WalkResult::interrupt();
     }
