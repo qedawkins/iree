@@ -217,7 +217,7 @@ static void buildOptionalPreprocessingPassPipeline(OpPassManager &passManager) {
                          })
       // Transpose B layout to optimize mmt.
       .addPredicatedPass(clEnableTransposeMatmulLayout,
-                        IREE::Flow::createConvertLinalgMatmulToMmtPass)
+                         IREE::Flow::createConvertLinalgMatmulToMmtPass)
       .addPredicatedPass(
           !clMmt4dTargetOptions.empty(),
           []() {
@@ -328,7 +328,7 @@ void buildFlowTransformPassPipeline(OpPassManager &passManager,
   // Module pass to outline the dispatch regions into their own functions
   // wrapped in executables.
   passManager.addPass(IREE::Flow::createOutlineDispatchRegionsPass());
-  if(clEnableTransposeMatmulLayout) {
+  if (clEnableTransposeMatmulLayout) {
     passManager.addPass(IREE::Flow::createGeneralizeAndFusePass());
   }
 
