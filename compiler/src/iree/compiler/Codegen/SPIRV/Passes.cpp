@@ -337,10 +337,6 @@ void addSPIRVMatmulPromoteVectorizePassPipeline(OpPassManager &pm,
   // Tile and distribute to GPU invocations.
   nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVTileAndPromotePass());
 
-  if (pipelineDepth > 1 || storeStage == 0)
-    nestedModulePM.addNestedPass<func::FuncOp>(createGPUMultiBuffering(
-        storeStage == 0 ? pipelineDepth + 1 : pipelineDepth));
-
   nestedModulePM.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
   nestedModulePM.addNestedPass<func::FuncOp>(
       createGPUDistributeSharedMemoryCopy());
@@ -352,6 +348,10 @@ void addSPIRVMatmulPromoteVectorizePassPipeline(OpPassManager &pm,
 
   nestedModulePM.addNestedPass<func::FuncOp>(
       createRemoveSingleIterationLoopPass());
+
+  if (pipelineDepth > 1 || storeStage == 0)
+    nestedModulePM.addNestedPass<func::FuncOp>(createGPUMultiBuffering(
+        storeStage == 0 ? pipelineDepth + 1 : pipelineDepth));
 
   nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVVectorizePass());
   nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());

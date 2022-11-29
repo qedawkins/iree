@@ -55,32 +55,63 @@ bool isMatmulOrBatchMatmul(linalg::LinalgOp linalgOp) {
          llvm::is_contained({2u, 3u}, linalgOp.getNumParallelLoops());
 }
 
-// Check if the given linalg op is fused with another op that may block
-// multi-buffering
-static bool isFusedWithUnbufferableOp(linalg::LinalgOp matmul) {
-  func::FuncOp entryPoint = matmul->getParentOfType<func::FuncOp>();
+// Check if the given linalg op can be multi-buffered. If it is fused with another op that requires an additional allocation then this will return false.
+static bool canBeMultiBuffered(linalg::LinalgOp matmul) {
+  if (matmul->getNumResults() != 1)
+    return true;
 
-  auto getResultBits = [](linalg::LinalgOp linalgOp) {
-    auto shapedType = linalgOp->getResult(0).getType().dyn_cast<ShapedType>();
-    return shapedType.getElementType().getIntOrFloatBitWidth();
-  };
+  //func::FuncOp entryPoint = matmul->getParentOfType<func::FuncOp>();
 
-  auto matmulResultBits = getResultBits(matmul);
-  bool fusedWithUnbufferableOps = false;
-  entryPoint.walk([&](linalg::LinalgOp linalgOp) {
-    if (linalgOp == matmul || isMatmulOrBatchMatmul(linalgOp) ||
-        isa<linalg::FillOp>(linalgOp)) {
-      return WalkResult::advance();
-    }
+  //auto getResultBits = [](linalg::LinalgOp linalgOp) {
+  //  auto shapedType = linalgOp->getResult(0).getType().cast<ShapedType>();
+  //  return shapedType.getElementType().getIntOrFloatBitWidth();
+  //};
 
-    // This is a conservative approach in case bufferization produces an intermediate buffer that prevents multi-buffering from working.
-    if (linalgOp->getNumResults() != 1 || getResultBits(linalgOp) != matmulResultBits) {
-      fusedWithUnbufferableOps = true;
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-  return fusedWithUnbufferableOps;
+  //auto matmulResultBits = getResultBits(matmul);
+  //bool fusedWithUnbufferableOps = false;
+  //entryPoint.walk([&](linalg::LinalgOp linalgOp) {
+  //  if (linalgOp == matmul || isMatmulOrBatchMatmul(linalgOp) ||
+  //      isa<linalg::FillOp>(linalgOp)) {
+  //    return WalkResult::advance();
+  //  }
+
+  //  // This is a conservative approach in case bufferization produces an intermediate buffer that prevents multi-buffering from working.
+  //  if (linalgOp->getNumResults() != 1 || getResultBits(linalgOp) != matmulResultBits) {
+  //    fusedWithUnbufferableOps = true;
+  //    return WalkResult::interrupt();
+  //  }
+  //  return WalkResult::advance();
+  //});
+
+  //auto walkLinalgOps = [](OpOperand *output) {
+  //  auto shapedType = linalgOp->getResult(0).getType().cast<ShapedType>();
+  //  return shapedType.getElementType().getIntOrFloatBitWidth();
+  //};
+
+  //auto resultType = matmul->getResult(0).getType().dyn_cast<RankedTensorType>();
+
+  //int emptyCount = 0;
+  //bool canBeMultiBuffered = true;
+  //entryPoint.walk([&](tensor::EmptyOp emptyOp) {
+  //  if (emptyCount) {
+  //    canBeMultiBuffered = false;
+  //    return WalkResult::interrupt();
+  //  }
+
+  //  bool usedByMatmul = false;
+
+  //  RankedTensorType emptyOpType = emptyOp.getType();
+  //  if (emptyOpType != resultType) {
+  //    canBeMultiBuffered = false;
+  //    return WalkResult::interrupt();
+  //  }
+
+  //  emptyCount++;
+  //  return WalkResult::advance();
+  //});
+  //return fusedWithUnbufferableOps;
+  //return canBeMultiBuffered;
+  return true;
 }
 
 //===----------------------------------------------------------------------===//
@@ -628,11 +659,11 @@ LogicalResult setMatmulOpConfig(spirv::ResourceLimitsAttr limits,
   auto pipelineDepth = softwarePipelineDepth ? softwarePipelineDepth : 1;
   auto storeStage = softwarePipelineStoreStage;
 
-  // Check whether multi-buffering is possible.
-  if (isFusedWithUnbufferableOp(op)) {
-    pipelineDepth = 1;
-    storeStage = 1;
-  }
+  //// Check whether multi-buffering is possible.
+  //if ((pipelineDepth != 1 || storeStage != 1) && !canBeMultiBuffered(op)) {
+  //  pipelineDepth = 1;
+  //  storeStage = 1;
+  //}
 
   // Try to adjust tiling sizes to fit in shared memory.
   auto usePromotionPipeline =
