@@ -41,6 +41,14 @@ static Value createMul(Location loc, Value x, Value y, bool isInt,
   return builder.create<arith::MulFOp>(loc, x, y);
 }
 
+static Value castAndComputeIndex(Location loc, OpBuilder &builder, Value rowIndex, Value colIndex, Value stride) {
+  auto row = builder.create<arith::IndexCastOp>(loc, builder.getI64Type(), rowIndex);
+  auto col = builder.create<arith::IndexCastOp>(loc, builder.getI64Type(), colIndex);
+  auto strided = createMul(loc, row, stride, true, builder);
+  auto index = createAdd(loc, strided, col, true, builder);
+  return builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), index);
+}
+
 namespace {
 
 // Convert linalg.conv_2d_nhwc_hwcf into linalg.generic (for img2col packing)
@@ -423,13 +431,18 @@ class ConvertConv2DNchwFchw final
     AffineExpr nDim, icDim, khDim, kwDim, ohDim, owDim;
     bindDims(getContext(), nDim, icDim, khDim, kwDim, ohDim, owDim);
 
-    auto shSym = rewriter.getAffineConstantExpr(
-        convOp.getStrides().getValues<int64_t>()[0]);
-    auto swSym = rewriter.getAffineConstantExpr(
-        convOp.getStrides().getValues<int64_t>()[1]);
+    //auto shSym = rewriter.getAffineConstantExpr(
+    //    convOp.getStrides().getValues<int64_t>()[0]);
+    //auto swSym = rewriter.getAffineConstantExpr(
+    //    convOp.getStrides().getValues<int64_t>()[1]);
 
-    SmallVector<AffineExpr, 4> inputExprs = {nDim, icDim, ohDim * shSym + khDim,
-                                             owDim * swSym + kwDim};
+    //SmallVector<AffineExpr, 4> inputExprs = {nDim, icDim, ohDim * shSym + khDim,
+    //                                         owDim * swSym + kwDim};
+
+    auto shVal = rewriter.create<arith::ConstantOp>(loc,
+        rewriter.getI64Type(), rewriter.getI64IntegerAttr(convOp.getStrides().getValues<int64_t>()[0]));
+    auto swVal = rewriter.create<arith::ConstantOp>(loc,
+        rewriter.getI64Type(), rewriter.getI64IntegerAttr(convOp.getStrides().getValues<int64_t>()[1]));
 
     auto nloops = colTensorShape.size();
 
@@ -437,16 +450,46 @@ class ConvertConv2DNchwFchw final
     auto reduction = utils::IteratorType::reduction;
     SmallVector<utils::IteratorType, 3> img2colIterators(nloops, parallel);
 
-    SmallVector<AffineMap, 4> img2colIndexingMaps = {
-        AffineMap::get(nloops, 0, inputExprs, rewriter.getContext()),
-        AffineMap::getMultiDimIdentityMap(nloops, rewriter.getContext())};
+    //SmallVector<AffineMap, 4> img2colIndexingMaps = {
+    //    AffineMap::get(nloops, 0, inputExprs, rewriter.getContext()),
+    //    AffineMap::getMultiDimIdentityMap(nloops, rewriter.getContext())};
+    AffineMap img2colIndexingMap = AffineMap::getMultiDimIdentityMap(nloops, rewriter.getContext());
 
+    //auto img2ColTensor = rewriter.create<linalg::GenericOp>(
+    //    loc, colTensor.getType(),
+    //    /*inputs=*/input, /*outputs=*/colTensor, img2colIndexingMaps,
+    //    img2colIterators,
+    //    [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
     auto img2ColTensor = rewriter.create<linalg::GenericOp>(
         loc, colTensor.getType(),
-        /*inputs=*/input, /*outputs=*/colTensor, img2colIndexingMaps,
+        /*inputs=*/ValueRange{}, /*outputs=*/colTensor, img2colIndexingMap,
         img2colIterators,
         [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-          nestedBuilder.create<linalg::YieldOp>(nestedLoc, args[0]);
+          SmallVector<Value> extractionIndices;
+
+          // batch dim
+          extractionIndices.push_back(
+                  nestedBuilder.create<linalg::IndexOp>(loc, 0));
+          // input channels
+          extractionIndices.push_back(
+                  nestedBuilder.create<linalg::IndexOp>(loc, 1));
+
+          // height
+          auto khIndex = nestedBuilder.create<linalg::IndexOp>(loc, 2);
+          auto ohIndex = nestedBuilder.create<linalg::IndexOp>(loc, 4);
+          extractionIndices.push_back(
+              castAndComputeIndex(loc, nestedBuilder, ohIndex, khIndex, shVal));
+
+          // width
+          auto kwIndex = nestedBuilder.create<linalg::IndexOp>(loc, 3);
+          auto owIndex = nestedBuilder.create<linalg::IndexOp>(loc, 5);
+          extractionIndices.push_back(
+              castAndComputeIndex(loc, nestedBuilder, owIndex, kwIndex, swVal));
+
+          Value retVal = nestedBuilder.create<tensor::ExtractOp>(loc, input, extractionIndices);
+
+          nestedBuilder.create<linalg::YieldOp>(nestedLoc, retVal);
+          //nestedBuilder.create<linalg::YieldOp>(nestedLoc, args[0]);
         });
 
     SmallVector<ReassociationIndices> filterReassocIndices = {{0}, {1, 2, 3}};
