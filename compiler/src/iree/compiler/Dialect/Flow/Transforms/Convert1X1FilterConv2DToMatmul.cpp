@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Dialect/Flow/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
@@ -16,6 +17,18 @@ namespace mlir {
 namespace iree_compiler {
 namespace IREE {
 namespace Flow {
+
+static Value createAdd(Location loc, Value x, Value y, bool isInt,
+                       OpBuilder &builder) {
+  if (isInt) return builder.create<arith::AddIOp>(loc, x, y);
+  return builder.create<arith::AddFOp>(loc, x, y);
+}
+
+static Value createMul(Location loc, Value x, Value y, bool isInt,
+                       OpBuilder &builder) {
+  if (isInt) return builder.create<arith::MulIOp>(loc, x, y);
+  return builder.create<arith::MulFOp>(loc, x, y);
+}
 
 namespace {
 
@@ -71,8 +84,8 @@ class Convert1x1FilterConvToMatmul : public OpRewritePattern<Conv2DOpType> {
     if (filterShape[khIndex] != 1 || filterShape[kwIndex] != 1)
       return failure();
 
-    // TODO(ataei): Support conversion to linalg.batch_matmul.
-    if (inputShape[0] != 1) return failure();
+    //// TODO(ataei): Support conversion to linalg.batch_matmul.
+    //if (inputShape[0] != 1) return failure();
 
     if (!llvm::all_of(convOp.getStrides(), [](APInt element) {
           return element.getSExtValue() == 1;
@@ -89,9 +102,11 @@ class Convert1x1FilterConvToMatmul : public OpRewritePattern<Conv2DOpType> {
       return a * b;
     };
 
+    bool is_batched = inputShape[0] > 1;
+
     SmallVector<ReassociationIndices, 4> reassociationInputOutputIndices;
     SmallVector<ReassociationIndices, 4> reassociationFilterIndices;
-    SmallVector<int64_t> reshapedInputShape(2, 0);
+    SmallVector<int64_t> reshapedInputShape(is_batched ? 3 : 2, 0);
     SmallVector<int64_t> reshapedFilterShape(2, 0);
     SmallVector<int64_t> reshapedOutputShape(2, 0);
     if (isNHWC) {
@@ -111,15 +126,30 @@ class Convert1x1FilterConvToMatmul : public OpRewritePattern<Conv2DOpType> {
       // Generate reassociation indices.
       reassociationInputOutputIndices = {{nIndex, ocIndex}, {ohIndex, owIndex}};
       reassociationFilterIndices = {{kfIndex}, {kcIndex, khIndex, kwIndex}};
+      if (is_batched) {
+        reassociationInputOutputIndices = {{nIndex}, {ocIndex}, {ohIndex, owIndex}};
+      }
 
       // Generate matmul shapes from 1x1 conv.
-      reshapedInputShape = {
-          inputShape[ocIndex],
-          combineDims(inputShape[ohIndex], inputShape[owIndex])};
-      reshapedFilterShape = {filterShape[kfIndex], filterShape[kcIndex]};
-      reshapedOutputShape = {
-          outputShape[ocIndex],
-          combineDims(outputShape[ohIndex], outputShape[owIndex])};
+      if (!is_batched) {
+        reshapedInputShape = {
+            inputShape[ocIndex],
+            combineDims(inputShape[ohIndex], inputShape[owIndex])};
+        reshapedFilterShape = {filterShape[kfIndex], filterShape[kcIndex]};
+        reshapedOutputShape = {
+            outputShape[ocIndex],
+            combineDims(outputShape[ohIndex], outputShape[owIndex])};
+      } else {
+        reshapedInputShape = {
+            inputShape[nIndex],
+            inputShape[ocIndex],
+            combineDims(inputShape[ohIndex], inputShape[owIndex])};
+        reshapedFilterShape = {filterShape[kfIndex], filterShape[kcIndex]};
+        reshapedOutputShape = {
+            outputShape[nIndex],
+            outputShape[ocIndex],
+            combineDims(outputShape[ohIndex], outputShape[owIndex])};
+      }
     }
 
     auto reshapedInputType = RankedTensorType::get(
@@ -134,6 +164,7 @@ class Convert1x1FilterConvToMatmul : public OpRewritePattern<Conv2DOpType> {
     Value input = convOp.getDpsInputOperand(0)->get();
     Value filter = convOp.getDpsInputOperand(1)->get();
     Value output = convOp.getDpsInitOperand(0)->get();
+    auto outputType = output.getType().cast<ShapedType>();
     auto loc = convOp.getLoc();
 
     Value reshapedInput = rewriter.create<tensor::CollapseShapeOp>(
@@ -149,11 +180,36 @@ class Convert1x1FilterConvToMatmul : public OpRewritePattern<Conv2DOpType> {
     } else if (isNCHW) {
       matmulInput = {reshapedFilter, reshapedInput};
     }
-    auto matmulResult = rewriter.create<linalg::MatmulOp>(
-        loc, reshapedOutputType, matmulInput, ArrayRef<Value>{reshapedOutput});
+    Value matmulResult;
+    if (inputShape[0] == 1) {
+      matmulResult = rewriter.create<linalg::MatmulOp>(
+          loc, reshapedOutputType, matmulInput, ArrayRef<Value>{reshapedOutput}).getResults()[0];
+    } else {
+      auto parallel = utils::IteratorType::parallel;
+      auto reduction = utils::IteratorType::reduction;
+      AffineExpr bDim, mDim, nDim, kDim;
+      bindDims(convOp.getContext(), bDim, mDim, nDim, kDim);
+      auto lhsMap = AffineMap::get(4, 0, {mDim, kDim}, convOp.getContext());
+      auto rhsMap = AffineMap::get(4, 0, {bDim, kDim, nDim}, convOp.getContext());
+      auto resultMap = AffineMap::get(4, 0, {bDim, mDim, nDim}, convOp.getContext());
+      SmallVector<utils::IteratorType> genericIterators = {parallel, parallel,
+                                                           parallel, reduction};
+      bool isInt = outputType.getElementType().isa<IntegerType>();
+      auto genericOp = rewriter.create<linalg::GenericOp>(
+          loc, reshapedOutputType,
+          /*inputs=*/matmulInput,
+          /*outputs=*/ValueRange{reshapedOutput},
+          ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators,
+          [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+            Value mul = createMul(loc, args[0], args[1], isInt, nestedBuilder);
+            Value add = createAdd(loc, mul, args[2], isInt, nestedBuilder);
+            nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
+          });
+      matmulResult = genericOp.getResults().front();
+    }
 
     auto reshapedResult = rewriter.create<tensor::ExpandShapeOp>(
-        loc, outputShapeType, matmulResult.getResults()[0],
+        loc, outputShapeType, matmulResult,
         reassociationInputOutputIndices);
 
     rewriter.replaceOp(convOp, ArrayRef<Value>{reshapedResult});
