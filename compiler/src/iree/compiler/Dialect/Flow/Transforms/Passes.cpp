@@ -244,9 +244,9 @@ void buildFlowTransformPassPipeline(OpPassManager &passManager,
   FunctionLikeNest(passManager)
       .addPredicatedPass(clEnableConvNchwToNhwc,
                          IREE::Flow::createConvertConvNchwToNhwcPass)
-      .addPass(IREE::Flow::createConvert1X1FilterConv2DToMatmulPass)
       .addPass(IREE::Flow::createDetachElementwiseFromNamedOpsPass)
-      .addPass(mlir::createLinalgNamedOpConversionPass);
+      .addPass(mlir::createLinalgNamedOpConversionPass)
+      .addPass(IREE::Flow::createConvert1X1FilterConv2DToMatmulPass);
 
   // Optional pre-processing passes.
   buildOptionalPreprocessingPassPipeline(passManager);
