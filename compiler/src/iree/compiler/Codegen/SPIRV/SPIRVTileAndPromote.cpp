@@ -180,6 +180,7 @@ void SPIRVTileAndPromotePass::runOnOperation() {
       return signalPassFailure();
     }
   }
+
   {
     RewritePatternSet patterns =
         linalg::getLinalgTilingCanonicalizationPatterns(context);

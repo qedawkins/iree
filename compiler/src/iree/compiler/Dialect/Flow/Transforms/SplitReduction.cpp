@@ -89,12 +89,19 @@ struct SplitReductionPass : public SplitReductionBase<SplitReductionPass> {
         &getContext(),
         [&](linalg::LinalgOp op) -> linalg::SplitReductionOptions {
           int64_t ratio = splitReductionRatio;
+          SmallVector<unsigned> reductionDims;
+          op.getReductionDims(reductionDims);
+          if (reductionDims.size() == 1) {
+            Optional<int64_t> dimSize = op.getStaticLoopRanges()[reductionDims[0]];
+            if (dimSize && ratio > 0 && (*dimSize/ratio % 16 != 0 || *dimSize <= 2048))
+              ratio = 0;
+          }
           if (auto attr = op->getAttrOfType<IntegerAttr>(kSplitKAttr))
             ratio = attr.getInt();
           if (ratio <= 1) return {int64_t(0), 0, /*innerParallel=*/false};
           // For matmul make the new parallel dimension first so that it looks
           // like a batch_matmul and can follow the same codegen.
-          if (isa<linalg::MatmulOp>(op))
+          if (isa<linalg::MatmulOp, linalg::BatchMatmulOp>(op))
             return {ratio, 0, /*innerParallel=*/false};
 	  else if (isa<linalg::GenericOp>(op)){
             SmallVector<unsigned> reductionDims;

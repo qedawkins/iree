@@ -193,6 +193,12 @@ def GPUDistributeSharedMemoryCopy :
   let constructor = "mlir::iree_compiler::createGPUDistributeSharedMemoryCopy()";
 }
 
+def GPUFoldMemRefAliases :
+    Pass<"iree-gpu-fold-memref-aliases", "func::FuncOp"> {
+  let summary = "Pass to fold memref.subview into gpu.subgroup_mma_load_matrix.";
+  let constructor = "mlir::iree_compiler::createGPUFoldMemRefAliasesPass()";
+}
+
 def GPUReduceBankConflicts :
     Pass<"iree-gpu-reduce-bank-conflicts", "func::FuncOp"> {
   let summary = "Pass to try to reduce the number of bank conflicts.";
@@ -487,6 +493,12 @@ def LLVMGPUTensorPad :
 def ConvertToSPIRV : Pass<"iree-convert-to-spirv", "ModuleOp"> {
   let summary = "Perform the final conversion to SPIR-V dialect";
   let constructor = "mlir::iree_compiler::createConvertToSPIRVPass()";
+}
+
+def SPIRVPrepareVectorToGPUSubgroupMMA :
+    Pass<"iree-spirv-prepare-vector-to-gpu-subgroup-mma-ops", "func::FuncOp"> {
+  let summary = "Pass to prepare vector ops for conversion to GPU subgroup MMA ops.";
+  let constructor = "mlir::iree_compiler::createSPIRVPrepareVectorToGPUSubgroupMMAOpsPass()";
 }
 
 def SPIRVVectorToGPUSubgroupMMA :

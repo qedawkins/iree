@@ -307,6 +307,10 @@ void addSPIRVCooperativeMatrixVectorizePassPipeline(OpPassManager &pm,
   nestedModulePM.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
   nestedModulePM.addNestedPass<func::FuncOp>(
       createGPUDistributeSharedMemoryCopy());
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createRemoveSingleIterationLoopPass());
+  nestedModulePM.addPass(createCanonicalizerPass());
+  nestedModulePM.addPass(createCSEPass());
 
   // Reduce bank conflicts by padding.
   nestedModulePM.addNestedPass<func::FuncOp>(
@@ -333,11 +337,17 @@ void addSPIRVCooperativeMatrixVectorizePassPipeline(OpPassManager &pm,
   // cooperative ops in the next step.
   nestedModulePM.addPass(memref::createFoldMemRefAliasOpsPass());
 
-  nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createSPIRVPrepareVectorToGPUSubgroupMMAOpsPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createForOpCanonicalizationPass());
   nestedModulePM.addPass(createCanonicalizerPass());
   nestedModulePM.addPass(createCSEPass());
+
   nestedModulePM.addNestedPass<func::FuncOp>(
       createSPIRVVectorToGPUSubgroupMMAOpsPass());
+  //nestedModulePM.addPass(memref::createFoldMemRefAliasOpsPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(createGPUFoldMemRefAliasesPass());
   nestedModulePM.addPass(createCanonicalizerPass());
   nestedModulePM.addPass(createCSEPass());
   nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVVectorizePass());

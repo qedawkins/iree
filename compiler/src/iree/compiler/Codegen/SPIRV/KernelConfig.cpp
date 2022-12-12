@@ -49,8 +49,10 @@ using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
 //===----------------------------------------------------------------------===//
 
 bool isMatmulOrBatchMatmul(linalg::LinalgOp linalgOp) {
+  //return linalg::isaContractionOpInterface(linalgOp) &&
+  //       llvm::is_contained({2u, 3u}, linalgOp.getNumParallelLoops());
   return linalg::isaContractionOpInterface(linalgOp) &&
-         llvm::is_contained({2u, 3u}, linalgOp.getNumParallelLoops());
+         linalgOp.getNumParallelLoops() >= 2;
 }
 
 // Check if the given linalg op is fused with another op that may result
@@ -277,7 +279,7 @@ LogicalResult setConvOpConfig(linalg::LinalgOp linalgOp,
 /// Given the linalg `op` with `lhsShape` and `rhsShape`, tries to treat as a
 /// (batch) matmul like op and deduce the index of the loop corresponding to
 /// B/M/N/K dimension respectively. Returns -1 as the index if unable to deduce.
-std::tuple<int, int, int, int> getMatmulBMNKIndex(linalg::LinalgOp op,
+std::tuple<SmallVector<int>, int, int, int> getMatmulBMNKIndex(linalg::LinalgOp op,
                                                   int *lastParallelDim) {
   OpOperand *lhs = op.getDpsInputOperand(0);
   OpOperand *rhs = op.getDpsInputOperand(1);
@@ -292,7 +294,8 @@ std::tuple<int, int, int, int> getMatmulBMNKIndex(linalg::LinalgOp op,
       [&](int i) { return op.getMatchingIndexingMap(rhs).getDimPosition(i); }));
 
   // Figure out what dimension each loop corresponds to.
-  int bIndex = -1, mIndex = -1, nIndex = -1, kIndex = -1;
+  SmallVector<int> bIndices;
+  int mIndex = -1, nIndex = -1, kIndex = -1;
   for (unsigned i = 0; i < op.getNumLoops(); ++i) {
     if (linalg::isReductionIterator(op.getIteratorTypesArray()[i])) {
       kIndex = i;
@@ -302,26 +305,26 @@ std::tuple<int, int, int, int> getMatmulBMNKIndex(linalg::LinalgOp op,
     const bool inLHS = llvm::is_contained(lhsLoopIndices, i);
     const bool inRHS = llvm::is_contained(rhsLoopIndices, i);
     if (inLHS && inRHS) {
-      bIndex = i;
+      bIndices.push_back(i);
     } else if (inLHS) {
       // For cases where we have two parallel dimensions only accessed by
       // the LHS, treat the outer one of them as the batch dimension.
-      if (mIndex >= 0 && bIndex < 0) bIndex = mIndex;
+      if (mIndex >= 0) bIndices.push_back(mIndex);
       mIndex = i;
     } else if (inRHS) {
       // For cases where we have two parallel dimensions only accessed by
       // the RHS, treat the outer one of them as the batch dimension.
-      if (nIndex >= 0 && bIndex < 0) bIndex = nIndex;
+      if (nIndex >= 0) bIndices.push_back(nIndex);
       nIndex = i;
     }
     if (lastParallelDim) *lastParallelDim = i;
   }
 
-  LLVM_DEBUG({
-    llvm::dbgs() << "(B, M, N, K) indices = (" << bIndex << ", " << mIndex
-                 << ", " << nIndex << ", " << kIndex << ")\n";
-  });
-  return {bIndex, mIndex, nIndex, kIndex};
+  //LLVM_DEBUG({
+  //  llvm::dbgs() << "(B, M, N, K) indices = (" << bIndex << ", " << mIndex
+  //               << ", " << nIndex << ", " << kIndex << ")\n";
+  //});
+  return {bIndices, mIndex, nIndex, kIndex};
 }
 
 /// Decides the tiling and distribution parameters for matmul's N dimension to
@@ -548,13 +551,13 @@ LogicalResult setMatmulOpConfig(spirv::ResourceLimitsAttr limits,
   if (llvm::any_of(lhsShape, ShapedType::isDynamic)) return success();
   if (llvm::any_of(rhsShape, ShapedType::isDynamic)) return success();
 
-  assert(llvm::is_contained({2u, 3u}, op.getNumParallelLoops()));
+  assert(op.getNumParallelLoops() >= 2);
 
   int lastParallelDim = -1;
-  const auto [bIndex, mIndex, nIndex, kIndex] =
+  const auto [bIndices, mIndex, nIndex, kIndex] =
       getMatmulBMNKIndex(op, &lastParallelDim);
   if (mIndex < 0 || nIndex < 0 || kIndex < 0) return success();
-  const bool isBM = bIndex >= 0;
+  const bool isBM = bIndices.size() > 0;
 
   SmallVector<int64_t, 4> loopRanges = op.getStaticLoopRanges();
   const unsigned numLoops = loopRanges.size();
@@ -597,7 +600,11 @@ LogicalResult setMatmulOpConfig(spirv::ResourceLimitsAttr limits,
   SmallVector<int64_t> workgroupTileSizes(numLoops, 0);
   SmallVector<int64_t> reductionTileSizes(numLoops, 0);
 
-  if (isBM) workgroupTileSizes[bIndex] = 1;
+  if (isBM) {
+    for (auto bIndex : bIndices)
+      workgroupTileSizes[bIndex] = 1;
+    //workgroupTileSizes[bIndices.back()] = 1;
+  }
 
   if (!tileMatmulNToWorkgroupX(dimN, bestThreadN, residualThreads, bestX,
                                residualTilingFactor, workgroupSize[0],
@@ -648,7 +655,9 @@ LogicalResult setMatmulOpConfig(spirv::ResourceLimitsAttr limits,
 
   SmallVector<int64_t> threadTileSizes(numLoops, 0);
   if (isBM) {
-    threadTileSizes[bIndex] = workgroupTileSizes[bIndex] / workgroupSize[2];
+    for (auto bIndex : bIndices)
+      threadTileSizes[bIndex] = 0;
+    threadTileSizes[bIndices.back()] = workgroupTileSizes[bIndices.front()] / workgroupSize[2];
   }
   threadTileSizes[mIndex] = workgroupTileSizes[mIndex] / workgroupSize[1];
   threadTileSizes[nIndex] = workgroupTileSizes[nIndex] / workgroupSize[0];
@@ -809,21 +818,21 @@ LogicalResult setCooperativeMatrixConfig(
   Value init = op.getDpsInitOperand(0)->get();
 
   int lastParallelDim = -1;
-  const auto [bIndex, mIndex, nIndex, kIndex] =
+  const auto [bIndices, mIndex, nIndex, kIndex] =
       getMatmulBMNKIndex(op, &lastParallelDim);
   if (mIndex < 0 || nIndex < 0 || kIndex < 0) return success();
-  const bool isBM = bIndex >= 0;
+  const bool isBM = bIndices.size() > 0;
 
   SmallVector<int64_t, 4> loopRanges = op.getStaticLoopRanges();
 
   const int64_t dimM = loopRanges[mIndex];
   const int64_t dimK = loopRanges[kIndex];
   const int64_t dimN = loopRanges[nIndex];
-  LLVM_DEBUG({
-    llvm::dbgs() << "input matmul shape (B, M, N, K) = ("
-                 << (bIndex >= 0 ? loopRanges[bIndex] : -1) << ", " << dimM
-                 << ", " << dimN << ", " << dimK << ")\n";
-  });
+  //LLVM_DEBUG({
+  //  llvm::dbgs() << "input matmul shape (B, M, N, K) = ("
+  //               << (bIndex >= 0 ? loopRanges[bIndex] : -1) << ", " << dimM
+  //               << ", " << dimN << ", " << dimK << ")\n";
+  //});
 
   // TODO: Cooperative matrix support is fairly restricted. We can only have
   // a curated list of fused element wise ops as defined in the extension
@@ -856,18 +865,30 @@ LogicalResult setCooperativeMatrixConfig(
                                        coopMatSize->mWarpCount, 1};
 
   SmallVector<int64_t> vectorSizes(kIndex + 1, 0);
-  if (isBM) vectorSizes[bIndex] = 1;
+  if (isBM) {
+    for (auto bIndex : bIndices)
+      vectorSizes[bIndex] = 1;
+    //vectorSizes[bIndices.back()] = 1;
+  }
   vectorSizes[mIndex] = coopMatSize->mSize;
   vectorSizes[nIndex] = coopMatSize->nSize;
   vectorSizes[kIndex] = coopMatSize->kSize;
 
   SmallVector<int64_t> subgroupTileSizes(lastParallelDim + 1, 0);
-  if (isBM) subgroupTileSizes[bIndex] = 1;
+  if (isBM) {
+    for (auto bIndex : bIndices)
+      subgroupTileSizes[bIndex] = 1;
+    //subgroupTileSizes[bIndices.back()] = 1;
+  }
   subgroupTileSizes[mIndex] = coopMatSize->mTileCount * vectorSizes[mIndex];
   subgroupTileSizes[nIndex] = coopMatSize->nTileCount * vectorSizes[nIndex];
 
   SmallVector<int64_t> workgroupTileSizes(lastParallelDim + 1, 0);
-  if (isBM) workgroupTileSizes[bIndex] = 1;
+  if (isBM) {
+    for (auto bIndex : bIndices)
+      workgroupTileSizes[bIndex] = 1;
+    //workgroupTileSizes[bIndices.back()] = 1;
+  }
   workgroupTileSizes[mIndex] =
       coopMatSize->mWarpCount * subgroupTileSizes[mIndex];
   workgroupTileSizes[nIndex] =

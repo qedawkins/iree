@@ -18,6 +18,45 @@ namespace mlir {
 namespace iree_compiler {
 
 namespace {
+
+struct BubbleUpVectorBroadcastOp : public OpRewritePattern<vector::BroadcastOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::BroadcastOp broadcastOp,
+                                PatternRewriter &rewriter) const override {
+    auto transposeOp = broadcastOp.getSource().getDefiningOp<vector::TransposeOp>();
+    if (!transposeOp)
+      return failure();
+
+    auto transposeRank = transposeOp.getType().getRank();
+    auto broadcastRank = broadcastOp.getType().getRank();
+    SmallVector<int64_t> sourcePerm;
+    transposeOp.getTransp(sourcePerm);
+    SmallVector<int64_t> perm(broadcastRank, 0);
+    int64_t rankDiff = broadcastRank - transposeRank;
+    for (unsigned i = 0; i < broadcastRank; i++) {
+      if (i < rankDiff) {
+        perm[i] = i;
+        continue;
+      }
+      perm[i] = sourcePerm[i - rankDiff] + rankDiff;
+    }
+
+    auto transposeShape = transposeOp.getVectorType().getShape();
+    SmallVector<int64_t> broadcastShape(
+            cast<ShapedType>(broadcastOp.getResult().getType()).getShape());
+    for (unsigned i = 0; i < transposeRank; i++) {
+      broadcastShape[i + rankDiff] = transposeShape[i];
+    }
+    VectorType broadcastType = VectorType::get(broadcastShape,
+            transposeOp.getResultType().getElementType());
+    auto newBroadcastOp = rewriter.create<vector::BroadcastOp>(broadcastOp.getLoc(),
+            broadcastType, transposeOp.getVector());
+    rewriter.replaceOpWithNewOp<vector::TransposeOp>(broadcastOp, newBroadcastOp.getResult(), perm);
+    return success();
+  }
+};
+
 /// Applies tranformation to drop unit dims in destination vector.transfer_read
 /// destination so that the resulting vector is 2D.
 //
@@ -196,7 +235,7 @@ static LogicalResult contractOpFilter(Operation *op) {
 
 void populateVectorTransferToGPUMMAPreparationPatterns(
     RewritePatternSet &patterns) {
-  patterns.add<FlattenTransferReadOp>(patterns.getContext());
+  patterns.add<FlattenTransferReadOp, BubbleUpVectorBroadcastOp>(patterns.getContext());
 }
 
 void populateCombineVectorTransferReadBroadcastPatterns(

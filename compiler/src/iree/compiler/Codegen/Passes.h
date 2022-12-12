@@ -153,6 +153,10 @@ std::unique_ptr<OperationPass<func::FuncOp>> createMemrefCopyToLinalgPass();
 std::unique_ptr<OperationPass<func::FuncOp>>
 createGPUDistributeSharedMemoryCopy();
 
+/// Fold away memref.subview into subgroup_mma.
+std::unique_ptr<OperationPass<func::FuncOp>>
+createGPUFoldMemRefAliasesPass();
+
 /// Apply multi-buffering transformation.
 std::unique_ptr<OperationPass<func::FuncOp>> createGPUMultiBuffering(
     unsigned numBuffers = 5);
@@ -548,6 +552,10 @@ createSPIRVTileToCooperativeOpsPass();
 /// Pass to do vectorization suitable for lowering to SPIR-V cooperative ops.
 std::unique_ptr<OperationPass<func::FuncOp>>
 createSPIRVVectorizeToCooperativeOpsPass();
+
+/// Prepares vector ops for conversion to gpu subgroup MMA ops.
+std::unique_ptr<OperationPass<func::FuncOp>>
+createSPIRVPrepareVectorToGPUSubgroupMMAOpsPass();
 
 /// Converts vector ops to gpu subgroup MMA ops.
 std::unique_ptr<OperationPass<func::FuncOp>>

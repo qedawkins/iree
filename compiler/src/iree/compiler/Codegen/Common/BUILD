@@ -196,6 +196,7 @@ iree_compiler_cc_library(
         "DecomposeLinalgGeneric.cpp",
         "FoldAffineMinInDistributedLoops.cpp",
         "GPUDistributeSharedMemoryCopy.cpp",
+        "GPUFoldMemRefAliases.cpp",
         "GPUMultiBuffering.cpp",
         "GPUPatterns.cpp",
         "GPUPipelining.cpp",

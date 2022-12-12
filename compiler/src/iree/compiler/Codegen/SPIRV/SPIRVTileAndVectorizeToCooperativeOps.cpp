@@ -253,6 +253,69 @@ class CombineContractTranspose final
   }
 };
 
+//class FlattenMiddleParallelDim final
+//    : public OpRewritePattern<vector::ContractionOp> {
+// public:
+//  using OpRewritePattern<vector::ContractionOp>::OpRewritePattern;
+//
+//  LogicalResult matchAndRewrite(vector::ContractionOp op,
+//                                PatternRewriter &rewriter) const override {
+//    MLIRContext *ctx = op.getContext();
+//    Location loc = op.getLoc();
+//    std::array<Value, 3> sources = {op.getLhs(), op.getRhs(), op.getAcc()};
+//    SmallVector<AffineMap> newMaps;
+//    SmallVector<Value> newSources;
+//    for (auto source : llvm::enumerate(sources)) {
+//      auto map = op.getIndexingMapsArray()[source.index()];
+//      auto transferReadOp = source.value().getDefiningOp<vector::TransferReadOp>();
+//      if (!transferReadOp) {
+//        newSources.push_back(source.value());
+//        newMaps.push_back(map);
+//        continue;
+//      }
+//
+//      Value vector = transferReadOp.getVector();
+//      VectorType vectorType = vector.getType().cast<VectorType>();
+//      Value memref = transferReadOp.getSource();
+//      MemRefType sourceType = memref.getType().dyn_cast<MemRefType>();
+//      if (!sourceType)
+//        return failure();
+//
+//      auto vectorShape = vectorType.getShape();
+//      if (vectorShape.back() == 1)
+//        return failure();
+//
+//      int64_t firstNonUnitIndex = 0;
+//      for (auto i : llvm::enumerate(vectorShape)) {
+//        if (i.value() != 1)
+//          firstNonUnitIndex = i.index();
+//      }
+//      int64_t firstDimToCollapse = firstNonUnitIndex +
+//          sourceType.getRank() - vectorType.getRank() + 1;
+//
+//      SmallVector<ReassociationIndices> reassociation;
+//      for (int64_t i = 0; i < firstDimToCollapse; ++i)
+//        reassociation.push_back(ReassociationIndices{i});
+//      ReassociationIndices collapsedIndices;
+//      for (int64_t i = firstDimToCollapse; i < sourceType.getRank(); ++i)
+//        collapsedIndices.push_back(i);
+//      reassociation.push_back(collapsedIndices);
+//      Value collapsedMemref = rewriter.create<memref::CollapseShapeOp>(loc, input, reassociation);
+//
+//      SmallVector<AffineExpr> exprs(vectorType.size() - collapsedIndices.size());
+//      for (auto remap : llvm::enumerate(perm)) {
+//        exprs[remap.value()] = map.getResult(remap.index());
+//      }
+//    }
+//
+//    Value res = rewriter.create<vector::ContractionOp>(
+//        loc, newSources[0], newSources[1], newSources[2],
+//        rewriter.getAffineMapArrayAttr(newMaps), op.getIteratorTypes());
+//    rewriter.replaceOp(op, res);
+//    return success();
+//  }
+//};
+
 // Merge broadcast op into the transfer read op. Broadcast are not supported on
 // MMA types.
 struct CombineTransferReadOpBroadcast final
@@ -486,6 +549,21 @@ class SPIRVVectorizeToCooperativeOpsPass final
       funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
       llvm::dbgs() << "\n\n";
     });
+
+    //// When using cooperative matrix we need to flatten the extra parallel
+    //// middle dimension coming from split-k.
+    //RewritePatternSet flattenMiddleDimPatterns(context);
+    //flattenMiddleDimPatterns.add<CombineContractTranspose>(context);
+    //if (failed(applyPatternsAndFoldGreedily(
+    //        funcOp, std::move(flattenMiddleDimPatterns)))) {
+    //  return signalPassFailure();
+    //}
+
+    //LLVM_DEBUG({
+    //  llvm::dbgs() << "--- After flattening middle dims ---\n";
+    //  funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    //  llvm::dbgs() << "\n\n";
+    //});
   }
 };
 
