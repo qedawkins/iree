@@ -108,13 +108,16 @@ public:
                                            indices, sourceIndices)))
       return failure();
 
-    auto stride = loadOp.getLeadDimension().getSExtValue();
-    if (stride != 0)
-      stride = cast<MemRefType>(subViewOp.getSource().getType()).getShape().back();
+    //auto stride = loadOp.getLeadDimension().getSExtValue();
+    //if (stride != 0)
+    //  stride = cast<MemRefType>(subViewOp.getSource().getType()).getShape().back();
 
+    //rewriter.replaceOpWithNewOp<gpu::SubgroupMmaLoadMatrixOp>(loadOp,
+    //        loadOp.getType(), subViewOp.getSource(),
+    //        sourceIndices, rewriter.getIndexAttr(stride), loadOp.getTransposeAttr());
     rewriter.replaceOpWithNewOp<gpu::SubgroupMmaLoadMatrixOp>(loadOp,
             loadOp.getType(), subViewOp.getSource(),
-            sourceIndices, rewriter.getIndexAttr(stride), loadOp.getTransposeAttr());
+            sourceIndices, loadOp.getLeadDimension(), loadOp.getTransposeAttr());
     return success();
   }
 };

@@ -93,7 +93,7 @@ struct SplitReductionPass : public SplitReductionBase<SplitReductionPass> {
           op.getReductionDims(reductionDims);
           if (reductionDims.size() == 1) {
             Optional<int64_t> dimSize = op.getStaticLoopRanges()[reductionDims[0]];
-            if (dimSize && ratio > 0 && (*dimSize/ratio % 16 != 0 || *dimSize <= 2048))
+            if (dimSize && ratio > 0 && (*dimSize/ratio % 16 != 0 || *dimSize <= 16))
               ratio = 0;
           }
           if (auto attr = op->getAttrOfType<IntegerAttr>(kSplitKAttr))
