@@ -5,10 +5,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
 
 #include "iree-dialects/Dialect/LinalgExt/Passes/Passes.h"
 #include "iree-dialects/Dialect/LinalgTransform/Passes.h"
 #include "iree/compiler/Codegen/PassDetail.h"
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
@@ -100,6 +102,7 @@ static void tileAndDistributeToWorkgroup(
           useWARForCooperativeMatrixCodegen));
   nestedModulePM.addPass(createCanonicalizerPass());
   nestedModulePM.addPass(createCSEPass());
+  pm.addPass(IREE::Flow::createConvertConv2DToImg2ColPass());
 }
 
 static void tileAndBufferize(OpPassManager &pm) {
