@@ -178,14 +178,39 @@ Optional<SmallVector<int64_t>> getCooperativeOpVectorShape(
   }
 
   if (auto readOp = dyn_cast<vector::TransferReadOp>(op)) {
+
+    auto sourceOp = op;
+    if (op->hasOneUse()) {
+      if (auto extOp = dyn_cast<arith::ExtSIOp>(*op->user_begin())) {
+        sourceOp = extOp;
+      }
+    }
+
     VectorType sliceType;
-    for (Operation *users : op->getUsers()) {
+    for (Operation *users : sourceOp->getUsers()) {
       auto extract = dyn_cast<vector::ExtractStridedSliceOp>(users);
       if (!extract) return std::nullopt;
       auto vecType = extract.getResult().getType().cast<VectorType>();
       if (sliceType && sliceType != vecType) return std::nullopt;
       sliceType = vecType;
     }
+    return llvm::to_vector<>(sliceType.getShape());
+  }
+
+  if (auto extOp = dyn_cast<arith::ExtSIOp>(op)) {
+    auto insert =
+        extOp.getOperand().getDefiningOp<vector::InsertStridedSliceOp>();
+    if (!insert) return std::nullopt;
+
+    VectorType sliceType = insert.getSourceVectorType();
+    for (Operation *users : op->getUsers()) {
+      auto extract = dyn_cast<vector::ExtractStridedSliceOp>(users);
+      if (!extract) return std::nullopt;
+      auto vecType = extract.getResult().getType().cast<VectorType>();
+      if (!llvm::equal(sliceType.getShape(), vecType.getShape()))
+        return std::nullopt;
+    }
+
     return llvm::to_vector<>(sliceType.getShape());
   }
 
