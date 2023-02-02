@@ -258,6 +258,30 @@ class CombineContractTranspose final
 
 // Merge broadcast op into the transfer read op. Broadcast are not supported on
 // MMA types.
+struct CombineSignedExtendContract final
+    : public OpRewritePattern<vector::ContractionOp> {
+  using OpRewritePattern<vector::ContractionOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::ContractionOp op,
+                                PatternRewriter &rewriter) const override {
+    auto lhsExtend =
+        op.getLhs().getDefiningOp<arith::ExtSIOp>();
+    if (!lhsExtend)
+      return failure();
+
+    auto rhsExtend =
+        op.getRhs().getDefiningOp<arith::ExtSIOp>();
+    if (!rhsExtend)
+      return failure();
+
+    op->replaceUsesOfWith(lhsExtend, lhsExtend.getIn());
+    op->replaceUsesOfWith(rhsExtend, rhsExtend.getIn());
+    return success();
+  }
+};
+
+// Merge broadcast op into the transfer read op. Broadcast are not supported on
+// MMA types.
 struct CombineTransferReadOpBroadcast final
     : public OpRewritePattern<vector::BroadcastOp> {
   using OpRewritePattern<vector::BroadcastOp>::OpRewritePattern;
@@ -413,6 +437,22 @@ class SPIRVVectorizeToCooperativeOpsPass final
 
     LLVM_DEBUG({
       llvm::dbgs() << "--- After vectorization ---\n";
+      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+      llvm::dbgs() << "\n\n";
+    });
+
+    {
+      RewritePatternSet combineSignedExtendPatterns(context);
+      combineSignedExtendPatterns.insert<CombineSignedExtendContract>(
+          funcOp.getContext());
+      if (failed(applyPatternsAndFoldGreedily(
+              funcOp, std::move(combineSignedExtendPatterns)))) {
+        return signalPassFailure();
+      }
+    }
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "--- After combining signed extend ---\n";
       funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
       llvm::dbgs() << "\n\n";
     });
