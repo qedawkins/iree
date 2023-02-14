@@ -56,7 +56,9 @@ class CropDispatchPipelinePass
     auto terminator =
         *funcOp.getFunctionBody().getOps<func::ReturnOp>().begin();
     builder.setInsertionPointAfter(terminator);
-    builder.create<func::ReturnOp>(targetDispatch.getLoc(), retVal);
+    SmallVector<Value> retVals(terminator->getNumOperands(), retVal);
+    ValueRange retRange(retVals);
+    builder.create<func::ReturnOp>(targetDispatch.getLoc(), retRange);
     terminator.erase();
   }
 

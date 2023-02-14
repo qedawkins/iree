@@ -40,7 +40,7 @@ def PadLinalgOps :
   let constructor = "mlir::iree_compiler::IREE::createPadLinalgOpsToIntegerMultiplePass()";
   let options = [
     Option<"paddingSize", "pad-size", "int",
-           /*default=*/"4",
+           /*default=*/"16",
            "Specify the padding size">,
   ];
 }

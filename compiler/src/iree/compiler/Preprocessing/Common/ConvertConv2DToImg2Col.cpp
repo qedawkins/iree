@@ -8,6 +8,7 @@
 #include "iree/compiler/Preprocessing/Common/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
@@ -30,6 +31,11 @@ static bool hasAllOneValues(DenseIntElementsAttr attr) {
       attr, [](APInt element) { return element.getSExtValue() == 1; });
 }
 
+static bool hasAllOneValuesVec(SmallVector<int64_t> attrVec) {
+  return llvm::all_of(
+      attrVec, [](int64_t element) { return element == 1; });
+}
+
 static Value createAdd(Location loc, Value x, Value y, bool isInt,
                        OpBuilder &builder) {
   if (isInt) return builder.create<arith::AddIOp>(loc, x, y);
@@ -37,8 +43,19 @@ static Value createAdd(Location loc, Value x, Value y, bool isInt,
 }
 
 static Value createMul(Location loc, Value x, Value y, bool isInt,
-                       OpBuilder &builder) {
-  if (isInt) return builder.create<arith::MulIOp>(loc, x, y);
+                       Type accType, OpBuilder &builder) {
+  if (isInt) {
+    auto xWidth = x.getType().cast<IntegerType>().getWidth();
+    auto yWidth = y.getType().cast<IntegerType>().getWidth();
+    auto accWidth = accType.cast<IntegerType>().getWidth();
+    Value xExt = x;
+    if (xWidth < accWidth)
+      xExt = builder.create<arith::ExtSIOp>(loc, accType, x);
+    Value yExt = y;
+    if (yWidth < accWidth)
+      yExt = builder.create<arith::ExtSIOp>(loc, accType, y);
+    return builder.create<arith::MulIOp>(loc, xExt, yExt);
+  }
   return builder.create<arith::MulFOp>(loc, x, y);
 }
 
@@ -211,7 +228,7 @@ class ConvertConv2DNhwcHwcf final
           /*outputs=*/ValueRange{reshapedOutput},
           ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators,
           [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-            Value mul = createMul(loc, args[0], args[1], isInt, nestedBuilder);
+            Value mul = createMul(loc, args[0], args[1], isInt, args[2].getType(), nestedBuilder);
             Value add = createAdd(loc, mul, args[2], isInt, nestedBuilder);
             nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
           });
@@ -517,7 +534,7 @@ class ConvertConv2DNchwFchw final
           /*outputs=*/ValueRange{reshapedOutput},
           ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators,
           [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-            Value mul = createMul(loc, args[0], args[1], isInt, nestedBuilder);
+            Value mul = createMul(loc, args[0], args[1], isInt, args[2].getType(), nestedBuilder);
             Value add = createAdd(loc, mul, args[2], isInt, nestedBuilder);
             nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
           });
@@ -541,6 +558,11 @@ class ConvertConv2DNchwFchwGeneric final
   LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
                                 PatternRewriter &rewriter) const override {
 
+    SmallVector<int64_t> strides;
+    SmallVector<int64_t> dilations;
+    if (!linalg::isaConvolutionOpInterface(genericOp, &strides, &dilations))
+      return failure();
+
     if (genericOp.getNumParallelLoops() != 4 || genericOp.getNumReductionLoops() != 3)
       return failure();
 
@@ -552,8 +574,15 @@ class ConvertConv2DNchwFchwGeneric final
       return failure();
     }
 
-    // TODO: Make dilation not miscompile :/
-    // if (!hasAllOneValues(convOp.getDilations())) return failure();
+    auto sourceMaps = genericOp.getIndexingMapsArray();
+    auto inputMap = mlir::compressUnusedDims(sourceMaps[0]);
+    if (!inputMap.getResults()[1].isa<AffineDimExpr>())
+      return failure();
+
+    if (!hasAllOneValuesVec(dilations)) {
+      llvm::errs() << "Failed dilations\n";
+      return failure();
+    }
 
     Value input = genericOp.getInputs()[0];
     Value filter = genericOp.getInputs()[1];
@@ -579,8 +608,6 @@ class ConvertConv2DNchwFchwGeneric final
 
 
     auto nloops = colTensorShape.size();
-    auto sourceMaps = genericOp.getIndexingMapsArray();
-    auto inputMap = mlir::compressUnusedDims(sourceMaps[0]);
 
     {
       AffineExpr nDim, icDim, khDim, kwDim, ohDim, owDim;
@@ -642,9 +669,17 @@ class ConvertConv2DNchwFchwGeneric final
         loc, reshapedOutputType,
         /*inputs=*/ValueRange{reshapedFilter, reshapedImg2ColTensor},
         /*outputs=*/ValueRange{reshapedOutput},
-        ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators);
-    IRMapping mapper;
-    genericOp.getRegion().cloneInto(&newGenericOp.getRegion(), mapper);
+        //ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators);
+        ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators,
+          [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+            auto accType = args[2].getType();
+            auto args1 = nestedBuilder.create<arith::ExtUIOp>(loc, accType, args[1]);
+            Value mul = createMul(loc, args[0], args1, true, accType, nestedBuilder);
+            Value add = createAdd(loc, mul, args[2], true, nestedBuilder);
+            nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
+          });
+    //IRMapping mapper;
+    //genericOp.getRegion().cloneInto(&newGenericOp.getRegion(), mapper);
     Value result = newGenericOp.getResults().front();
 
     auto reshapedResult = rewriter.create<tensor::ExpandShapeOp>(

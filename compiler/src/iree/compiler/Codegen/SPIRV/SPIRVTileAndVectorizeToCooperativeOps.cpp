@@ -146,6 +146,25 @@ void populateVectorizationPatterns(MLIRContext *context,
   vector::populateVectorReductionToContractPatterns(patterns);
 }
 
+template <typename ExtOpTy>
+Optional<SmallVector<int64_t>> getExtOpVectorShape(
+    ExtOpTy op, ArrayRef<int64_t> nativeShape) {
+  auto insert =
+      op.getOperand().template getDefiningOp<vector::InsertStridedSliceOp>();
+  if (!insert) return std::nullopt;
+
+  VectorType sliceType = insert.getSourceVectorType();
+  for (Operation *users : op->getUsers()) {
+    auto extract = dyn_cast<vector::ExtractStridedSliceOp>(users);
+    if (!extract) return std::nullopt;
+    auto vecType = extract.getResult().getType().cast<VectorType>();
+    if (!llvm::equal(sliceType.getShape(), vecType.getShape()))
+      return std::nullopt;
+  }
+
+  return llvm::to_vector<>(sliceType.getShape());
+}
+
 /// Returns vector shape matching native cooperative op sizes for unrolling
 /// high-D vectors.
 Optional<SmallVector<int64_t>> getCooperativeOpVectorShape(
@@ -181,9 +200,9 @@ Optional<SmallVector<int64_t>> getCooperativeOpVectorShape(
 
     auto sourceOp = op;
     if (op->hasOneUse()) {
-      if (auto extOp = dyn_cast<arith::ExtSIOp>(*op->user_begin())) {
-        sourceOp = extOp;
-      }
+      auto user = *op->user_begin();
+      if (isa<arith::ExtUIOp>(user) || isa<arith::ExtSIOp>(user))
+        sourceOp = user;
     }
 
     VectorType sliceType;
@@ -197,22 +216,10 @@ Optional<SmallVector<int64_t>> getCooperativeOpVectorShape(
     return llvm::to_vector<>(sliceType.getShape());
   }
 
-  if (auto extOp = dyn_cast<arith::ExtSIOp>(op)) {
-    auto insert =
-        extOp.getOperand().getDefiningOp<vector::InsertStridedSliceOp>();
-    if (!insert) return std::nullopt;
-
-    VectorType sliceType = insert.getSourceVectorType();
-    for (Operation *users : op->getUsers()) {
-      auto extract = dyn_cast<vector::ExtractStridedSliceOp>(users);
-      if (!extract) return std::nullopt;
-      auto vecType = extract.getResult().getType().cast<VectorType>();
-      if (!llvm::equal(sliceType.getShape(), vecType.getShape()))
-        return std::nullopt;
-    }
-
-    return llvm::to_vector<>(sliceType.getShape());
-  }
+  if (auto extOp = dyn_cast<arith::ExtSIOp>(op))
+    return getExtOpVectorShape<arith::ExtSIOp>(extOp, nativeShape);
+  if (auto extOp = dyn_cast<arith::ExtUIOp>(op))
+    return getExtOpVectorShape<arith::ExtUIOp>(extOp, nativeShape);
 
   return std::nullopt;
 }
