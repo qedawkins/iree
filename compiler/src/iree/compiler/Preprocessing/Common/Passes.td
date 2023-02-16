@@ -22,6 +22,13 @@ def ConvertConvNchwToNhwc :
       "mlir::iree_compiler::IREE::createConvertConvNchwToNhwcPass()";
 }
 
+def ConvertConvToChannelsLast :
+    Pass<"iree-preprocessing-convert-conv-to-channels-last", ""> {
+  let summary = "Convert linalg convolutions to channels last.";
+  let constructor =
+      "mlir::iree_compiler::IREE::createConvertConvToChannelsLastPass()";
+}
+
 def GeneralizeAndFuse :
     Pass<"iree-flow-generalize-and-fuse", ""> {
   let summary = "Generalizes named op and try to fuse them.";

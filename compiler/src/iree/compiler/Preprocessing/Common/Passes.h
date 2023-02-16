@@ -25,6 +25,9 @@ std::unique_ptr<Pass> createConvertConv2DToImg2ColPass();
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
 createConvertConvNchwToNhwcPass();
 
+// Creates a pass to convert convolutions to channels last and propagate.
+std::unique_ptr<Pass> createConvertConvToChannelsLastPass();
+
 // Generalizes named op and try to fuse them
 std::unique_ptr<Pass> createGeneralizeAndFusePass();
 
