@@ -115,25 +115,32 @@ createTransposeAsTensorPack(PatternRewriter &rewriter, Location loc,
   if (isIdentityIndices(targetIndices))
     return std::make_tuple(input, inputMap);
 
-  Attribute one = rewriter.getI64IntegerAttr(1);
-  SmallVector<OpFoldResult> tileSizes(targetIndices.size(), OpFoldResult(one));
-
-  SmallVector<int64_t> identity;
-  for (int64_t i = 0, end = targetIndices.size(); i < end; i++)
-    identity.push_back(i);
-
-  // Pack the input tensor.
-  auto empty = tensor::PackOp::createDestinationTensor(
-      rewriter, loc, input, tileSizes, identity, targetIndices);
-  auto packedInput = rewriter.create<tensor::PackOp>(
-    loc, input, empty, identity, tileSizes,
-    /*padding=*/std::nullopt, targetIndices);
-
-  // Collapse the unit dims created by tensor.pack.
-  auto reassociationMap = getUntiledPackReassociationMap(targetIndices.size());
   RankedTensorType inType = input.getType().cast<RankedTensorType>();
   auto elementType = inType.getElementType();
   auto inputShape(inType.getShape());
+
+  SmallVector<OpFoldResult> tileSizes;
+  for (int64_t i = 0, end = targetIndices.size(); i < end; i++) {
+    if (ShapedType::isDynamic(inputShape[i]))
+      tileSizes.push_back(rewriter.create<tensor::DimOp>(loc, input, i).getResult());
+    else
+      tileSizes.push_back(rewriter.getIndexAttr(inputShape[i]));
+  }
+  auto transposedTileSizes =
+      shuffleFromIndices<OpFoldResult>(tileSizes, targetIndices);
+
+  // Pack the input tensor.
+  auto empty = tensor::PackOp::createDestinationTensor(
+      rewriter, loc, input, transposedTileSizes, targetIndices, SmallVector<int64_t>{});
+  auto packedInput = rewriter.create<tensor::PackOp>(
+    //loc, input, empty, invertIndices(targetIndices),
+    //shuffleFromIndices<OpFoldResult>(tileSizes, invertIndices(targetIndices)),
+    loc, input, empty, targetIndices,
+    transposedTileSizes,
+    /*padding=*/std::nullopt, SmallVector<int64_t>{});
+
+  // Collapse the unit dims created by tensor.pack.
+  auto reassociationMap = getUntiledPackReassociationMap(targetIndices.size());
   auto transposedInputShape =
       shuffleFromIndices<int64_t>(llvm::to_vector(inputShape), targetIndices);
 
@@ -160,28 +167,33 @@ createTransposeAsTensorUnPack(PatternRewriter &rewriter, Location loc,
   auto elementType = outType.getElementType();
   auto outputShape(outType.getShape());
 
-  SmallVector<int64_t> expandedOutputShape(outputShape);
+  SmallVector<int64_t> expandedOutputShape(outType.getRank(), 1);
   for (int i = 0; i < outType.getRank(); i++) {
-    expandedOutputShape.push_back(1);
+    expandedOutputShape.push_back(outputShape[i]);
   }
   auto reassociationMap = getUntiledPackReassociationMap(outType.getRank());
   auto expandedOutput = rewriter.create<tensor::ExpandShapeOp>(
     loc, RankedTensorType::get(expandedOutputShape, elementType),
     output, reassociationMap);
 
-  Attribute one = rewriter.getI64IntegerAttr(1);
-  SmallVector<OpFoldResult> tileSizes(targetIndices.size(), OpFoldResult(one));
+  SmallVector<OpFoldResult> tileSizes;
+  for (int64_t i = 0, end = targetIndices.size(); i < end; i++) {
+    if (ShapedType::isDynamic(outputShape[i]))
+      tileSizes.push_back(rewriter.create<tensor::DimOp>(loc, output, i).getResult());
+    else
+      tileSizes.push_back(rewriter.getIndexAttr(outputShape[i]));
+  }
 
   auto transposedOutputShape =
-      shuffleFromIndices<int64_t>(llvm::to_vector(outputShape), targetIndices);
+      shuffleFromIndices<OpFoldResult>(tileSizes, targetIndices);
   Value empty = rewriter.create<tensor::EmptyOp>(
     loc, transposedOutputShape, elementType);
 
-  SmallVector<int64_t> identity;
-  for (int64_t i = 0, end = targetIndices.size(); i < end; i++)
-    identity.push_back(i);
   auto unpackedOutput = rewriter.create<tensor::UnPackOp>(
-    loc, expandedOutput, empty, identity, tileSizes, invertIndices(targetIndices));
+    loc, expandedOutput, empty, invertIndices(targetIndices),
+    tileSizes, SmallVector<int64_t>{});
+  //llvm::errs() << "Unpack op:\n";
+  //unpackedOutput->dump();
   return unpackedOutput.getResult();
 }
 
@@ -245,6 +257,12 @@ static LogicalResult transposeConvLikeLinalgOp(PatternRewriter &rewriter,
       createTransposeAsTensorPack(rewriter, loc, filter, filterMap, filterIndices);
   auto [transposedOutput, transposedOutputMap] =
       createTransposeAsTensorPack(rewriter, loc, output, outputMap, outputIndices);
+
+  // Don't transpose if there's no change to the op.
+  if (transposedInputMap == inputMap &&
+          transposedFilterMap == filterMap &&
+          transposedOutputMap == outputMap)
+    return failure();
 
   Value transposedConvResult = convBuilder(rewriter, loc, convOp,
           transposedInput, transposedFilter, transposedOutput,
@@ -322,6 +340,7 @@ struct ConvertConvToChannelsLastPass
   }
 
   void runOnOperation() override {
+    auto op = getOperation();
     MLIRContext *context = &getContext();
 
     {
@@ -329,8 +348,25 @@ struct ConvertConvToChannelsLastPass
       patterns.insert<ConvertLinalgConvNchwFchw>(context);
       patterns.insert<ConvertLinalgPoolingNchwMax>(context);
       patterns.insert<ConvertLinalgPoolingNchwSum>(context);
-      //patterns.insert<ConvertLinalgConvOp>(context);
-      if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+      patterns.insert<ConvertLinalgConvOp>(context);
+      if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns)))) {
+        return signalPassFailure();
+      }
+    }
+
+    {
+      RewritePatternSet patterns(context);
+      linalg::populateDataLayoutPropagationPatterns(patterns);
+      if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns)))) {
+        return signalPassFailure();
+      }
+    }
+
+    {
+      RewritePatternSet patterns(context);
+      patterns.add<linalg::GeneralizeOuterUnitDimsPackOpPattern,
+                   linalg::GeneralizeOuterUnitDimsUnPackOpPattern>(context);
+      if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns)))) {
         return signalPassFailure();
       }
     }
