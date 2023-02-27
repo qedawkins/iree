@@ -27,6 +27,7 @@ iree_cc_library(
     "Passes.h.inc"
   SRCS
     "ConvertConv2DToImg2Col.cpp"
+    "ConvertConv2DToImg2ColGather.cpp"
     "ConvertConvNchwToNhwc.cpp"
     "ConvertLinalgMatmulToMmt.cpp"
     "GeneralizeAndFuse.cpp"

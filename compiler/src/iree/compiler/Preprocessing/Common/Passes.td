@@ -15,6 +15,12 @@ def ConvertConv2DToImg2Col :
   let constructor = "mlir::iree_compiler::IREE::createConvertConv2DToImg2ColPass()";
 }
 
+def ConvertConv2DToImg2ColGather :
+    Pass<"iree-preprocessing-convert-conv2d-to-img2col-gather", ""> {
+  let summary = "Convert linalg convolution ops to matmul img2col using gather semantics";
+  let constructor = "mlir::iree_compiler::IREE::createConvertConv2DToImg2ColGatherPass()";
+}
+
 def ConvertConvNchwToNhwc :
     InterfacePass<"iree-flow-convert-conv-nchw-to-nhwc", "mlir::FunctionOpInterface"> {
   let summary = "Convert linalg NCHW Convolutions to NHWC";
