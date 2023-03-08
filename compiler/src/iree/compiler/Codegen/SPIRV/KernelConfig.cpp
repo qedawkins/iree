@@ -13,6 +13,7 @@
 #include "iree/compiler/Codegen/Common/UserConfig.h"
 #include "iree/compiler/Codegen/Dialect/LoweringConfig.h"
 #include "iree/compiler/Codegen/SPIRV/Utils.h"
+#include "iree/compiler/Codegen/TransformDialectStrategies/GPU/Common.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -1052,6 +1053,24 @@ static LogicalResult setReductionConfig(const spirv::TargetEnv &targetEnv,
   // requires special capability.
   if (!targetEnv.allows(spirv::Capability::GroupNonUniformShuffle))
     return failure();
+
+  {  // Go down transform dialect path.
+    MLIRContext *context = funcOp.getContext();
+    func::FuncOp funcOp = op->getParentOfType<func::FuncOp>();
+    auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
+        context, CodeGenPipeline::TransformDialectCodegen);
+    LLVM_DEBUG(llvm::dbgs() << "using transform dialect...\n");
+
+    gpu::GPUModel gpuModel;
+    if (failed(gpu::matchAndSetReductionStrategy(funcOp, op, gpuModel)))
+      return failure();
+
+    FailureOr<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(funcOp);
+    const int subgroupSize = targetEnv.getResourceLimits().getSubgroupSize();
+    exportOp->setSubgroupSizeAttr(Builder(context).getIndexAttr(subgroupSize));
+    return setTranslationInfo(op->getParentOfType<func::FuncOp>(),
+                              translationInfo);
+  }
 
   SmallVector<unsigned> reductionDims;
   op.getReductionDims(reductionDims);
