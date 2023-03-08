@@ -17,6 +17,7 @@
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -166,8 +167,6 @@ void transform_dialect::ApplyPatternsOp::build(
               getSwapPaddingElideConditionalAttrName)
   ADD_PATTERN(swappingPatterns, getSwappingPatternsAttrName)
   ADD_PATTERN(tilingCanonicalization, getTilingCanonicalizationAttrName)
-  ADD_PATTERN(unrollVectorsGpuMmaSync, getUnrollVectorsGpuMmaSyncAttrName)
-  ADD_PATTERN(unrollVectorsGpuWmma, getUnrollVectorsGpuWmmaAttrName)
 #undef ADD_PATTERN
   result.addTypes({pdl::OperationType::get(ctx)});
 }
@@ -293,40 +292,6 @@ static void addTilingCanonicalizationPatterns(RewritePatternSet &patterns) {
   scf::populateSCFForLoopCanonicalizationPatterns(patterns);
 }
 
-static Optional<SmallVector<int64_t>> getGPUTensorCoreNativeMmaSyncVectorSize(
-    Operation *op) {
-  return getMmaNativeVectorSize(op);
-}
-
-static void addUnrollVectorsGpuMmaSyncPatterns(RewritePatternSet &patterns) {
-  auto unrollOrder = [](Operation *op) -> Optional<SmallVector<int64_t>> {
-    auto contract = dyn_cast<vector::ContractionOp>(op);
-    if (!contract) return std::nullopt;
-    return mlir::iree_compiler::gpuMmaUnrollOrder(contract);
-  };
-  vector::populateVectorUnrollPatterns(
-      patterns, vector::UnrollVectorOptions()
-                    .setNativeShapeFn(getGPUTensorCoreNativeMmaSyncVectorSize)
-                    .setUnrollTraversalOrderFn(unrollOrder));
-}
-
-static Optional<SmallVector<int64_t>> getGPUTensorCoreNativeWmmaVectorSize(
-    Operation *op) {
-  return getWmmaNativeVectorSize(op);
-}
-
-static void addUnrollVectorsGpuWmmaPatterns(RewritePatternSet &patterns) {
-  auto unrollOrder = [](Operation *op) -> Optional<SmallVector<int64_t>> {
-    auto contract = dyn_cast<vector::ContractionOp>(op);
-    if (!contract) return std::nullopt;
-    return mlir::iree_compiler::gpuMmaUnrollOrder(contract);
-  };
-  vector::populateVectorUnrollPatterns(
-      patterns, vector::UnrollVectorOptions()
-                    .setNativeShapeFn(getGPUTensorCoreNativeWmmaVectorSize)
-                    .setUnrollTraversalOrderFn(unrollOrder));
-}
-
 static void addAdditionalIreePatterns(RewritePatternSet &patterns) {
   patterns.add<GenerateToConstant>(patterns.getContext());
 }
@@ -383,9 +348,6 @@ DiagnosedSilenceableFailure transform_dialect::ApplyPatternsOp::applyToOne(
   if (getSwappingPatterns())
     addSwappingPatterns(patterns, getSwapPaddingElideConditional());
   if (getTilingCanonicalization()) addTilingCanonicalizationPatterns(patterns);
-  if (getUnrollVectorsGpuMmaSync())
-    addUnrollVectorsGpuMmaSyncPatterns(patterns);
-  if (getUnrollVectorsGpuWmma()) addUnrollVectorsGpuWmmaPatterns(patterns);
 
   TrackingListener listener(state);
   GreedyRewriteConfig config;
@@ -461,6 +423,113 @@ void transform_dialect::ApplyPatternsOp::getEffects(
   transform::modifiesPayload(effects);
 }
 
+//===---------------------------------------------------------------------===//
+// ApplyPatternsToNestedOp
+//===---------------------------------------------------------------------===//
+void transform_dialect::ApplyPatternsToNestedOp::build(
+    OpBuilder &builder, OperationState &result, Value target,
+    const ApplyPatternsOpPatterns &patterns) {
+  MLIRContext *ctx = builder.getContext();
+  result.addOperands(target);
+  auto unitAttr = builder.getUnitAttr();
+#define ADD_NESTED_PATTERN(NAME, ATTR) \
+  if (patterns.NAME)            \
+    result.addAttribute(ApplyPatternsToNestedOp::ATTR(result.name), unitAttr);
+  ///
+  /// When touching something here, do not forget to update CommonExtensions.h.
+  ///
+  ADD_NESTED_PATTERN(unrollVectorsGpuMmaSync, getUnrollVectorsGpuMmaSyncAttrName)
+  ADD_NESTED_PATTERN(unrollVectorsGpuWmma, getUnrollVectorsGpuWmmaAttrName)
+#undef ADD_NESTED_PATTERN
+  result.addTypes({pdl::OperationType::get(ctx)});
+}
+
+static void addUnrollVectorsGpuMmaSyncPatterns(RewritePatternSet &patterns, Operation *filter) {
+  auto unrollOrder = [](Operation *op) -> Optional<SmallVector<int64_t>> {
+    auto contract = dyn_cast<vector::ContractionOp>(op);
+    if (!contract) return std::nullopt;
+    return mlir::iree_compiler::gpuMmaUnrollOrder(contract);
+  };
+  auto getGPUTensorCoreNativeMmaSyncVectorSize =
+    [filter](Operation *op) -> Optional<SmallVector<int64_t>> {
+      if (!filter->isProperAncestor(op))
+        return std::nullopt;
+      return getMmaNativeVectorSize(op);
+  };
+  vector::populateVectorUnrollPatterns(
+      patterns, vector::UnrollVectorOptions()
+                    .setNativeShapeFn(getGPUTensorCoreNativeMmaSyncVectorSize)
+                    .setUnrollTraversalOrderFn(unrollOrder));
+}
+
+static void addUnrollVectorsGpuWmmaPatterns(RewritePatternSet &patterns, Operation *filter) {
+  auto unrollOrder = [](Operation *op) -> Optional<SmallVector<int64_t>> {
+    auto contract = dyn_cast<vector::ContractionOp>(op);
+    if (!contract) return std::nullopt;
+    return mlir::iree_compiler::gpuMmaUnrollOrder(contract);
+  };
+  auto getGPUTensorCoreNativeWmmaVectorSize =
+    [filter](Operation *op) -> Optional<SmallVector<int64_t>> {
+      if (!filter->isProperAncestor(op))
+        return std::nullopt;
+      return getWmmaNativeVectorSize(op);
+  };
+  vector::populateVectorUnrollPatterns(
+      patterns, vector::UnrollVectorOptions()
+                    .setNativeShapeFn(getGPUTensorCoreNativeWmmaVectorSize)
+                    .setUnrollTraversalOrderFn(unrollOrder));
+}
+
+DiagnosedSilenceableFailure transform_dialect::ApplyPatternsToNestedOp::applyToOne(
+    Operation *target, transform::ApplyToEachResultList &results,
+    transform::TransformState &state) {
+
+  if (target->getNumRegions() != 1)
+    return mlir::emitDefiniteFailure(target, "target must have exactly one region");
+
+  Operation *isolatedParent = target;
+  if (!target->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
+    isolatedParent = target->getParentWithTrait<OpTrait::IsIsolatedFromAbove>();
+    if (!isolatedParent)
+      return mlir::emitDefiniteFailure(target, "Failed to find isolated from above parent op");
+  }
+  MLIRContext *ctx = target->getContext();
+  RewritePatternSet patterns(ctx);
+  if (getUnrollVectorsGpuMmaSync())
+    addUnrollVectorsGpuMmaSyncPatterns(patterns, target);
+  if (getUnrollVectorsGpuWmma())
+    addUnrollVectorsGpuWmmaPatterns(patterns, target);
+
+  TrackingListener listener(state);
+  GreedyRewriteConfig config;
+  config.listener = &listener;
+  // Manually gather list of ops because the other GreedyPatternRewriteDriver
+  // overloads only accepts ops that are isolated from above.
+  SmallVector<Operation *> ops;
+  isolatedParent->walk([&](Operation *nestedOp) {
+    if (target != nestedOp && target->isProperAncestor(nestedOp))
+      ops.push_back(nestedOp);
+  });
+  LogicalResult result =
+      applyOpPatternsAndFold(ops, std::move(patterns), config);
+  if (failed(result)) {
+    return mlir::emitDefiniteFailure(target, "greedy patterns failed");
+  }
+  LogicalResult listenerResult = listener.checkErrorState();
+  if (failed(listenerResult))
+    return mlir::emitDefiniteFailure(target, "pattern listener tracker fail");
+
+  results.push_back(target);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform_dialect::ApplyPatternsToNestedOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getTarget(), effects);
+  transform::producesHandle(getResult(), effects);
+  transform::modifiesPayload(effects);
+}
+
 //===----------------------------------------------------------------------===//
 // HoistStaticAllocOp
 //===----------------------------------------------------------------------===//
@@ -471,6 +540,46 @@ DiagnosedSilenceableFailure transform_dialect::HoistStaticAllocOp::applyToOne(
   IRRewriter rewriter(funcOp->getContext());
   mlir::iree_compiler::hoistStaticallyBoundAllocationsInFunc<memref::AllocOp>(
       rewriter, funcOp);
+  results.push_back(funcOp);
+  return DiagnosedSilenceableFailure::success();
+}
+
+//===----------------------------------------------------------------------===//
+// GpuDistributeSharedMemoryCopyOp
+//===----------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure transform_dialect::GpuDistributeSharedMemoryCopyOp::applyToOne(
+    func::FuncOp funcOp, transform::ApplyToEachResultList &results,
+    transform::TransformState &state) {
+  SmallVector<linalg::GenericOp> copiesFromWorkgroupMem;
+  funcOp.walk([&](linalg::GenericOp copyOp) {
+    if (copyOp.getDpsInputOperands().size() != 1 ||
+            copyOp.getDpsInitOperands().size() != 1)
+      return;
+    auto sourceType = copyOp.getDpsInputOperand(0)->get().getType().dyn_cast<MemRefType>();
+    auto destType = copyOp.getDpsInitOperand(0)->get().getType().dyn_cast<MemRefType>();
+    if (!sourceType || !destType)
+      return;
+
+    auto sourceSpace = sourceType.getMemorySpace();
+    auto destSpace = destType.getMemorySpace();
+    if (!sourceSpace || !destSpace)
+      return;
+
+    auto sourceGpuSpace = sourceSpace.dyn_cast_or_null<gpu::AddressSpaceAttr>();
+    auto destGpuSpace = destSpace.dyn_cast_or_null<gpu::AddressSpaceAttr>();
+    if ((!sourceGpuSpace || sourceGpuSpace.getValue() != gpu::GPUDialect::getWorkgroupAddressSpace()) &&
+        (!destGpuSpace || destGpuSpace.getValue() != gpu::GPUDialect::getWorkgroupAddressSpace()))
+      return;
+
+    setMarker(copyOp, getCopyToWorkgroupMemoryMarker());
+  });
+
+  if (failed(mlir::iree_compiler::gpuDistributeSharedMemoryCopy(funcOp))) {
+    return mlir::emitDefiniteFailure(
+        state.getTopLevel(),
+        "Pattern failed to apply");
+  }
   results.push_back(funcOp);
   return DiagnosedSilenceableFailure::success();
 }
@@ -1342,6 +1451,172 @@ transform_dialect::IREEEraseHALDescriptorTypeFromMemRefOp::apply(
 
   transformResults.set(getOperation()->getOpResult(0), targetOps.front());
   return DiagnosedSilenceableFailure::success();
+}
+
+//===---------------------------------------------------------------------===//
+// ConvertConv2DToImg2ColAndAdjustWorkgroupCountOp
+//===---------------------------------------------------------------------===//
+
+// Rewrite the workgroup count compute region based on the specified collapsed
+// dimensions on the output tensor. Only the dims that are expected to be tiled
+// and distributed are adjusted, thus considering only the output is sufficient.
+static LogicalResult adjustWorkgroupCountComputeRegionForImg2col(
+    transform::TransformState &state, RewriterBase &rewriter, Location loc,
+    HAL::ExecutableExportOp exportOp, AffineMap outputMap,
+    tensor::CollapseShapeOp collapseOp) {
+  // HAL::ExecutableExportOp exportOp, SmallVector<unsigned> workloadDims,
+  // SmallVector<ReassociationIndices, 4> dimCollapseMapping) {
+  Region &r = exportOp.getWorkgroupCount();
+  if (!r.hasOneBlock()) {
+    return rewriter.notifyMatchFailure(exportOp,
+                                       "expected export op to have a workgroup "
+                                       "count region with a single block");
+  }
+  auto workgroupCountOps =
+      r.front().getOps<IREE::Flow::DispatchWorkgroupCountFromDagRootOp>();
+  if (!llvm::hasSingleElement(workgroupCountOps)) {
+    return rewriter.notifyMatchFailure(
+        exportOp,
+        "expected region to have a single "
+        "flow.dispatch.workgroup_count_from_dag_root op");
+  }
+  auto workgroupCountOp = *workgroupCountOps.begin();
+  auto workload = workgroupCountOp.getOperands();
+
+  auto pushRange = [&](SmallVector<Value> &vec, int l, int r) {
+    for (; l < r; l++) vec.push_back(workload[l]);
+  };
+
+  SmallVector<unsigned> workloadDims;
+  for (AffineExpr result : outputMap.getResults()) {
+    workloadDims.push_back(result.cast<AffineDimExpr>().getPosition());
+  }
+  workloadDims.push_back(workload.size());
+  auto dimCollapseMapping = collapseOp.getReassociationIndices();
+
+  // Adjust the workgroup count computation. This happens by taking the product
+  // of workloads corresponding to groups of collapsed dims. For example,
+  //    workload = [w1, w2, w3, w4, w5, w6, w7, w8]
+  //    dimCollapseMapping = [[0], [1, 2], [3]]
+  //    workloadDims = [1, 3, 4, 5, (8)]
+  // will collapse to
+  //    newWorkload = [w1, w2, w3, w4 * w5, w6, w7, w8]
+  SmallVector<Value> newWorkload;
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(workgroupCountOp);
+  loc = workgroupCountOp.getLoc();
+  for (auto indices : dimCollapseMapping) {
+    // If there is a single index we can just push the corresponding workload
+    // arg.
+    if (indices.size() == 1) {
+      auto index = indices[0];
+      pushRange(newWorkload, workloadDims[index], workloadDims[index + 1]);
+      continue;
+    }
+
+    assert(indices.size());
+    SmallVector<AffineExpr> syms(indices.size());
+    mlir::detail::bindSymbolsList(rewriter.getContext(), syms);
+    SmallVector<Value> originalSizes;
+    AffineExpr product = syms[0];
+    SmallVector<Value> skipped;
+    for (auto [enIndex, dimIndex] : llvm::enumerate(indices)) {
+      originalSizes.push_back(workload[workloadDims[dimIndex]]);
+      if (enIndex > 0) {
+        // Push any skipped workload values.
+        pushRange(skipped, workloadDims[dimIndex - 1] + 1,
+                  workloadDims[dimIndex]);
+        product = product * syms[enIndex];
+      }
+    }
+
+    // Make+push the collapsed workload value, followed by all values
+    // until the next dim affected by the collapse_shape op.
+    auto m = AffineMap::get(0, indices.size(), product);
+    auto collapsedIndex =
+        makeComposedAffineApply(rewriter, loc, m, originalSizes);
+    newWorkload.push_back(collapsedIndex);
+    newWorkload.append(skipped);
+    pushRange(newWorkload, workloadDims[indices.back()] + 1,
+              workloadDims[indices.back() + 1]);
+  }
+
+  rewriter.replaceOpWithNewOp<IREE::Flow::DispatchWorkgroupCountFromDagRootOp>(
+      workgroupCountOp, newWorkload);
+  return success();
+}
+
+DiagnosedSilenceableFailure
+transform_dialect::ConvertConv2DToImg2ColAndAdjustWorkgroupCountOp::applyToOne(
+    linalg::LinalgOp target, transform::ApplyToEachResultList &results,
+    transform::TransformState &state) {
+  auto funcOp = target->getParentOfType<func::FuncOp>();
+  FailureOr<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(funcOp);
+  if (failed(exportOp)) {
+    return mlir::emitDefiniteFailure(state.getTopLevel(),
+                                     "couldn't find export op for func");
+  }
+
+  IRRewriter rewriter(target->getContext());
+  rewriter.setInsertionPoint(target);
+  auto maybeTransformed =
+      TypeSwitch<Operation *, FailureOr<std::pair<Operation *, Operation *>>>(
+          target)
+          .Case([&](linalg::Conv2DNhwcHwcfOp op) {
+            return rewriteInIm2Col(rewriter, op);
+          })
+          .Case([&](linalg::Conv2DNchwFchwOp op) {
+            return rewriteInIm2Col(rewriter, op);
+          })
+          .Default([&](Operation *op) {
+            return rewriter.notifyMatchFailure(op, "not supported");
+          });
+  if (failed(maybeTransformed)) return emitDefaultSilenceableFailure(target);
+
+  auto im2col = maybeTransformed->first;
+  auto convReplacement = maybeTransformed->second;
+
+  // The result of the im2col pattern is expected to be an expand on the matmul
+  // output.
+  auto expandShapeOp = dyn_cast<tensor::ExpandShapeOp>(convReplacement);
+  if (!expandShapeOp)
+    return mlir::emitDefiniteFailure(target,
+                                     "im2col matmul output not expanded");
+
+  auto matmulOp = expandShapeOp.getSrc().getDefiningOp<linalg::LinalgOp>();
+  if (!matmulOp || !isaContractionOpInterface(matmulOp))
+    return mlir::emitDefiniteFailure(target, "im2col matmul not found");
+
+  // If there is no collapse then the workgroup count compute region doesn't
+  // need to be updated.
+  auto outputCollapse = matmulOp.getDpsInitOperand(0)
+                            ->get()
+                            .getDefiningOp<tensor::CollapseShapeOp>();
+  if (!outputCollapse) return DiagnosedSilenceableFailure::success();
+
+  /// Lower the workgroup count region in keeping with the way dispatch
+  /// regions are created by default in IREEs compilation flow.
+  AffineMap outputMap = target.getIndexingMapsArray().back();
+  if (failed(adjustWorkgroupCountComputeRegionForImg2col(
+          state, rewriter, getLoc(), exportOp.value(), outputMap,
+          outputCollapse))) {
+    return mlir::emitDefiniteFailure(target,
+                                     "failed to adjust workgroup count region");
+  }
+
+  // Push handles for the im2col operation and the operation that replaces the
+  // original convolution.
+  results.push_back(im2col);
+  // Handle to the operation that replaces the original convolution.
+  results.push_back(convReplacement);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform_dialect::ConvertConv2DToImg2ColAndAdjustWorkgroupCountOp::build(
+    OpBuilder &builder, OperationState &result, Value target) {
+  result.addOperands(target);
+  MLIRContext *ctx = builder.getContext();
+  result.addTypes({pdl::OperationType::get(ctx), pdl::OperationType::get(ctx)});
 }
 
 #define GET_OP_CLASSES

@@ -676,11 +676,18 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
   return DiagnosedSilenceableFailure::success();
 }
 
-void transform_dialect::VectorToMMAConversionOp::build(OpBuilder &builder,
-                                                       OperationState &result,
-                                                       Value target) {
+void transform_dialect::VectorToMMAConversionOp::build(OpBuilder &builder, OperationState &result,
+                                   Value target, bool useMmaSync, bool useWmma) {
   result.addOperands(target);
-  result.addTypes({pdl::OperationType::get(builder.getContext())});
+  if (useMmaSync) {
+    result.addAttribute(VectorToMMAConversionOp::getUseMmaSyncAttrName(result.name),
+                        builder.getUnitAttr());
+  }
+  if (useWmma) {
+    result.addAttribute(VectorToMMAConversionOp::getUseWmmaAttrName(result.name),
+                        builder.getUnitAttr());
+  }
+  result.addTypes(pdl::OperationType::get(builder.getContext()));
 }
 
 DiagnosedSilenceableFailure
