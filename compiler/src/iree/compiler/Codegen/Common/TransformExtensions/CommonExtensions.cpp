@@ -17,6 +17,7 @@
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -467,6 +468,26 @@ DiagnosedSilenceableFailure transform_dialect::HoistStaticAllocOp::applyToOne(
   results.push_back(funcOp);
   return DiagnosedSilenceableFailure::success();
 }
+
+//===----------------------------------------------------------------------===//
+// GpuDistributeSharedMemoryCopy
+//===----------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure transform_dialect::GpuDistributeSharedMemoryCopy::applyToOne(
+    func::FuncOp funcOp, transform::ApplyToEachResultList &results,
+    transform::TransformState &state) {
+  funcOp.walk([&](linalg::GenericOp copyOp) {
+    setMarker(copyOp, getCopyToWorkgroupMemoryMarker());
+  });
+  if (failed(mlir::iree_compiler::gpuDistributeSharedMemoryCopy(funcOp))) {
+    return mlir::emitDefiniteFailure(
+        state.getTopLevel(),
+        "Pattern failed to apply");
+  }
+  results.push_back(funcOp);
+  return DiagnosedSilenceableFailure::success();
+}
+
 
 //===----------------------------------------------------------------------===//
 // ShareForallOperandsOp
