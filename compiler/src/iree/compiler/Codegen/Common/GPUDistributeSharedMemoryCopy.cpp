@@ -315,6 +315,18 @@ static void removeRedundantBarriers(func::FuncOp funcOp) {
   });
 }
 
+/// Conservatively add barriers after stores.
+static void insertBarriersAfter(func::FuncOp funcOp) {
+  IRRewriter rewriter(funcOp.getContext());
+  funcOp.walk([&](linalg::GenericOp copyOp) {
+    if (hasMarker(copyOp, getCopyToWorkgroupMemoryMarker())) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointAfter(copyOp);
+      rewriter.create<gpu::BarrierOp>(copyOp.getLoc());
+    }
+  });
+}
+
 /// Return the number of iteration if it is static, otherwise returns 0.
 static int64_t numIteration(scf::ForOp forOp) {
   auto lbCstOp = forOp.getLowerBound().getDefiningOp<arith::ConstantIndexOp>();
@@ -353,7 +365,8 @@ LogicalResult gpuDistributeSharedMemoryCopy(func::FuncOp funcOp) {
   });
   if (copiesToWorkgroupMem.empty()) return success();
 
-  // Step 0. First clean up the IR.
+  // Step 0. Add barriers and clean up IR.
+  insertBarriersAfter(funcOp);
   hoistAlloc(funcOp);
   removeRedundantBarriers(funcOp);
 
