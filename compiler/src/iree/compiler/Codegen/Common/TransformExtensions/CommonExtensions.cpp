@@ -544,9 +544,30 @@ DiagnosedSilenceableFailure transform_dialect::HoistStaticAllocOp::applyToOne(
 DiagnosedSilenceableFailure transform_dialect::GpuDistributeSharedMemoryCopy::applyToOne(
     func::FuncOp funcOp, transform::ApplyToEachResultList &results,
     transform::TransformState &state) {
+  SmallVector<linalg::GenericOp> copiesFromWorkgroupMem;
   funcOp.walk([&](linalg::GenericOp copyOp) {
+    if (copyOp.getDpsInputOperands().size() != 1 ||
+            copyOp.getDpsInitOperands().size() != 1)
+      return;
+    auto sourceType = copyOp.getDpsInputOperand(0)->get().getType().dyn_cast<MemRefType>();
+    auto destType = copyOp.getDpsInitOperand(0)->get().getType().dyn_cast<MemRefType>();
+    if (!sourceType || !destType)
+      return;
+
+    auto sourceSpace = sourceType.getMemorySpace();
+    auto destSpace = destType.getMemorySpace();
+    if (!sourceSpace || !destSpace)
+      return;
+
+    auto sourceGpuSpace = sourceSpace.dyn_cast_or_null<gpu::AddressSpaceAttr>();
+    auto destGpuSpace = destSpace.dyn_cast_or_null<gpu::AddressSpaceAttr>();
+    if ((!sourceGpuSpace || sourceGpuSpace.getValue() != gpu::GPUDialect::getWorkgroupAddressSpace()) &&
+        (!destGpuSpace || destGpuSpace.getValue() != gpu::GPUDialect::getWorkgroupAddressSpace()))
+      return;
+
     setMarker(copyOp, getCopyToWorkgroupMemoryMarker());
   });
+
   if (failed(mlir::iree_compiler::gpuDistributeSharedMemoryCopy(funcOp))) {
     return mlir::emitDefiniteFailure(
         state.getTopLevel(),
