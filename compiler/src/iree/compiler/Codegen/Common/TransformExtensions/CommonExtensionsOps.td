@@ -123,12 +123,6 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
       we never see a tile comprised of padding-only.
       - tiling_canonicalization: adds specific tiling-related canonicalization
       patterns.
-      - unroll_vectors_gpu_mma_sync: adds patterns that unroll vectors to a native tile
-      size for GPUs with mma operations. The size is currently hardcoded but 
-      should be refactored upstream and made pluggable.
-      - unroll_vectors_gpu_wmma: adds patterns that unroll vectors to a native tile
-      size for GPUs with wmma operations. The size is currently hardcoded but 
-      should be refactored upstream and made pluggable.
 
 
     #### Return modes:
@@ -165,7 +159,66 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
                        UnitAttr:$rank_reducing_vector,
                        UnitAttr:$swap_padding_elide_conditional,
                        UnitAttr:$swapping_patterns,
-                       UnitAttr:$tiling_canonicalization,
+                       UnitAttr:$tiling_canonicalization);
+  let results = (outs PDL_Operation:$result);
+
+  let assemblyFormat = "$target attr-dict";
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+
+  let builders = [
+    // TODO: Some bitvector to scale better than n-bools.
+    OpBuilder<(ins "Value":$target,
+                   "const ApplyPatternsOpPatterns &":$patterns)>
+  ];
+
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure applyToOne(
+        ::mlir::Operation *target,
+        ::mlir::transform::ApplyToEachResultList &results,
+        ::mlir::transform::TransformState &state);
+  }];
+}
+
+def ApplyPatternsToNestedOp : Op<Transform_Dialect, "iree.apply_patterns_to_nested",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     TransformEachOpTrait,
+     TransformOpInterface]> {
+  let description = [{
+    Similar to ApplyPatterns, this greedily applies patterns as specified by its
+    attributes.
+
+    This instead applies to an operation with a single region and restricts
+    application of patterns to the region. Internally this works by finding the nearest
+    parent with trait IsolatedFromAbove and using the GreedyPatternRewriter and
+    specifying a filter within the patterns themselves.
+
+    Returns the handle to the nested op whose content was modified for better
+    chaining APIs.
+
+    The following additive attributes can be set, they add patterns in an
+    unspecified order:
+      - unroll_vectors_gpu_mma_sync: adds patterns that unroll vectors to a native tile
+      size for GPUs with mma operations. The size is currently hardcoded but 
+      should be refactored upstream and made pluggable.
+      - unroll_vectors_gpu_wmma: adds patterns that unroll vectors to a native tile
+      size for GPUs with wmma operations. The size is currently hardcoded but 
+      should be refactored upstream and made pluggable.
+
+
+    #### Return modes:
+
+    This operation applies a set of patterns specified by attributes. If the
+    target operation contains more or less than one region, or is unable to
+    match an isolated parent from above, then the transform definitely fails.
+
+    If the pattern application fails, or if the underlying listener fails to
+    capture op handles, the transformation definitely fails.
+
+    Otherwise the transformation is successful and returns the handle to the
+    same payload as its operand to allow for simpler composition.
+  }];
+
+  let arguments = (ins PDL_Operation:$target,
                        UnitAttr:$unroll_vectors_gpu_mma_sync,
                        UnitAttr:$unroll_vectors_gpu_wmma);
   let results = (outs PDL_Operation:$result);
