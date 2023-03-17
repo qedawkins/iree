@@ -760,6 +760,19 @@ struct RemoveAssumeAlignOp
   }
 };
 
+/// Erase deallocations.
+struct RemoveDeallocOp
+    : public OpRewritePattern<memref::DeallocOp> {
+ public:
+  using OpRewritePattern<memref::DeallocOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(memref::DeallocOp op,
+                                PatternRewriter &rewriter) const override {
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 /// Removes memref.cast that turns static shapes into dynamic shapes.
 struct RemoveDynamicCastOp final : public OpRewritePattern<memref::CastOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -867,6 +880,7 @@ struct FlattenMemRefSubspanPass
     // This pass currently doesn't support alignment hints so remove them first.
     RewritePatternSet patterns(context);
     patterns.add<RemoveAssumeAlignOp>(context);
+    patterns.add<RemoveDeallocOp>(context);
     (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
 
     RewritePatternSet flattenPatterns(context);
