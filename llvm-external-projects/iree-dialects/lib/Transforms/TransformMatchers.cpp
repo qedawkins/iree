@@ -335,6 +335,24 @@ transform_ext::StructuredOpMatcher::dim(AllDims tag, CaptureDims captures) {
   return *this;
 }
 
+transform_ext::StructuredOpMatcher &
+transform_ext::StructuredOpMatcher::input(int64_t position,
+                                          CaptureAffineDims captures) {
+  predicates.push_back([=](linalg::LinalgOp linalgOp) -> bool {
+    LLVM_DEBUG(DBGS() << "capture affine dims of operand ");
+    OpOperand *operand = linalgOp.getDpsInputOperand(position);
+    SmallVector<unsigned> dims;
+    auto map = linalgOp.getMatchingIndexingMap(operand);
+    for (unsigned i = 0, e = map.getNumResults(); i < e; i++) {
+      if (map.getResult(i).isa<AffineDimExpr>())
+        dims.push_back(i);
+    }
+    captures.value = dims;
+    return true;
+  });
+  return *this;
+}
+
 transform_ext::StructuredOpMatcher::StructuredOpMatcher(
     StructuredOpMatcher &A, StructuredOpMatcher &B) {
 
@@ -1191,4 +1209,64 @@ void transform_ext::makeSoftmaxMatcher(
   auto &softmaxRoot =
       transform_ext::m_StructuredOp_Or(matcherContext, mulOperand, *divOperand);
   softmaxRootCapture = &softmaxRoot;
+}
+
+/// Matcher for convolutions.
+void transform_ext::makeConvolutionMatcher(
+    transform_ext::MatcherContext &matcherContext,
+    transform_ext::StructuredOpMatcher *&convolutionCapture,
+    transform_ext::StructuredOpMatcher *&fillCapture,
+    transform_ext::StructuredOpMatcher *&trailingCapture,
+    MatchedConvolutionCaptures &captures) {
+  // The core part of the matcher is anchored on a particular convolution op.
+  auto &nchwConvolution = m_StructuredOp<linalg::Conv2DNchwFchwOp>(matcherContext);
+  auto &nhwcConvolution = m_StructuredOp<linalg::Conv2DNhwcHwcfOp>(matcherContext);
+  auto &convolution = m_StructuredOp_Or(matcherContext, nchwConvolution, nhwcConvolution)
+          .input(0, CaptureAffineDims(captures.convolutionAffineInputDims))
+          // Capture op sizes.
+          .dim(AllDims(), CaptureDims(captures.convolutionOpSizes))
+          // Capture convolution element type.
+          .output(0, CaptureElementTypeBitWidth(
+                         captures.convolutionOutputElementalTypeBitWidth));
+  convolutionCapture = &convolution;
+
+  // Optional FillOp to create the unique output of the convolution.
+  auto &fill = m_StructuredOp<linalg::FillOp>(matcherContext)
+          .output(0, CaptureElementTypeBitWidth(
+                         captures.maybeFillElementalTypeBitWidth));
+  convolution = convolution.output(NumEqualsTo(1)).output(0, fill, OptionalMatch());
+  fillCapture = &fill;
+
+  // Optional trailing op can be any map, transpose, broadcast but
+  // not reduce or windowing operation for now.
+  // It must create the unique input for the reduction.
+  // TODO: match optional leading ops, one per input of the convolution.
+  auto &trailing =
+      m_StructuredOp<linalg::GenericOp>(matcherContext)
+          // All parallel dimensions.
+          .dim(AllDims(), utils::IteratorType::parallel)
+          // All inputs are any projected permutation.
+          .input(AllOperands(), IsProjectedPermutation())
+          .output(AllOperands(), IsPermutation())
+          .output(NumEqualsTo(1))
+          .dim(AllDims(), CaptureDims(captures.trailingOpSizes))
+          // Capture output elemental type.
+          .output(0, CaptureElementTypeBitWidth(
+                         captures.maybeTrailingOutputElementalTypeBitWidth));
+
+  // Optional trailing can be any map, transpose, broadcast but not reduce or
+  // windowing operation for now.
+  // It must be fed by the unique input for the reduction.
+  convolution = convolution.result(0, HasAnyUse(), trailing, OptionalMatch())
+                  .allTilableOpsCaptured<func::FuncOp>();
+  trailingCapture = &trailing;
+}
+
+void transform_ext::makeConvolutionMatcher(transform_ext::MatcherContext &context,
+                                         StructuredOpMatcher *&convolutionCapture,
+                                         MatchedConvolutionCaptures &captures) {
+  StructuredOpMatcher *fill;
+  StructuredOpMatcher *trailing;
+  makeConvolutionMatcher(context, convolutionCapture, fill, trailing,
+                       captures);
 }
