@@ -779,6 +779,72 @@ struct RemoveDynamicCastOp final : public OpRewritePattern<memref::CastOp> {
   }
 };
 
+struct SimplifyBindingConst : public OpRewritePattern<IREE::HAL::InterfaceBindingSubspanOp> {
+  using OpRewritePattern<IREE::HAL::InterfaceBindingSubspanOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp binding,
+                                PatternRewriter &rewriter) const override {
+    // Check to see if any dimensions operands are constants.  If so, we can
+    // substitute and drop them.
+    if (llvm::none_of(binding.getDynamicDims(), [](Value operand) {
+          APInt constSizeArg;
+          if (!matchPattern(operand, m_ConstantInt(&constSizeArg)))
+            return false;
+          return constSizeArg.isNonNegative();
+        }))
+      return failure();
+
+    auto memrefType = binding.getType().cast<MemRefType>();
+
+    // Ok, we have one or more constant operands.  Collect the non-constant ones
+    // and keep track of the resultant memref type to build.
+    SmallVector<int64_t, 4> newShapeConstants;
+    newShapeConstants.reserve(memrefType.getRank());
+    SmallVector<Value, 4> dynamicSizes;
+
+    unsigned dynamicDimPos = 0;
+    for (unsigned dim = 0, e = memrefType.getRank(); dim < e; ++dim) {
+      int64_t dimSize = memrefType.getDimSize(dim);
+      // If this is already static dimension, keep it.
+      if (!ShapedType::isDynamic(dimSize)) {
+        newShapeConstants.push_back(dimSize);
+        continue;
+      }
+      auto dynamicSize = binding.getDynamicDims()[dynamicDimPos];
+      APInt constSizeArg;
+      if (matchPattern(dynamicSize, m_ConstantInt(&constSizeArg)) &&
+          constSizeArg.isNonNegative()) {
+        // Dynamic shape dimension will be folded.
+        newShapeConstants.push_back(constSizeArg.getZExtValue());
+      } else {
+        // Dynamic shape dimension not folded; copy dynamicSize from old memref.
+        newShapeConstants.push_back(ShapedType::kDynamic);
+        dynamicSizes.push_back(dynamicSize);
+      }
+      dynamicDimPos++;
+    }
+
+    // Create new memref type (which will have fewer dynamic dimensions).
+    MemRefType newMemRefType =
+        MemRefType::Builder(memrefType).setShape(newShapeConstants);
+    assert(static_cast<int64_t>(dynamicSizes.size()) ==
+           newMemRefType.getNumDynamicDims());
+
+    // Create and insert the binding op for the new memref.
+    auto newBinding = rewriter.create<IREE::HAL::InterfaceBindingSubspanOp>(
+        binding.getLoc(), newMemRefType, binding.getSet(),
+        binding.getBinding(), binding.getDescriptorType(), binding.getByteOffset(),
+        dynamicSizes, binding.getAlignmentAttr(), binding.getDescriptorFlagsAttr());
+    // Insert a cast so we have the same type as the old alloc.
+    auto resultCast =
+        rewriter.create<memref::CastOp>(binding.getLoc(), binding.getType(), newBinding);
+
+    rewriter.replaceOp(binding, {resultCast});
+    return success();
+  }
+};
+
+
 //===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
@@ -941,6 +1007,7 @@ struct FlattenMemRefSubspanPass
     memref::AllocOp::getCanonicalizationPatterns(cleanupPatterns, context);
     memref::AllocaOp::getCanonicalizationPatterns(cleanupPatterns, context);
     memref::SubViewOp::getCanonicalizationPatterns(cleanupPatterns, context);
+    cleanupPatterns.add<SimplifyBindingConst>(context);
     cleanupPatterns.add<RemoveDynamicCastOp>(context);
 
     if (failed(applyPatternsAndFoldGreedily(getOperation(),
