@@ -503,6 +503,32 @@ struct LinearizeTransferReadIndices final
   }
 };
 
+/// Linearizes indices in vector.load ops.
+struct LinearizeVectorLoadIndices final
+    : public OpConversionPattern<vector::LoadOp> {
+  using OpConversionPattern<vector::LoadOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(
+      vector::LoadOp loadOp, OpAdaptor adaptor,
+      ConversionPatternRewriter &rewriter) const override {
+    if (!isRankZeroOrOneMemRef(adaptor.getBase().getType())) {
+      return rewriter.notifyMatchFailure(
+          loadOp, "expected converted memref of rank <= 1");
+    }
+    Value linearIndex = linearizeIndices(loadOp.getBase(),
+                                         loadOp.getIndices(),
+                                         loadOp.getLoc(), rewriter);
+    if (!linearIndex) {
+      return loadOp.emitOpError() << "failed to linearize index";
+    }
+
+    rewriter.replaceOpWithNewOp<vector::LoadOp>(
+        loadOp, loadOp.getVectorType(), adaptor.getBase(),
+        linearIndex);
+    return success();
+  }
+};
+
 /// Linearizes indices in vector.transfer_write ops.
 struct LinearizeTransferWriteIndices final
     : public OpConversionPattern<vector::TransferWriteOp> {
@@ -811,6 +837,7 @@ struct FlattenMemRefSubspanPass
              FlattenGlobal, FlattenGetGlobal, LinearizeLoadIndices,
              LinearizeMMALoadIndices, LinearizeStoreIndices,
              LinearizeMMAStoreIndices, LinearizeTransferReadIndices,
+             LinearizeVectorLoadIndices,
              LinearizeTransferWriteIndices, AdjustConversionCast,
              FlattenSubView, FoldMemRefReshape<memref::CollapseShapeOp>,
              FoldMemRefReshape<memref::ExpandShapeOp>>(internalTypeConverter,
@@ -854,6 +881,11 @@ struct FlattenMemRefSubspanPass
           return isRankZeroOrOneMemRef(
               readOp.getSource().getType().cast<MemRefType>());
         });
+    target.addDynamicallyLegalOp<vector::LoadOp>(
+        [](vector::LoadOp loadOp) {
+          return isRankZeroOrOneMemRef(
+              loadOp.getBase().getType().cast<MemRefType>());
+        });
     target.addDynamicallyLegalOp<vector::TransferWriteOp>(
         [](vector::TransferWriteOp writeOp) {
           return isRankZeroOrOneMemRef(
@@ -861,7 +893,8 @@ struct FlattenMemRefSubspanPass
         });
     target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
         [](UnrealizedConversionCastOp castOp) {
-          if (castOp->getNumOperands() != 1) return false;
+          if (castOp->getNumOperands() != 1)
+            return false;
 
           Type inputType = castOp->getOperandTypes().front();
           return !inputType.isa<BaseMemRefType>() ||
