@@ -11,6 +11,8 @@
 #include "iree/compiler/Codegen/LLVMGPU/TransformExtensions/LLVMGPUExtensions.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/Common/Common.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/AbstractReductionStrategy.h"
+#include "iree/compiler/Codegen/TransformDialectStrategies/GPU/AbstractConvolutionStrategy.h"
+#include "iree/compiler/Codegen/TransformDialectStrategies/GPU/ConvolutionImplicitGemmStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/MatmulTensorCoreStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/SmallReductionStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/StagedReductionStrategy.h"
@@ -68,9 +70,12 @@ using iree_compiler::gpu::kCudaMaxVectorLoadBitWidth;
 using iree_compiler::gpu::kCudaWarpSize;
 using iree_compiler::gpu::ReductionConfig;
 using iree_compiler::gpu::ReductionStrategy;
+using iree_compiler::gpu::ConvolutionConfig;
+using iree_compiler::gpu::ConvolutionStrategy;
 using iree_compiler::gpu::scaleUpByBitWidth;
 using iree_compiler::gpu::SmallReductionStrategy;
 using iree_compiler::gpu::StagedReductionStrategy;
+using iree_compiler::gpu::ConvolutionImplicitGemmStrategy;
 
 //===----------------------------------------------------------------------===//
 // General helpers.
@@ -522,6 +527,53 @@ static LogicalResult matchAndSetMatmulStrategy(func::FuncOp entryPoint,
   return success();
 }
 
+//===--------------------------------------------------------------------===//
+// Convolution strategies
+//===--------------------------------------------------------------------===//
+
+static ConvolutionConfig getConvolutionConfig(
+    const transform_ext::MatchedConvolutionCaptures &captures,
+    const GPUModel &gpuModel) {
+  int64_t bitWidth = captures.convolutionOutputElementalTypeBitWidth;
+  int64_t vectorSize = scaleUpByBitWidth(4, bitWidth);
+  int64_t maxNumThreads = 8 * gpuModel.subgroupSize;
+  int64_t subgroupSize = gpuModel.subgroupSize;
+  return ConvolutionConfig{maxNumThreads, vectorSize, subgroupSize, gpuModel.isSpirv,
+                         ConvolutionStrategy::ImplicitGemm};
+}
+
+LogicalResult mlir::iree_compiler::gpu::matchAndSetConvolutionStrategy(
+    func::FuncOp entryPoint, linalg::LinalgOp op, const GPUModel &gpuModel) {
+  // 1. Match a reduction and surrounding ops.
+  StructuredOpMatcher *convolution;
+  transform_ext::MatchedConvolutionCaptures captures;
+  transform_ext::MatcherContext matcherContext;
+  makeConvolutionMatcher(matcherContext, convolution, captures);
+  if (!matchPattern(op, *convolution))
+    return failure();
+
+  // 2. Construct the configuration and the strategy builder.
+  auto strategyBuilder = [&](ImplicitLocOpBuilder &b, Value variant) {
+    ConvolutionConfig convolutionConfig = getConvolutionConfig(captures, gpuModel);
+    if (convolutionConfig.strategy == ConvolutionStrategy::ImplicitGemm) {
+      auto strategy = ConvolutionImplicitGemmStrategy::create(op->getContext(), captures,
+                                                     convolutionConfig);
+      return buildConvolutionImplicitGemmStrategy(b, variant, strategy);
+    } else {
+      return llvm_unreachable("Unknown strategy");
+    }
+  };
+
+  // 3. Build strategy embedded into the IR.
+  createTransformRegion(entryPoint, strategyBuilder);
+
+  return success();
+}
+
+//===--------------------------------------------------------------------===//
+// Transform Entry Point
+//===--------------------------------------------------------------------===//
+
 LogicalResult mlir::iree_compiler::gpu::matchAndSetTransformStrategy(
     func::FuncOp entryPoint, Operation *op, const GPUModel &gpuModel) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
@@ -529,6 +581,8 @@ LogicalResult mlir::iree_compiler::gpu::matchAndSetTransformStrategy(
   if (succeeded(matchAndSetReductionStrategy(entryPoint, linalgOp, gpuModel)))
     return success();
   if (succeeded(matchAndSetMatmulStrategy(entryPoint, linalgOp, gpuModel)))
+    return success();
+  if (succeeded(matchAndSetConvolutionStrategy(entryPoint, linalgOp, gpuModel)))
     return success();
   // TODO: Add more transform dialect strategy for other kind of dispatch
   // regions.

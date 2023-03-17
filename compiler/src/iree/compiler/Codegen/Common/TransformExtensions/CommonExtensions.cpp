@@ -575,7 +575,7 @@ DiagnosedSilenceableFailure transform_dialect::ApplyPatternsToNestedOp::applyToO
   if (getUnrollVectorsGpuWmma())
     addUnrollVectorsGpuWmmaPatterns(patterns, target);
 
-  TrackingListener listener(state);
+  ErrorCheckingTrackingListener listener(state, *this);
   GreedyRewriteConfig config;
   config.listener = &listener;
   // Manually gather list of ops because the other GreedyPatternRewriteDriver
