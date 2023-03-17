@@ -260,6 +260,21 @@ class SPIRVVectorizePass : public SPIRVVectorizeBase<SPIRVVectorizePass> {
       llvm::dbgs() << "\n\n";
     });
 
+    // Lower vector gather.
+    {
+      RewritePatternSet patterns(context);
+      vector::populateVectorGatherLoweringPatterns(patterns);
+      if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+        return signalPassFailure();
+      }
+    }
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "--- After lowering vector.gather ops ---\n";
+      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+      llvm::dbgs() << "\n\n";
+    });
+
     // Then unroll vectors to native vector size. We try to use 128-bit
     // vectors for memory access and 4/2/1 vector sizes for computation.
     {
