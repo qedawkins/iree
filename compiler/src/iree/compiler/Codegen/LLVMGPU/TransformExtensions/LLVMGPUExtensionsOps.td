@@ -349,11 +349,8 @@ def VectorToMMAConversionOp : Op<Transform_Dialect, "iree.vector.vector_to_mma_c
 
   let skipDefaultBuilders = 1;
   let builders = [
-    OpBuilder<(ins "Value":$target,
-               CArg<"bool", "false">:$useMmaSync,
-               CArg<"bool", "false">:$useWmma)>,
+    OpBuilder<(ins "Value":$target)>
   ];
-
   let extraClassDeclaration = [{
     ::mlir::DiagnosedSilenceableFailure applyToOne(
         ::mlir::Operation *target,

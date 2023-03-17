@@ -59,11 +59,6 @@ llvm::cl::opt<bool> clGPUUseMMASync(
     "iree-codegen-llvmgpu-use-mma-sync",
     llvm::cl::desc("use mma sync instead of wmma ops"), llvm::cl::init(false));
 
-/// Flag used to toggle using mma.sync vs wmma when targetting tensorcore.
-llvm::cl::opt<bool> clGPUEnableImplicitGemm(
-    "iree-codegen-llvmgpu-enable-implicit-gemm",
-    llvm::cl::desc("enable the transform dialect implementation of implicit gemm"), llvm::cl::init(false));
-
 }  // namespace iree_compiler
 }  // namespace mlir
 
@@ -616,7 +611,7 @@ static Optional<int64_t> getLinalgDimSize(linalg::LinalgOp op, int64_t d) {
 }
 
 /// Set configuration for reduction transform dialect based strategy.
-static LogicalResult setTransformDialectFileConfig(
+static LogicalResult setReductionTransformDialectConfig(
     func::FuncOp entryPoint, linalg::LinalgOp op,
     const TargetInfo &targetInfo) {
   if (!clGPUCodegenTransformDialectFileName.empty() &&
@@ -630,6 +625,7 @@ static LogicalResult setTransformDialectFileConfig(
       clGPUCodegenTransformDialectFileName.empty()) {
     return failure();
   }
+  if (!targetInfo.hasWarpShuffle) return failure();
 
   // Transform script file provided, use it.
   auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
@@ -639,44 +635,11 @@ static LogicalResult setTransformDialectFileConfig(
     return setTranslationInfo(entryPoint, translationInfo);
   }
 
-  return failure();
-}
-
-/// Set configuration for reduction transform dialect based strategy.
-static LogicalResult setReductionTransformDialectConfig(
-    func::FuncOp entryPoint, linalg::LinalgOp op,
-    const TargetInfo &targetInfo) {
-  if (!clGPUEnableTransformDialectJit)
-    return failure();
-
-  if (!targetInfo.hasWarpShuffle) return failure();
-
   iree_compiler::gpu::GPUModel gpuModel;
   if (failed(iree_compiler::gpu::matchAndSetReductionStrategy(entryPoint, op,
                                                               gpuModel)))
     return failure();
 
-  auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-      entryPoint.getContext(),
-      IREE::Codegen::DispatchLoweringPassPipeline::TransformDialectCodegen);
-  return setTranslationInfo(entryPoint, translationInfo);
-}
-
-/// Set configuration for reduction transform dialect based strategy.
-static LogicalResult setConvolutionTransformDialectConfig(
-    func::FuncOp entryPoint, linalg::LinalgOp op,
-    const TargetInfo &targetInfo) {
-  if (!clGPUEnableTransformDialectJit || !clGPUEnableImplicitGemm)
-    return failure();
-
-  iree_compiler::gpu::GPUModel gpuModel;
-  if (failed(iree_compiler::gpu::matchAndSetConvolutionStrategy(entryPoint, op,
-                                                              gpuModel)))
-    return failure();
-
-  auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-      entryPoint.getContext(),
-      IREE::Codegen::DispatchLoweringPassPipeline::TransformDialectCodegen);
   return setTranslationInfo(entryPoint, translationInfo);
 }
 
@@ -995,15 +958,7 @@ static LogicalResult setRootConfig(func::FuncOp entryPointFn,
     return setUserConfig(entryPointFn, computeOp, compilationInfo);
   }
   if (auto linalgOp = dyn_cast<linalg::LinalgOp>(computeOp)) {
-    if (succeeded(setTransformDialectFileConfig(entryPointFn, linalgOp,
-                                                     targetInfo))) {
-      return success();
-    }
     if (succeeded(setReductionTransformDialectConfig(entryPointFn, linalgOp,
-                                                     targetInfo))) {
-      return success();
-    }
-    if (succeeded(setConvolutionTransformDialectConfig(entryPointFn, linalgOp,
                                                      targetInfo))) {
       return success();
     }

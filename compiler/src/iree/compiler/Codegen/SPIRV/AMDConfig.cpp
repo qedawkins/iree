@@ -79,16 +79,6 @@ LogicalResult setAMDCodeGenConfig(const spirv::TargetEnv &targetEnv,
   if (auto linalgOp = dyn_cast<linalg::LinalgOp>(rootOp)) {
     if (isMatmulOrBatchMatmul(linalgOp))
       return setAMDMatmulConfig(linalgOp, targetEnv);
-
-    if (isa<linalg::Conv2DNchwFchwOp, linalg::Conv2DNhwcHwcfOp>(linalgOp)) {
-      Optional<int64_t> coopSubgroupSize = limits.getSubgroupSize();
-      // AMD RDNA architectures supports both wave32 and wave64 modes. Prefer to use
-      // wave32 mode for better performance.
-      if (Optional<int> minSize = limits.getMinSubgroupSize())
-        coopSubgroupSize = *minSize;
-      if (succeeded(setConvOpTransformConfig(linalgOp, *coopSubgroupSize, 16)))
-        return success();
-    }
   }
 
   return TypeSwitch<Operation *, LogicalResult>(rootOp)

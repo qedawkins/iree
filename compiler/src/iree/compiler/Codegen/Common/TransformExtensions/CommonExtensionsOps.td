@@ -123,6 +123,12 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
       we never see a tile comprised of padding-only.
       - tiling_canonicalization: adds specific tiling-related canonicalization
       patterns.
+      - unroll_vectors_gpu_mma_sync: adds patterns that unroll vectors to a native tile
+      size for GPUs with mma operations. The size is currently hardcoded but 
+      should be refactored upstream and made pluggable.
+      - unroll_vectors_gpu_wmma: adds patterns that unroll vectors to a native tile
+      size for GPUs with wmma operations. The size is currently hardcoded but 
+      should be refactored upstream and made pluggable.
 
 
     #### Return modes:
@@ -159,66 +165,7 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
                        UnitAttr:$rank_reducing_vector,
                        UnitAttr:$swap_padding_elide_conditional,
                        UnitAttr:$swapping_patterns,
-                       UnitAttr:$tiling_canonicalization);
-  let results = (outs PDL_Operation:$result);
-
-  let assemblyFormat = "$target attr-dict";
-  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
-
-  let builders = [
-    // TODO: Some bitvector to scale better than n-bools.
-    OpBuilder<(ins "Value":$target,
-                   "const ApplyPatternsOpPatterns &":$patterns)>
-  ];
-
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure applyToOne(
-        ::mlir::Operation *target,
-        ::mlir::transform::ApplyToEachResultList &results,
-        ::mlir::transform::TransformState &state);
-  }];
-}
-
-def ApplyPatternsToNestedOp : Op<Transform_Dialect, "iree.apply_patterns_to_nested",
-    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-     TransformEachOpTrait,
-     TransformOpInterface]> {
-  let description = [{
-    Similar to ApplyPatterns, this greedily applies patterns as specified by its
-    attributes.
-
-    This instead applies to an operation with a single region and restricts
-    application of patterns to the region. Internally this works by finding the nearest
-    parent with trait IsolatedFromAbove and using the GreedyPatternRewriter and
-    specifying a filter within the patterns themselves.
-
-    Returns the handle to the nested op whose content was modified for better
-    chaining APIs.
-
-    The following additive attributes can be set, they add patterns in an
-    unspecified order:
-      - unroll_vectors_gpu_mma_sync: adds patterns that unroll vectors to a native tile
-      size for GPUs with mma operations. The size is currently hardcoded but 
-      should be refactored upstream and made pluggable.
-      - unroll_vectors_gpu_wmma: adds patterns that unroll vectors to a native tile
-      size for GPUs with wmma operations. The size is currently hardcoded but 
-      should be refactored upstream and made pluggable.
-
-
-    #### Return modes:
-
-    This operation applies a set of patterns specified by attributes. If the
-    target operation contains more or less than one region, or is unable to
-    match an isolated parent from above, then the transform definitely fails.
-
-    If the pattern application fails, or if the underlying listener fails to
-    capture op handles, the transformation definitely fails.
-
-    Otherwise the transformation is successful and returns the handle to the
-    same payload as its operand to allow for simpler composition.
-  }];
-
-  let arguments = (ins PDL_Operation:$target,
+                       UnitAttr:$tiling_canonicalization,
                        UnitAttr:$unroll_vectors_gpu_mma_sync,
                        UnitAttr:$unroll_vectors_gpu_wmma);
   let results = (outs PDL_Operation:$result);
@@ -250,31 +197,6 @@ def HoistStaticAllocOp :  Op<Transform_Dialect, "iree.hoist_static_alloc",
     #### Return modes
     This operation applies static alloc hoisting the whole region of the operand.
     It always return success.
-  }];
-
-  let arguments = (ins TransformHandleTypeInterface:$target);
-  let results = (outs TransformHandleTypeInterface:$result);
-
-  let assemblyFormat = "$target attr-dict `:` functional-type(operands, results)";
-  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
-
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure applyToOne(
-        ::mlir::func::FuncOp funcOp,
-        ::mlir::transform::ApplyToEachResultList &results,
-        ::mlir::transform::TransformState &state);
-  }];
-}
-
-def GpuDistributeSharedMemoryCopyOp :  Op<Transform_Dialect, "iree.gpu_distribute_shared_memory_copy",
-    [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
-     TransformOpInterface, TransformEachOpTrait]> {
-  let summary = "Distribute shared memory copies";
-  let description = [{
-    Find shared memory copies, hoist them, and distribute the copy loops.
-
-    #### Return modes
-    This operation applies to the entire function. It always return success.
   }];
 
   let arguments = (ins TransformHandleTypeInterface:$target);
@@ -589,43 +511,6 @@ def TileToForallAndWorkgroupCountRegionOp :
 
     ::llvm::SmallVector<::mlir::OpFoldResult> getMixedNumThreads();
     ::llvm::SmallVector<::mlir::OpFoldResult> getMixedTileSizes();
-  }];
-}
-
-def ConvertConv2DToImg2ColAndAdjustWorkgroupCountOp : Op<Transform_Dialect,
-    "iree.convert_conv2d_to_img2col_and_adjust_workgroup_count_region",
-    [FunctionalStyleTransformOpTrait,
-     MemoryEffectsOpInterface,
-     TransformOpInterface,
-     TransformEachOpTrait]> {
-  let description = [{
-    Wrapper around `structured.convert_conv2d_to_img2col` for use within IREE.
-
-    In addition to converting the conv2d to img2col, updates the
-    `workgroup_count` region of the export op corresponding to the
-    parent `func.func` of the target to match the changes to the problem
-    shape introduced by the conversion to img2col.
-    Please see the doc of `structured.convert_conv2d_to_img2col` for full
-    description of op semantics.
-  }];
-
-  let arguments = (ins TransformHandleTypeInterface:$target);
-  let results = (outs TransformHandleTypeInterface:$img2col_tensor,
-                      TransformHandleTypeInterface:$transformed);
-
-  let assemblyFormat =
-    "$target attr-dict `:` functional-type($target, results)";
-  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
-
-  let builders = [
-    OpBuilder<(ins "Value":$target)>
-  ];
-
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure applyToOne(
-        ::mlir::linalg::LinalgOp target,
-        ::mlir::transform::ApplyToEachResultList &results,
-        ::mlir::transform::TransformState &state);
   }];
 }
 

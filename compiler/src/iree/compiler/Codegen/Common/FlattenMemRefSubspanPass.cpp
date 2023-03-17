@@ -163,6 +163,7 @@ struct FlattenAlloc final : public OpConversionPattern<AllocOpTy> {
 
     rewriter.replaceOpWithNewOp<AllocOpTy>(allocOp, newType.cast<MemRefType>(),
                                            ValueRange{dynamicDim});
+
     return success();
   }
 };
@@ -502,32 +503,6 @@ struct LinearizeTransferReadIndices final
   }
 };
 
-/// Linearizes indices in vector.load ops.
-struct LinearizeVectorLoadIndices final
-    : public OpConversionPattern<vector::LoadOp> {
-  using OpConversionPattern<vector::LoadOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(
-      vector::LoadOp loadOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
-    if (!isRankZeroOrOneMemRef(adaptor.getBase().getType())) {
-      return rewriter.notifyMatchFailure(
-          loadOp, "expected converted memref of rank <= 1");
-    }
-    Value linearIndex = linearizeIndices(loadOp.getBase(),
-                                         loadOp.getIndices(),
-                                         loadOp.getLoc(), rewriter);
-    if (!linearIndex) {
-      return loadOp.emitOpError() << "failed to linearize index";
-    }
-
-    rewriter.replaceOpWithNewOp<vector::LoadOp>(
-        loadOp, loadOp.getVectorType(), adaptor.getBase(),
-        linearIndex);
-    return success();
-  }
-};
-
 /// Linearizes indices in vector.transfer_write ops.
 struct LinearizeTransferWriteIndices final
     : public OpConversionPattern<vector::TransferWriteOp> {
@@ -759,19 +734,6 @@ struct RemoveAssumeAlignOp
   }
 };
 
-/// Erase deallocations.
-struct RemoveDeallocOp
-    : public OpRewritePattern<memref::DeallocOp> {
- public:
-  using OpRewritePattern<memref::DeallocOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(memref::DeallocOp op,
-                                PatternRewriter &rewriter) const override {
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
 /// Removes memref.cast that turns static shapes into dynamic shapes.
 struct RemoveDynamicCastOp final : public OpRewritePattern<memref::CastOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -783,79 +745,13 @@ struct RemoveDynamicCastOp final : public OpRewritePattern<memref::CastOp> {
     // Restrict to the cases we generate in this pass--1-D static shape to 1-D
     // dynamic shape.
     if (srcType.getRank() == 1 && srcType.hasStaticShape() &&
-        dstType.getRank() == 1) {
+        dstType.getRank() == 1 && !dstType.hasStaticShape()) {
       rewriter.replaceOp(castOp, castOp.getSource());
       return success();
     }
     return failure();
   }
 };
-
-struct SimplifyBindingConst : public OpRewritePattern<IREE::HAL::InterfaceBindingSubspanOp> {
-  using OpRewritePattern<IREE::HAL::InterfaceBindingSubspanOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp binding,
-                                PatternRewriter &rewriter) const override {
-    // Check to see if any dimensions operands are constants.  If so, we can
-    // substitute and drop them.
-    if (llvm::none_of(binding.getDynamicDims(), [](Value operand) {
-          APInt constSizeArg;
-          if (!matchPattern(operand, m_ConstantInt(&constSizeArg)))
-            return false;
-          return constSizeArg.isNonNegative();
-        }))
-      return failure();
-
-    auto memrefType = binding.getType().cast<MemRefType>();
-
-    // Ok, we have one or more constant operands.  Collect the non-constant ones
-    // and keep track of the resultant memref type to build.
-    SmallVector<int64_t, 4> newShapeConstants;
-    newShapeConstants.reserve(memrefType.getRank());
-    SmallVector<Value, 4> dynamicSizes;
-
-    unsigned dynamicDimPos = 0;
-    for (unsigned dim = 0, e = memrefType.getRank(); dim < e; ++dim) {
-      int64_t dimSize = memrefType.getDimSize(dim);
-      // If this is already static dimension, keep it.
-      if (!ShapedType::isDynamic(dimSize)) {
-        newShapeConstants.push_back(dimSize);
-        continue;
-      }
-      auto dynamicSize = binding.getDynamicDims()[dynamicDimPos];
-      APInt constSizeArg;
-      if (matchPattern(dynamicSize, m_ConstantInt(&constSizeArg)) &&
-          constSizeArg.isNonNegative()) {
-        // Dynamic shape dimension will be folded.
-        newShapeConstants.push_back(constSizeArg.getZExtValue());
-      } else {
-        // Dynamic shape dimension not folded; copy dynamicSize from old memref.
-        newShapeConstants.push_back(ShapedType::kDynamic);
-        dynamicSizes.push_back(dynamicSize);
-      }
-      dynamicDimPos++;
-    }
-
-    // Create new memref type (which will have fewer dynamic dimensions).
-    MemRefType newMemRefType =
-        MemRefType::Builder(memrefType).setShape(newShapeConstants);
-    assert(static_cast<int64_t>(dynamicSizes.size()) ==
-           newMemRefType.getNumDynamicDims());
-
-    // Create and insert the binding op for the new memref.
-    auto newBinding = rewriter.create<IREE::HAL::InterfaceBindingSubspanOp>(
-        binding.getLoc(), newMemRefType, binding.getSet(),
-        binding.getBinding(), binding.getDescriptorType(), binding.getByteOffset(),
-        dynamicSizes, binding.getAlignmentAttr(), binding.getDescriptorFlagsAttr());
-    // Insert a cast so we have the same type as the old alloc.
-    auto resultCast =
-        rewriter.create<memref::CastOp>(binding.getLoc(), binding.getType(), newBinding);
-
-    rewriter.replaceOp(binding, {resultCast});
-    return success();
-  }
-};
-
 
 //===----------------------------------------------------------------------===//
 // Pass
@@ -879,7 +775,6 @@ struct FlattenMemRefSubspanPass
     // This pass currently doesn't support alignment hints so remove them first.
     RewritePatternSet patterns(context);
     patterns.add<RemoveAssumeAlignOp>(context);
-    patterns.add<RemoveDeallocOp>(context);
     (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
 
     RewritePatternSet flattenPatterns(context);
@@ -916,7 +811,6 @@ struct FlattenMemRefSubspanPass
              FlattenGlobal, FlattenGetGlobal, LinearizeLoadIndices,
              LinearizeMMALoadIndices, LinearizeStoreIndices,
              LinearizeMMAStoreIndices, LinearizeTransferReadIndices,
-             LinearizeVectorLoadIndices,
              LinearizeTransferWriteIndices, AdjustConversionCast,
              FlattenSubView, FoldMemRefReshape<memref::CollapseShapeOp>,
              FoldMemRefReshape<memref::ExpandShapeOp>>(internalTypeConverter,
@@ -960,11 +854,6 @@ struct FlattenMemRefSubspanPass
           return isRankZeroOrOneMemRef(
               readOp.getSource().getType().cast<MemRefType>());
         });
-    target.addDynamicallyLegalOp<vector::LoadOp>(
-        [](vector::LoadOp loadOp) {
-          return isRankZeroOrOneMemRef(
-              loadOp.getBase().getType().cast<MemRefType>());
-        });
     target.addDynamicallyLegalOp<vector::TransferWriteOp>(
         [](vector::TransferWriteOp writeOp) {
           return isRankZeroOrOneMemRef(
@@ -972,8 +861,7 @@ struct FlattenMemRefSubspanPass
         });
     target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
         [](UnrealizedConversionCastOp castOp) {
-          if (castOp->getNumOperands() != 1)
-            return false;
+          if (castOp->getNumOperands() != 1) return false;
 
           Type inputType = castOp->getOperandTypes().front();
           return !inputType.isa<BaseMemRefType>() ||
@@ -1020,7 +908,6 @@ struct FlattenMemRefSubspanPass
     memref::AllocOp::getCanonicalizationPatterns(cleanupPatterns, context);
     memref::AllocaOp::getCanonicalizationPatterns(cleanupPatterns, context);
     memref::SubViewOp::getCanonicalizationPatterns(cleanupPatterns, context);
-    cleanupPatterns.add<SimplifyBindingConst>(context);
     cleanupPatterns.add<RemoveDynamicCastOp>(context);
 
     if (failed(applyPatternsAndFoldGreedily(getOperation(),

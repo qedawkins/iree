@@ -92,8 +92,6 @@ void build1DSplittingStrategyWithOptionalThreadMapping(
 struct GPUModel {
   static constexpr StringLiteral kDefaultGPU = "DefaultGPU";
   StringRef model = kDefaultGPU;
-  int64_t subgroupSize = kCudaWarpSize;
-  bool isSpirv = false;
 };
 
 /// Map an N-D parallel, 1-D reduction operation with optional leading and
@@ -106,11 +104,6 @@ struct GPUModel {
 /// reduction strategy. The transform dialect IR is added in a top-level
 /// ModuleOp after the `entryPoint` func::FuncOp.
 LogicalResult matchAndSetReductionStrategy(func::FuncOp entryPoint,
-                                           linalg::LinalgOp op,
-                                           const GPUModel& gpuModel);
-
-/// Lower a convolution to an implicit gemm.
-LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
                                            linalg::LinalgOp op,
                                            const GPUModel& gpuModel);
 
