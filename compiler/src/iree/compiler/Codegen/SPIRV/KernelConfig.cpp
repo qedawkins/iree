@@ -1054,24 +1054,6 @@ static LogicalResult setReductionConfig(const spirv::TargetEnv &targetEnv,
   if (!targetEnv.allows(spirv::Capability::GroupNonUniformShuffle))
     return failure();
 
-  {  // Go down transform dialect path.
-    MLIRContext *context = funcOp.getContext();
-    func::FuncOp funcOp = op->getParentOfType<func::FuncOp>();
-    auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-        context, CodeGenPipeline::TransformDialectCodegen);
-    LLVM_DEBUG(llvm::dbgs() << "using transform dialect...\n");
-
-    gpu::GPUModel gpuModel;
-    if (failed(gpu::matchAndSetReductionStrategy(funcOp, op, gpuModel)))
-      return failure();
-
-    FailureOr<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(funcOp);
-    const int subgroupSize = targetEnv.getResourceLimits().getSubgroupSize();
-    exportOp->setSubgroupSizeAttr(Builder(context).getIndexAttr(subgroupSize));
-    return setTranslationInfo(op->getParentOfType<func::FuncOp>(),
-                              translationInfo);
-  }
-
   SmallVector<unsigned> reductionDims;
   op.getReductionDims(reductionDims);
   if (reductionDims.size() != 1 || reductionDims[0] != op.getNumLoops() - 1)

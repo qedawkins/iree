@@ -93,11 +93,18 @@ struct GPUModel {
   static constexpr StringLiteral kDefaultGPU = "DefaultGPU";
   StringRef model = kDefaultGPU;
   bool hasWarpShuffle = false;
+  int64_t subgroupSize = kCudaWarpSize;
+  bool isSpirv = false;
 };
 
 /// Try to find an exisiting transform dialect strategy for a given entry point.
 LogicalResult matchAndSetTransformStrategy(func::FuncOp entryPoint,
                                            Operation* op,
+                                           const GPUModel& gpuModel);
+
+/// Lower a convolution to an implicit gemm.
+LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
+                                           linalg::LinalgOp op,
                                            const GPUModel& gpuModel);
 
 }  // namespace gpu
