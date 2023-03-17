@@ -71,6 +71,11 @@ struct CaptureDims : public CaptureStaticValue<SmallVector<int64_t>> {
   using Base::Base;
 };
 
+/// Captures the indices of affine dims in the affine map.
+struct CaptureAffineDims : public CaptureStaticValue<SmallVector<unsigned>> {
+  using Base::Base;
+};
+
 /// Captures the rank of the operation.
 struct CaptureRank : public CaptureStaticValue<int64_t> {
   using Base::Base;
@@ -366,6 +371,7 @@ public:
   StructuredOpMatcher &rank(CaptureRank capture);
   StructuredOpMatcher &dim(int64_t dimension, CaptureDim capture);
   StructuredOpMatcher &dim(AllDims tag, CaptureDims captures);
+  StructuredOpMatcher &input(int64_t position, CaptureAffineDims dims);
 
   //===-------------------------------------------------------------------===//
   // Constraints on input operands.
@@ -761,6 +767,30 @@ void makeSoftmaxMatcher(
     transform_ext::MatcherContext &context,
     transform_ext::StructuredOpMatcher *&maxReductionCapture,
     transform_ext::StructuredOpMatcher *&softmaxRootCapture);
+
+struct MatchedConvolutionCaptures {
+  SmallVector<unsigned> convolutionAffineInputDims = {};
+  SmallVector<int64_t> convolutionOpSizes = {};
+  SmallVector<int64_t> trailingOpSizes = {};
+  int64_t convolutionOutputElementalTypeBitWidth = 0;
+  int64_t maybeTrailingOutputElementalTypeBitWidth = 0;
+  int64_t maybeFillElementalTypeBitWidth = 0;
+};
+
+/// Creates a group of matchers for:
+///
+///     trailing(convolution(leading(), fill()))
+///
+/// where fill is a FillOp and trailing is elementwise operations whose presence is
+/// optional. Each matcher will capture the corresponding operation.
+void makeConvolutionMatcher(transform_ext::MatcherContext &context,
+                          StructuredOpMatcher *&convolutionCapture,
+                          StructuredOpMatcher *&fillCapture,
+                          StructuredOpMatcher *&trailingCapture,
+                          MatchedConvolutionCaptures &captures);
+void makeConvolutionMatcher(transform_ext::MatcherContext &context,
+                          StructuredOpMatcher *&convolutionCapture,
+                          MatchedConvolutionCaptures &captures);
 
 } // namespace transform_ext
 } // namespace mlir
