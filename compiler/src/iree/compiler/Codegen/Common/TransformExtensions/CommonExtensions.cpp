@@ -17,6 +17,7 @@
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -539,6 +540,46 @@ DiagnosedSilenceableFailure transform_dialect::HoistStaticAllocOp::applyToOne(
   IRRewriter rewriter(funcOp->getContext());
   mlir::iree_compiler::hoistStaticallyBoundAllocationsInFunc<memref::AllocOp>(
       rewriter, funcOp);
+  results.push_back(funcOp);
+  return DiagnosedSilenceableFailure::success();
+}
+
+//===----------------------------------------------------------------------===//
+// GpuDistributeSharedMemoryCopyOp
+//===----------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure transform_dialect::GpuDistributeSharedMemoryCopyOp::applyToOne(
+    func::FuncOp funcOp, transform::ApplyToEachResultList &results,
+    transform::TransformState &state) {
+  SmallVector<linalg::GenericOp> copiesFromWorkgroupMem;
+  funcOp.walk([&](linalg::GenericOp copyOp) {
+    if (copyOp.getDpsInputOperands().size() != 1 ||
+            copyOp.getDpsInitOperands().size() != 1)
+      return;
+    auto sourceType = copyOp.getDpsInputOperand(0)->get().getType().dyn_cast<MemRefType>();
+    auto destType = copyOp.getDpsInitOperand(0)->get().getType().dyn_cast<MemRefType>();
+    if (!sourceType || !destType)
+      return;
+
+    auto sourceSpace = sourceType.getMemorySpace();
+    auto destSpace = destType.getMemorySpace();
+    if (!sourceSpace || !destSpace)
+      return;
+
+    auto sourceGpuSpace = sourceSpace.dyn_cast_or_null<gpu::AddressSpaceAttr>();
+    auto destGpuSpace = destSpace.dyn_cast_or_null<gpu::AddressSpaceAttr>();
+    if ((!sourceGpuSpace || sourceGpuSpace.getValue() != gpu::GPUDialect::getWorkgroupAddressSpace()) &&
+        (!destGpuSpace || destGpuSpace.getValue() != gpu::GPUDialect::getWorkgroupAddressSpace()))
+      return;
+
+    setMarker(copyOp, getCopyToWorkgroupMemoryMarker());
+  });
+
+  if (failed(mlir::iree_compiler::gpuDistributeSharedMemoryCopy(funcOp))) {
+    return mlir::emitDefiniteFailure(
+        state.getTopLevel(),
+        "Pattern failed to apply");
+  }
   results.push_back(funcOp);
   return DiagnosedSilenceableFailure::success();
 }
