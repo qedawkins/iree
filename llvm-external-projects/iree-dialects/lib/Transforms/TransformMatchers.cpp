@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -152,6 +153,15 @@ bool transform_ext::StructuredOpMatcher::match(Operation *op) {
 
   captured = linalgOp;
   return true;
+}
+
+transform_ext::StructuredOpMatcher &
+transform_ext::StructuredOpMatcher::isConvolution() {
+  predicates.push_back([=](linalg::LinalgOp linalgOp) -> bool {
+    LLVM_DEBUG(DBGS() << "Checking convolution: " << linalgOp);
+    return succeeded(linalg::detail::verifyConvolutionInterface(linalgOp));
+  });
+  return *this;
 }
 
 //===---------------------------------------------------------------------===//
@@ -1221,7 +1231,9 @@ void transform_ext::makeConvolutionMatcher(
   // The core part of the matcher is anchored on a particular convolution op.
   auto &nchwConvolution = m_StructuredOp<linalg::Conv2DNchwFchwOp>(matcherContext);
   auto &nhwcConvolution = m_StructuredOp<linalg::Conv2DNhwcHwcfOp>(matcherContext);
-  auto &convolution = m_StructuredOp_Or(matcherContext, nchwConvolution, nhwcConvolution)
+  auto &genericConvolution = m_StructuredOp<linalg::GenericOp>(matcherContext).isConvolution();
+  auto &namedConvolution = m_StructuredOp_Or(matcherContext, nchwConvolution, nhwcConvolution);
+  auto &convolution = m_StructuredOp_Or(matcherContext, namedConvolution, genericConvolution)
           .input(0, CaptureAffineDims(captures.convolutionAffineInputDims))
           // Capture op sizes.
           .dim(AllDims(), CaptureDims(captures.convolutionOpSizes))
