@@ -99,18 +99,17 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   }
   int kSize = captures.convolutionOpSizes[4] * captures.convolutionOpSizes[5] * captures.convolutionOpSizes[6];
 
-  if (mSize > nSize) {
-    tileM = true;
-    workgroupTileSizes.push_back(std::min(maxNumThreadsToUse, 1 * convolutionConfig.subgroupSize));
-    workgroupTileSizes.push_back(nSize % 32 != 0 ? 16 : 32);
-  } else {
-    workgroupTileSizes.push_back(mSize % 32 != 0 ? 16 : 32);
-    workgroupTileSizes.push_back(std::min(maxNumThreadsToUse, 1 * convolutionConfig.subgroupSize));
-  }
+  LLVM_DEBUG(DBGS() << "M size:" << mSize << ", " << mSize % 32 << "\n");
+  LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
+  LLVM_DEBUG(DBGS() << "M size:" << kSize << ", " << kSize % 32 << "\n");
+
+  workgroupTileSizes.push_back(mSize % 32 != 0 ? 16 : 32);
+  workgroupTileSizes.push_back(nSize % 32 != 0 ? 16 : 32);
 
   // Thread-level
   // ============
   numThreadsXInBlock = std::min(maxNumThreadsToUse, 1 * convolutionConfig.subgroupSize);
+  numThreadsXToDistribute = workgroupTileSizes[2];
   numWarpsXInBlock = numThreadsXInBlock / convolutionConfig.subgroupSize;
 
   // Reduction tile size
@@ -124,7 +123,7 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
 void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
     ImplicitLocOpBuilder &b, Value variantH,
     const ConvolutionImplicitGemmStrategy &strategy) {
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   ApplyPatternsOpPatterns emptyConfiguration;
   auto pdlOperationType = pdl::OperationType::get(b.getContext());
@@ -144,7 +143,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   auto transformedH = img2colWorkgroupOp.getTransformed();
   auto matmulH = b.create<transform::GetProducerOfOperand>(pdlOperationType, transformedH, 0);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 3. Bubble reshapes introduced by im2col to the boundaries of the kernel.
   ApplyPatternsOpPatterns configuration;
@@ -194,7 +193,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   //maybeFillH = b.create<FuseIntoContainingOp>(maybeFillH, innerLoopH).getResult();
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 7. Promote to shared memory
   auto promoteOperandsOp = b.create<PromoteOperandsOp>(
@@ -237,7 +236,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*numWarps=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getWarpsTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allWarpAttrs.front()}));
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 10. Vectorize and unroll to wmma sizes
   funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
@@ -264,7 +263,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   unrollConfiguration.unrollVectorsGpuWmma = true;
   b.create<ApplyPatternsToNestedOp>(matmulLoop, unrollConfiguration);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 11. Bufferize
   ApplyPatternsOpPatterns foldConfiguration;
@@ -281,7 +280,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   variantH = b.create<IREEBufferizeOp>(variantH, /*targetGPU=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 12. Post-bufferization mapping to blocks and threads
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
@@ -298,5 +297,5 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   b.create<VectorToMMAConversionOp>(funcH, /*useMmaSync=*/false, /*useWmma=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 }
