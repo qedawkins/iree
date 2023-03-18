@@ -33,10 +33,16 @@ class ConvolutionImplicitGemmStrategy : public AbstractConvolutionStrategy {
     return {numWarpsXInBlock, 1, 1};
   }
 
-  std::array<int64_t, 3> getThreadsTileSizes() const override {
+  std::array<int64_t, 3> getFullThreadsTileSizes() const {
     if (tileM)
       return {0, numThreadsXInBlock, 0};
     return {0, 0, numThreadsXInBlock};
+  }
+
+  std::array<int64_t, 3> getThreadsTileSizes() const override {
+    if (tileM)
+      return {0, numThreadsXToDistribute, 0};
+    return {0, 0, numThreadsXToDistribute};
   }
 
   std::array<int64_t, 3> getWarpsTileSizes() const override {
@@ -68,6 +74,7 @@ class ConvolutionImplicitGemmStrategy : public AbstractConvolutionStrategy {
   void configure(const ConvolutionConfig &convolutionConfig);
 
   int64_t numThreadsXInBlock;
+  int64_t numThreadsXToDistribute;
   int64_t numWarpsXInBlock;
   int64_t innerLoopTileSize;
 
