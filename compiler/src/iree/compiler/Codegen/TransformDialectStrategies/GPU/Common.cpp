@@ -542,6 +542,27 @@ static ConvolutionConfig getConvolutionConfig(
                          ConvolutionStrategy::ImplicitGemm};
 }
 
+static LogicalResult verifyImplicitGemmCompatibleConvolutionCaptures(
+    const transform_ext::MatchedConvolutionCaptures &captures,
+    const GPUModel &gpuModel) {
+  bool isNchw =
+      captures.convolutionAffineInputDims[0] + 1 == captures.convolutionAffineInputDims[1];
+  int mSize;
+  int nSize;
+  if (isNchw) {
+    mSize = captures.convolutionOpSizes[1];
+    nSize = captures.convolutionOpSizes[2] * captures.convolutionOpSizes[3];
+  } else {
+    mSize = captures.convolutionOpSizes[1] * captures.convolutionOpSizes[2];
+    nSize = captures.convolutionOpSizes[3];
+  }
+  int kSize = captures.convolutionOpSizes[4] * captures.convolutionOpSizes[5] * captures.convolutionOpSizes[6];
+
+  if (mSize % 16 != 0 || nSize % 16 != 0 || kSize % 16 != 0)
+    return failure();
+  return success();
+}
+
 LogicalResult mlir::iree_compiler::gpu::matchAndSetConvolutionStrategy(
     func::FuncOp entryPoint, linalg::LinalgOp op, const GPUModel &gpuModel) {
   // 1. Match a reduction and surrounding ops.
@@ -550,6 +571,9 @@ LogicalResult mlir::iree_compiler::gpu::matchAndSetConvolutionStrategy(
   transform_ext::MatcherContext matcherContext;
   makeConvolutionMatcher(matcherContext, convolution, captures);
   if (!matchPattern(op, *convolution))
+    return failure();
+
+  if (failed(verifyImplicitGemmCompatibleConvolutionCaptures(captures, gpuModel)))
     return failure();
 
   // 2. Construct the configuration and the strategy builder.
