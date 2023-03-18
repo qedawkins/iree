@@ -546,7 +546,7 @@ static LogicalResult verifyImplicitGemmCompatibleConvolutionCaptures(
     const transform_ext::MatchedConvolutionCaptures &captures,
     const GPUModel &gpuModel) {
   bool isNchw =
-      captures.convolutionAffineInputDims[0] + 1 == captures.convolutionAffineInputDims[1];
+      captures.convolutionDims.inputChannel[0] < captures.convolutionDims.filterLoop[0];
   int mSize;
   int nSize;
   if (isNchw) {
