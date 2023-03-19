@@ -54,7 +54,7 @@ namespace mlir {
 namespace iree_compiler {
 
 // For optimal performance we always want to copy 128 bits
-static constexpr int copyVectorNumBits = 128;
+static constexpr int copyVectorNumBits = 64;
 
 /// Patterns for copy to shared memory mapping. Copy to shared memory are not
 /// part of the launch config but needs to be distributed on the workgroup
