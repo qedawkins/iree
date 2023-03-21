@@ -156,10 +156,15 @@ bool transform_ext::StructuredOpMatcher::match(Operation *op) {
 }
 
 transform_ext::StructuredOpMatcher &
-transform_ext::StructuredOpMatcher::isConvolution() {
+transform_ext::StructuredOpMatcher::isBatchedConv2d() {
   predicates.push_back([=](linalg::LinalgOp linalgOp) -> bool {
     LLVM_DEBUG(DBGS() << "Checking convolution: " << linalgOp);
-    return succeeded(linalg::detail::verifyConvolutionInterface(linalgOp));
+    if (!linalg::detail::getMatchConvolutionMessage(
+            mlir::linalg::detail::isConvolutionInterfaceImpl(linalgOp)).empty())
+      return false;
+    if (linalgOp.getNumParallelLoops() != 4 || linalgOp.getNumReductionLoops() != 3)
+      return false;
+    return true;
   });
   return *this;
 }
@@ -1229,11 +1234,12 @@ void transform_ext::makeConvolutionMatcher(
     transform_ext::StructuredOpMatcher *&trailingCapture,
     MatchedConvolutionCaptures &captures) {
   // The core part of the matcher is anchored on a particular convolution op.
-  auto &nchwConvolution = m_StructuredOp<linalg::Conv2DNchwFchwOp>(matcherContext);
-  auto &nhwcConvolution = m_StructuredOp<linalg::Conv2DNhwcHwcfOp>(matcherContext);
-  auto &genericConvolution = m_StructuredOp<linalg::GenericOp>(matcherContext).isConvolution();
-  auto &namedConvolution = m_StructuredOp_Or(matcherContext, nchwConvolution, nhwcConvolution);
-  auto &convolution = m_StructuredOp_Or(matcherContext, namedConvolution, genericConvolution)
+  //auto &nchwConvolution = m_StructuredOp<linalg::Conv2DNchwFchwOp>(matcherContext);
+  //auto &nhwcConvolution = m_StructuredOp<linalg::Conv2DNhwcHwcfOp>(matcherContext);
+  //auto &genericConvolution = m_StructuredOp<linalg::GenericOp>(matcherContext).isBatchedConv2d();
+  //auto &namedConvolution = m_StructuredOp_Or(matcherContext, nchwConvolution, nhwcConvolution);
+  //auto &convolution = m_StructuredOp_Or(matcherContext, namedConvolution, genericConvolution)
+  auto &convolution = m_StructuredOp(matcherContext).isBatchedConv2d()
           .input(0, CaptureAffineDims(captures.convolutionAffineInputDims))
           // Capture op sizes.
           .dim(AllDims(), CaptureDims(captures.convolutionOpSizes))
