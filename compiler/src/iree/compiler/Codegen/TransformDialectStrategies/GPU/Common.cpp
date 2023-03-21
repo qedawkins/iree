@@ -467,18 +467,28 @@ static ConvolutionConfig getConvolutionConfig(
 static LogicalResult verifyImplicitGemmCompatibleConvolutionCaptures(
     const transform_ext::MatchedConvolutionCaptures &captures,
     const GPUModel &gpuModel) {
-  bool isNchw =
-      captures.convolutionDims.inputChannel[0] < captures.convolutionDims.filterLoop[0];
-  int mSize;
-  int nSize;
+  bool isNchw = captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0];
+  int channelSize = 1;
+  int imageSize = 1;
+  for (auto dim : captures.convolutionDims.outputChannel)
+    channelSize *= captures.convolutionOpSizes[dim];
+  for (auto dim : captures.convolutionDims.outputImage)
+    imageSize *= captures.convolutionOpSizes[dim];
+
+  int mSize, nSize;
   if (isNchw) {
-    mSize = captures.convolutionOpSizes[1];
-    nSize = captures.convolutionOpSizes[2] * captures.convolutionOpSizes[3];
+    mSize = channelSize;
+    nSize = imageSize;
   } else {
-    mSize = captures.convolutionOpSizes[1] * captures.convolutionOpSizes[2];
-    nSize = captures.convolutionOpSizes[3];
+    mSize = imageSize;
+    nSize = channelSize;
   }
-  int kSize = captures.convolutionOpSizes[4] * captures.convolutionOpSizes[5] * captures.convolutionOpSizes[6];
+
+  int kSize = 1;
+  for (auto dim : captures.convolutionDims.filterLoop)
+    kSize *= captures.convolutionOpSizes[dim];
+  for (auto dim : captures.convolutionDims.inputChannel)
+    kSize *= captures.convolutionOpSizes[dim];
 
   if (mSize % 16 != 0 || nSize % 16 != 0 || kSize % 16 != 0)
     return failure();

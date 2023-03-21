@@ -1585,135 +1585,9 @@ static Value getConvolvedIndex(OpBuilder &b, Location loc,
   return b.create<arith::AddIOp>(loc, convIndex, hIndex);
 }
 
-static FailureOr<std::pair<Operation *, Operation *>>
-rewriteInIm2ColGeneric(RewriterBase & rewriter, linalg::GenericOp genericOp) {
-
-  mlir::linalg::detail::ConvolutionDimensions dimensions;
-  if (!linalg::detail::getMatchConvolutionMessage(
-              linalg::detail::isConvolutionInterfaceImpl(genericOp, &dimensions)).empty())
-    return failure();
-
-  if (genericOp.getNumParallelLoops() != 4 || genericOp.getNumReductionLoops() != 3)
-    return failure();
-
-  auto inputType = genericOp.getInputs()[0].getType().cast<ShapedType>();
-  auto filterType = genericOp.getInputs()[1].getType().cast<ShapedType>();
-  auto outputType = genericOp.getOutputs()[0].getType().cast<ShapedType>();
-
-  if (!filterType.hasStaticShape())
-    return rewriter.notifyMatchFailure(
-        genericOp, "expected a static shape for the filter");
-
-  if (!inputType.hasStaticShape())
-    return rewriter.notifyMatchFailure(genericOp,
-                                       "expected a static shape for the input");
-
-  // TODO: Support dilation.
-  if (!llvm::all_of(
-      dimensions.dilations, [](unsigned element) { return element == 1; }))
-    return rewriter.notifyMatchFailure(genericOp,
-                                       "expected all ones for dilations");
-
-  Value input = genericOp.getInputs()[0];
-  Value filter = genericOp.getInputs()[1];
-  Value output = genericOp.getOutputs()[0];
-
-  auto filterShape = filterType.getShape();
-  auto outputShape = outputType.getShape();
-
-  int n = outputShape[0];
-  int oc = outputShape[1];
-  int oh = outputShape[2];
-  int ow = outputShape[3];
-  int ic = filterShape[1];
-  int fh = filterShape[2];
-  int fw = filterShape[3];
-
-  auto loc = genericOp.getLoc();
-  MLIRContext *context = rewriter.getContext();
-
-  SmallVector<ReassociationIndices> filterReassocIndices = {{0}, {1, 2, 3}};
-  auto reshapedFilterType =
-      RankedTensorType::get({oc, ic * fh * fw}, inputType.getElementType());
-  Value reshapedFilter = rewriter.create<tensor::CollapseShapeOp>(
-      loc, reshapedFilterType, filter, filterReassocIndices);
-
-  SmallVector<ReassociationIndices> outputReassocIndices = {{0}, {1}, {2, 3}};
-  auto reshapedOutputType =
-      RankedTensorType::get({n, oc, oh * ow}, outputType.getElementType());
-  Value reshapedOutput = rewriter.create<tensor::CollapseShapeOp>(
-      loc, reshapedOutputType, output, outputReassocIndices);
-
-  // Convert the input to a (BKN) tensor.
-  SmallVector<int64_t, 4> colTensorShape = {n, ic * fh * fw, oh * ow};
-  Value colTensor = rewriter.create<tensor::EmptyOp>(
-      loc, colTensorShape, inputType.getElementType());
-
-  auto nloops = colTensorShape.size();
-
-  auto parallel = utils::IteratorType::parallel;
-  auto reduction = utils::IteratorType::reduction;
-  SmallVector<utils::IteratorType, 3> img2colIterators(nloops, parallel);
-
-  SmallVector<AffineMap, 4> img2colIndexingMaps = {
-      AffineMap::getMultiDimIdentityMap(nloops, context)};
-
-  auto img2ColTensor = rewriter.create<linalg::GenericOp>(
-      loc, colTensor.getType(),
-      /*inputs=*/ValueRange{}, /*outputs=*/colTensor, img2colIndexingMaps,
-      img2colIterators,
-      [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-        // Get the iterators named based on the matmul (batch, m, k).
-        auto bIndex = nestedBuilder.create<linalg::IndexOp>(loc, 0);
-        auto kIndex = nestedBuilder.create<linalg::IndexOp>(loc, 1);
-        auto nIndex = nestedBuilder.create<linalg::IndexOp>(loc, 2);
-
-        // Recover the original iteration indices from the problem/input sizes.
-        auto kIndices = unrollIndex(nestedBuilder, nestedLoc, kIndex,
-                ArrayRef<int64_t>{ic, fh, fw});
-        auto icIndex = kIndices[0];
-        auto fhIndex = kIndices[1];
-        auto fwIndex = kIndices[2];
-
-        auto nIndices = unrollIndex(nestedBuilder, nestedLoc, nIndex,
-                ArrayRef<int64_t>{oh, ow});
-        auto ohIndex = nIndices[0];
-        auto owIndex = nIndices[1];
-
-        // Extract the input element corresponding to the expanded indices.
-        auto hIndex = getConvolvedIndex(nestedBuilder, nestedLoc,
-                ohIndex, fhIndex, dimensions.strides[0]);
-        auto wIndex = getConvolvedIndex(nestedBuilder, nestedLoc,
-                owIndex, fwIndex, dimensions.strides[1]);
-
-        // im2col[n, ic*fh*fw, oh*ow] = input[n, ic, sh*oh + fh, sw*ow + fw]
-        SmallVector<Value> extractionIndices{bIndex, icIndex, hIndex, wIndex};
-        Value inputVal = nestedBuilder.create<tensor::ExtractOp>(
-                loc, input, extractionIndices);
-        nestedBuilder.create<linalg::YieldOp>(nestedLoc, inputVal);
-      });
-
-  // Because the filter does not share the same batch dimension,
-  // the batch dimension is only used in indexing the input and output. Thus
-  // we cannot use existing linalg named ops like linalg.batch_matmul.
-  // i.e. M x K * (B x) K x N = (B x) M x N
-  AffineExpr bDim, mDim, nDim, kDim;
-  bindDims(context, bDim, mDim, nDim, kDim);
-  auto lhsMap = AffineMap::get(4, 0, {mDim, kDim}, context);
-  auto rhsMap = AffineMap::get(4, 0, {bDim, kDim, nDim}, context);
-  auto resultMap = AffineMap::get(4, 0, {bDim, mDim, nDim}, context);
-  SmallVector<utils::IteratorType> genericIterators = {parallel, parallel,
-                                                       parallel, reduction};
-  auto newGenericOp = rewriter.create<linalg::GenericOp>(
-      loc, reshapedOutputType,
-      /*inputs=*/ValueRange{reshapedFilter, img2ColTensor.getResult(0)},
-      /*outputs=*/ValueRange{reshapedOutput},
-      ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators);
-  IRMapping mapper;
-  genericOp.getRegion().cloneInto(&newGenericOp.getRegion(), mapper);
-
-  Value leftOperand = newGenericOp.getRegion().front().getArgument(0);
-  Value rightOperand = newGenericOp.getRegion().front().getArgument(1);
+static void swapMatmulBlockArgs(linalg::GenericOp genericOp) {
+  Value leftOperand = genericOp.getRegion().front().getArgument(0);
+  Value rightOperand = genericOp.getRegion().front().getArgument(1);
   auto leftUses = leftOperand.getUses();
   auto rightUses = rightOperand.getUses();
   leftOperand.replaceUsesWithIf(rightOperand, [&](OpOperand &use) {
@@ -1735,7 +1609,7 @@ rewriteInIm2ColGeneric(RewriterBase & rewriter, linalg::GenericOp genericOp) {
   for (Operation *user : rightOperand.getUsers())
     rightOps.insert(user);
 
-  for (Operation &op : newGenericOp.getRegion().front()) {
+  for (Operation &op : genericOp.getRegion().front()) {
     if (leftOps.contains(&op) || rightOps.contains(&op))
       continue;
 
@@ -1766,6 +1640,206 @@ rewriteInIm2ColGeneric(RewriterBase & rewriter, linalg::GenericOp genericOp) {
     if (rightIdx >= 0)
       rightOps.insert(&op);
   }
+}
+
+static FailureOr<std::pair<Operation *, Operation *>>
+rewriteInIm2ColGeneric(RewriterBase & rewriter, linalg::GenericOp genericOp) {
+
+  mlir::linalg::detail::ConvolutionDimensions dimensions;
+  if (!linalg::detail::getMatchConvolutionMessage(
+              linalg::detail::isConvolutionInterfaceImpl(genericOp, &dimensions)).empty())
+    return failure();
+
+  if (dimensions.outputImage.size() < 2 || dimensions.filterLoop.size() < 2)
+    return failure();
+
+  auto inputType = genericOp.getInputs()[0].getType().cast<ShapedType>();
+  auto filterType = genericOp.getInputs()[1].getType().cast<ShapedType>();
+  auto outputType = genericOp.getOutputs()[0].getType().cast<ShapedType>();
+
+  if (!filterType.hasStaticShape())
+    return rewriter.notifyMatchFailure(
+        genericOp, "expected a static shape for the filter");
+
+  if (!inputType.hasStaticShape())
+    return rewriter.notifyMatchFailure(genericOp,
+                                       "expected a static shape for the input");
+
+  // TODO: Support dilation.
+  if (!llvm::all_of(
+      dimensions.dilations, [](unsigned element) { return element == 1; }))
+    return rewriter.notifyMatchFailure(genericOp,
+                                       "expected all ones for dilations");
+
+  Value input = genericOp.getInputs()[0];
+  Value filter = genericOp.getInputs()[1];
+  Value output = genericOp.getOutputs()[0];
+
+
+  bool isNchw = dimensions.outputChannel[0] < dimensions.outputImage[0];
+  bool isBatched = dimensions.batch.size() > 0;
+
+  auto dimSizes = genericOp.getStaticLoopRanges();
+
+  int n = 0;
+  if (isBatched) n = dimSizes[dimensions.batch[0]];
+  int oc = dimSizes[dimensions.outputChannel[0]];
+  int oh = dimSizes[dimensions.outputImage[0]];
+  int ow = dimSizes[dimensions.outputImage[1]];
+  int ic = dimSizes[dimensions.inputChannel[0]];
+  int fh = dimSizes[dimensions.filterLoop[0]];
+  int fw = dimSizes[dimensions.filterLoop[1]];
+
+  //auto filterShape = filterType.getShape();
+  //auto outputShape = outputType.getShape();
+
+  //int n = outputShape[0];
+  //int oc = outputShape[1];
+  //int oh = outputShape[2];
+  //int ow = outputShape[3];
+  //int ic = filterShape[1];
+  //int fh = filterShape[2];
+  //int fw = filterShape[3];
+
+  auto loc = genericOp.getLoc();
+  MLIRContext *context = rewriter.getContext();
+
+  SmallVector<ReassociationIndices> filterReassocIndices =
+      isNchw ? SmallVector<ReassociationIndices>{{0}, {1, 2, 3}}
+             : SmallVector<ReassociationIndices>{{0, 1, 2}, {3}};
+  SmallVector<int64_t> filterShape =
+      isNchw ? SmallVector<int64_t>{oc, ic * fh * fw}
+             : SmallVector<int64_t>{ic * fh * fw, oc};
+  auto reshapedFilterType =
+      RankedTensorType::get({oc, ic * fh * fw}, inputType.getElementType());
+  Value reshapedFilter = rewriter.create<tensor::CollapseShapeOp>(
+      loc, reshapedFilterType, filter, filterReassocIndices);
+
+  SmallVector<ReassociationIndices> outputReassocIndices;
+  SmallVector<int64_t> outputShape;
+  if (isNchw) {
+    outputReassocIndices =
+        isBatched ? SmallVector<ReassociationIndices>{{0}, {1}, {2, 3}}
+                  : SmallVector<ReassociationIndices>{{1}, {2, 3}};
+    outputShape =
+        isBatched ? SmallVector<int64_t>{n, oc, oh * ow}
+                  : SmallVector<int64_t>{oc, oh * ow};
+  } else {
+    outputReassocIndices =
+        isBatched ? SmallVector<ReassociationIndices>{{0}, {1, 2}, {3}}
+                  : SmallVector<ReassociationIndices>{{1, 2}, {3}};
+    outputShape =
+        isBatched ? SmallVector<int64_t>{n, oh * ow, oc}
+                  : SmallVector<int64_t>{oh * ow, oc};
+  }
+  auto reshapedOutputType =
+      RankedTensorType::get(outputShape, outputType.getElementType());
+  Value reshapedOutput = rewriter.create<tensor::CollapseShapeOp>(
+      loc, reshapedOutputType, output, outputReassocIndices);
+
+  // Convert the input to a (BKN) tensor.
+  SmallVector<int64_t, 4> colTensorShape;
+  if (isNchw)
+    colTensorShape =
+        isBatched ? SmallVector<int64_t, 4>{n, ic * fh * fw, oh * ow}
+                  : SmallVector<int64_t, 4>{ic * fh * fw, oh * ow};
+  else
+    colTensorShape =
+        isBatched ? SmallVector<int64_t, 4>{n, oh * ow, fh * fw * ic}
+                  : SmallVector<int64_t, 4>{oh * ow, fh * fw * ic};
+  Value colTensor = rewriter.create<tensor::EmptyOp>(
+      loc, colTensorShape, inputType.getElementType());
+
+  auto nloops = colTensorShape.size();
+
+  auto parallel = utils::IteratorType::parallel;
+  auto reduction = utils::IteratorType::reduction;
+  SmallVector<utils::IteratorType, 3> img2colIterators(nloops, parallel);
+
+  SmallVector<AffineMap, 4> img2colIndexingMaps = {
+      AffineMap::getMultiDimIdentityMap(nloops, context)};
+
+  auto img2ColTensor = rewriter.create<linalg::GenericOp>(
+      loc, colTensor.getType(),
+      /*inputs=*/ValueRange{}, /*outputs=*/colTensor, img2colIndexingMaps,
+      img2colIterators,
+      [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+        // Get the iterators named based on the matmul (batch?, m, k).
+        Value bIndex;
+        if (isBatched) bIndex = nestedBuilder.create<linalg::IndexOp>(loc, 0);
+
+        Value kIndex, parallelIndex;
+        if (isNchw) {
+          kIndex = nestedBuilder.create<linalg::IndexOp>(loc, isBatched ? 1 : 0);
+          parallelIndex = nestedBuilder.create<linalg::IndexOp>(loc, isBatched ? 2 : 1);
+        } else {
+          parallelIndex = nestedBuilder.create<linalg::IndexOp>(loc, isBatched ? 1 : 0);
+          kIndex = nestedBuilder.create<linalg::IndexOp>(loc, isBatched ? 2 : 1);
+        }
+
+        // Recover the original iteration indices from the problem/input sizes.
+        auto kIndices = unrollIndex(nestedBuilder, nestedLoc, kIndex,
+                isNchw ? ArrayRef<int64_t>{ic, fh, fw} : ArrayRef<int64_t>{fh, fw, ic});
+        auto icIndex = kIndices[isNchw ? 0 : 2];
+        auto fhIndex = kIndices[isNchw ? 1 : 0];
+        auto fwIndex = kIndices[isNchw ? 2 : 1];
+
+        auto parallelIndices = unrollIndex(nestedBuilder, nestedLoc, parallelIndex,
+                ArrayRef<int64_t>{oh, ow});
+        auto ohIndex = parallelIndices[0];
+        auto owIndex = parallelIndices[1];
+
+        // Extract the input element corresponding to the expanded indices.
+        auto hIndex = getConvolvedIndex(nestedBuilder, nestedLoc,
+                ohIndex, fhIndex, dimensions.strides[0]);
+        auto wIndex = getConvolvedIndex(nestedBuilder, nestedLoc,
+                owIndex, fwIndex, dimensions.strides[1]);
+
+        // im2col[n, ic*fh*fw, oh*ow] = input[n, ic, sh*oh + fh, sw*ow + fw]
+        // or
+        // im2col[n, oh*ow, fh*fw*ic] = input[n, sh*oh + fh, sw*ow + fw, ic]
+        SmallVector<Value> extractionIndices;
+        if (isNchw)
+          extractionIndices = {bIndex, icIndex, hIndex, wIndex};
+        else
+          extractionIndices = {bIndex, hIndex, wIndex, icIndex};
+        Value inputVal = nestedBuilder.create<tensor::ExtractOp>(
+                loc, input, extractionIndices);
+        nestedBuilder.create<linalg::YieldOp>(nestedLoc, inputVal);
+      });
+
+  // Because the filter does not share the same batch dimension,
+  // the batch dimension is only used in indexing the input and output. Thus
+  // we cannot use existing linalg named ops like linalg.batch_matmul.
+  // i.e. M x K * (B x) K x N = (B x) M x N
+  AffineExpr bDim, mDim, nDim, kDim;
+  if (isBatched)
+    bindDims(context, bDim, mDim, nDim, kDim);
+  else
+    bindDims(context, mDim, nDim, kDim);
+
+  int numMatmulLoops = isBatched ? 4 : 3;
+  auto lhsMap = AffineMap::get(numMatmulLoops, 0, {mDim, kDim}, context);
+  auto rhsMap = AffineMap::get(numMatmulLoops, 0,
+          isBatched ? SmallVector<AffineExpr>{bDim, kDim, nDim}
+                    : SmallVector<AffineExpr>{kDim, nDim}, context);
+  auto resultMap = AffineMap::get(numMatmulLoops, 0,
+          isBatched ? SmallVector<AffineExpr>{bDim, mDim, nDim}
+                    : SmallVector<AffineExpr>{kDim, nDim}, context);
+  SmallVector<utils::IteratorType> genericIterators;
+  if (isBatched)
+    genericIterators = {parallel, parallel, parallel, reduction};
+  else
+    genericIterators = {parallel, parallel, reduction};
+  auto newGenericOp = rewriter.create<linalg::GenericOp>(
+      loc, reshapedOutputType,
+      /*inputs=*/ValueRange{reshapedFilter, img2ColTensor.getResult(0)},
+      /*outputs=*/ValueRange{reshapedOutput},
+      ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators);
+  IRMapping mapper;
+  genericOp.getRegion().cloneInto(&newGenericOp.getRegion(), mapper);
+
+  if (isNchw) swapMatmulBlockArgs(newGenericOp);
 
   Value result = newGenericOp.getResults().front();
 
