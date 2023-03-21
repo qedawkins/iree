@@ -14,6 +14,7 @@
 #include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/Interfaces/BufferizationInterfaces.h"
 #include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/SPIRV/Utils.h"
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
@@ -167,6 +168,7 @@ void transform_dialect::ApplyPatternsOp::build(
   ADD_PATTERN(tilingCanonicalization, getTilingCanonicalizationAttrName)
   ADD_PATTERN(unrollVectorsGpuMmaSync, getUnrollVectorsGpuMmaSyncAttrName)
   ADD_PATTERN(unrollVectorsGpuWmma, getUnrollVectorsGpuWmmaAttrName)
+  ADD_PATTERN(unrollVectorsGpuCoopMat, getUnrollVectorsGpuCoopMatAttrName)
 #undef ADD_PATTERN
 }
 
@@ -327,6 +329,25 @@ static void addUnrollVectorsGpuWmmaPatterns(RewritePatternSet &patterns, Operati
                     .setUnrollTraversalOrderFn(unrollOrder));
 }
 
+static void addUnrollVectorsGpuCoopMatPatterns(RewritePatternSet &patterns, Operation *filter) {
+  auto unrollOrder = [](Operation *op) -> Optional<SmallVector<int64_t>> {
+    auto contract = dyn_cast<vector::ContractionOp>(op);
+    if (!contract) return std::nullopt;
+    return mlir::iree_compiler::gpuMmaUnrollOrder(contract);
+  };
+  auto getGPUCooperativeOpNativeVectorSize =
+    [filter](Operation *op) -> Optional<SmallVector<int64_t>> {
+      if (!filter->isProperAncestor(op))
+        return std::nullopt;
+      // Hard code the vector sizes for now.
+      return getCooperativeOpVectorShape(op, ArrayRef<int64_t>{16, 16, 16});
+  };
+  vector::populateVectorUnrollPatterns(
+      patterns, vector::UnrollVectorOptions()
+                    .setNativeShapeFn(getGPUCooperativeOpNativeVectorSize)
+                    .setUnrollTraversalOrderFn(unrollOrder));
+}
+
 static void addAdditionalIreePatterns(RewritePatternSet &patterns) {
   patterns.add<GenerateToConstant>(patterns.getContext());
 }
@@ -387,6 +408,8 @@ DiagnosedSilenceableFailure transform_dialect::ApplyPatternsOp::applyToOne(
     addUnrollVectorsGpuMmaSyncPatterns(patterns, target);
   if (getUnrollVectorsGpuWmma())
     addUnrollVectorsGpuWmmaPatterns(patterns, target);
+  if (getUnrollVectorsGpuCoopMat())
+    addUnrollVectorsGpuCoopMatPatterns(patterns, target);
 
   TrackingListener listener(state);
   GreedyRewriteConfig config;
@@ -476,6 +499,7 @@ void transform_dialect::ApplyPatternsToNestedOp::build(
   ///
   ADD_NESTED_PATTERN(unrollVectorsGpuMmaSync, getUnrollVectorsGpuMmaSyncAttrName)
   ADD_NESTED_PATTERN(unrollVectorsGpuWmma, getUnrollVectorsGpuWmmaAttrName)
+  ADD_NESTED_PATTERN(unrollVectorsGpuCoopMat, getUnrollVectorsGpuCoopMatAttrName)
 #undef ADD_NESTED_PATTERN
 }
 
@@ -498,6 +522,8 @@ DiagnosedSilenceableFailure transform_dialect::ApplyPatternsToNestedOp::applyToO
     addUnrollVectorsGpuMmaSyncPatterns(patterns, target);
   if (getUnrollVectorsGpuWmma())
     addUnrollVectorsGpuWmmaPatterns(patterns, target);
+  if (getUnrollVectorsGpuCoopMat())
+    addUnrollVectorsGpuCoopMatPatterns(patterns, target);
 
   TrackingListener listener(state);
   GreedyRewriteConfig config;

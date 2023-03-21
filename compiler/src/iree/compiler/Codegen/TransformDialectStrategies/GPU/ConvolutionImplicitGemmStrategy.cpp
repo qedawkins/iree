@@ -260,7 +260,10 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   Value matmulLoop = b.create<SplitHandlesOp>(forallOpsH, numLoops)->getResult(resultPos);
 
   ApplyPatternsOpPatterns unrollConfiguration;
-  unrollConfiguration.unrollVectorsGpuWmma = true;
+  if (strategy.getIsSpirv())
+    unrollConfiguration.unrollVectorsGpuCoopMat = true;
+  else
+    unrollConfiguration.unrollVectorsGpuWmma = true;
   b.create<ApplyPatternsToNestedOp>(matmulLoop, unrollConfiguration);
 
   //LLVM_DEBUG(b.create<PrintOp>(variantH));

@@ -89,6 +89,10 @@ Optional<SmallVector<int64_t>> getWmmaNativeVectorSize(Operation *op);
 /// Helper function to return native size for MMA.SYNC-based operations.
 Optional<SmallVector<int64_t>> getMmaNativeVectorSize(Operation *op);
 
+/// Helper function to return native size for Cooperative matrix ops.
+Optional<SmallVector<int64_t>> getCooperativeOpVectorShape(
+        Operation *op, ArrayRef<int64_t> nativeShape);
+
 /// Return true if the given memref has workgroup memory space.
 bool hasSharedMemoryAddressSpace(MemRefType memrefType);
 
