@@ -71,8 +71,8 @@ struct CaptureDims : public CaptureStaticValue<SmallVector<int64_t>> {
   using Base::Base;
 };
 
-/// Captures the indices of affine dims in the affine map.
-struct CaptureAffineDims : public CaptureStaticValue<SmallVector<unsigned>> {
+/// Captures the convolution dimensions of the target operation.
+struct CaptureConvDims : public CaptureStaticValue<mlir::linalg::detail::ConvolutionDimensions> {
   using Base::Base;
 };
 
@@ -323,7 +323,7 @@ public:
   /// Matches the given operation, hook for `matchPattern`.
   bool match(Operation *op);
 
-  StructuredOpMatcher &isBatchedConv2d();
+  StructuredOpMatcher &isConv2d(CaptureConvDims convDims);
 
   //===-------------------------------------------------------------------===//
   // Constraints on op rank and dims.
@@ -373,7 +373,6 @@ public:
   StructuredOpMatcher &rank(CaptureRank capture);
   StructuredOpMatcher &dim(int64_t dimension, CaptureDim capture);
   StructuredOpMatcher &dim(AllDims tag, CaptureDims captures);
-  StructuredOpMatcher &input(int64_t position, CaptureAffineDims dims);
 
   //===-------------------------------------------------------------------===//
   // Constraints on input operands.
@@ -771,7 +770,7 @@ void makeSoftmaxMatcher(
     transform_ext::StructuredOpMatcher *&softmaxRootCapture);
 
 struct MatchedConvolutionCaptures {
-  SmallVector<unsigned> convolutionAffineInputDims = {};
+  mlir::linalg::detail::ConvolutionDimensions convolutionDims = {};
   SmallVector<int64_t> convolutionOpSizes = {};
   SmallVector<int64_t> trailingOpSizes = {};
   int64_t convolutionOutputElementalTypeBitWidth = 0;
