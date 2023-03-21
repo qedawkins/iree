@@ -56,11 +56,11 @@ struct AbstractConvolutionStrategy : iree_compiler::AbstractConvolutionStrategy 
   int64_t getNumWarpsYInBlock() const { return getNumWarpsInBlock()[1]; }
   int64_t getNumWarpsZInBlock() const { return getNumWarpsInBlock()[2]; }
 
-  virtual std::array<int64_t, 3> getNumThreadsInBlock() const = 0;
-  virtual std::array<int64_t, 3> getNumWarpsInBlock() const = 0;
-  virtual std::array<int64_t, 3> getThreadsTileSizes() const = 0;
-  virtual std::array<int64_t, 3> getWarpsTileSizes() const = 0;
-  virtual std::array<int64_t, 4> getInnerLoopTileSizes() const = 0;
+  virtual SmallVector<int64_t> getNumThreadsInBlock() const = 0;
+  virtual SmallVector<int64_t> getNumWarpsInBlock() const = 0;
+  virtual SmallVector<int64_t> getThreadsTileSizes() const = 0;
+  virtual SmallVector<int64_t> getWarpsTileSizes() const = 0;
+  virtual SmallVector<int64_t> getInnerLoopTileSizes() const = 0;
 
   /// Derived quantities.
   SmallVector<Attribute> allThreadAttrs;
