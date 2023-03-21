@@ -323,7 +323,7 @@ public:
   /// Matches the given operation, hook for `matchPattern`.
   bool match(Operation *op);
 
-  StructuredOpMatcher &isConvolution();
+  StructuredOpMatcher &isBatchedConv2d();
 
   //===-------------------------------------------------------------------===//
   // Constraints on op rank and dims.
