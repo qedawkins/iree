@@ -83,25 +83,35 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   // ===========
 
   // Batch dimension
-  workgroupTileSizes.push_back(1);
+  for (int i = 0, e = captures.convolutionDims.batch.size(); i < e; i++)
+    workgroupTileSizes.push_back(1);
 
-  bool isNchw =
-      captures.convolutionAffineInputDims[0] + 1 == captures.convolutionAffineInputDims[1];
+  bool isNchw = captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0];
+  int channelSize = 1;
+  int imageSize = 1;
+  for (auto dim : captures.convolutionDims.outputChannel)
+    channelSize *= captures.convolutionOpSizes[dim];
+  for (auto dim : captures.convolutionDims.outputImage)
+    imageSize *= captures.convolutionOpSizes[dim];
 
-  int mSize;
-  int nSize;
+  int mSize, nSize;
   if (isNchw) {
-    mSize = captures.convolutionOpSizes[1];
-    nSize = captures.convolutionOpSizes[2] * captures.convolutionOpSizes[3];
+    mSize = channelSize;
+    nSize = imageSize;
   } else {
-    mSize = captures.convolutionOpSizes[1] * captures.convolutionOpSizes[2];
-    nSize = captures.convolutionOpSizes[3];
+    mSize = imageSize;
+    nSize = channelSize;
   }
-  int kSize = captures.convolutionOpSizes[4] * captures.convolutionOpSizes[5] * captures.convolutionOpSizes[6];
+
+  int kSize = 1;
+  for (auto dim : captures.convolutionDims.filterLoop)
+    kSize *= captures.convolutionOpSizes[dim];
+  for (auto dim : captures.convolutionDims.inputChannel)
+    kSize *= captures.convolutionOpSizes[dim];
 
   LLVM_DEBUG(DBGS() << "M size:" << mSize << ", " << mSize % 32 << "\n");
   LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
-  LLVM_DEBUG(DBGS() << "M size:" << kSize << ", " << kSize % 32 << "\n");
+  LLVM_DEBUG(DBGS() << "K size:" << kSize << ", " << kSize % 32 << "\n");
 
   workgroupTileSizes.push_back(mSize % 32 != 0 ? 16 : 32);
   workgroupTileSizes.push_back(nSize % 32 != 0 ? 16 : 32);

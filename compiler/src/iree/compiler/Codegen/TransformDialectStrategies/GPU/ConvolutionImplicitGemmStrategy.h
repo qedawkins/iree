@@ -25,38 +25,55 @@ class ConvolutionImplicitGemmStrategy : public AbstractConvolutionStrategy {
   ConvolutionImplicitGemmStrategy(const ConvolutionImplicitGemmStrategy &) = default;
   ConvolutionImplicitGemmStrategy &operator=(const ConvolutionImplicitGemmStrategy &) = default;
 
-  std::array<int64_t, 3> getNumThreadsInBlock() const override {
+  SmallVector<int64_t> getNumThreadsInBlock() const override {
     return {numThreadsXInBlock, 1, 1};
   }
 
-  std::array<int64_t, 3> getNumWarpsInBlock() const override {
+  SmallVector<int64_t> getNumWarpsInBlock() const override {
     return {numWarpsXInBlock, 1, 1};
   }
 
-  std::array<int64_t, 3> getFullThreadsTileSizes() const {
-    if (tileM)
-      return {0, numThreadsXInBlock, 0};
-    return {0, 0, numThreadsXInBlock};
+  SmallVector<int64_t> getFullThreadsTileSizes() const {
+    SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size(), 0);
+    if (!tileM)
+      tileSizes.push_back(0);
+    tileSizes.push_back(numThreadsXInBlock);
+    return tileSizes;
+    //if (tileM)
+    //  return {0, numThreadsXInBlock, 0};
+    //return {0, 0, numThreadsXInBlock};
   }
 
-  std::array<int64_t, 3> getThreadsTileSizes() const override {
-    if (tileM)
-      return {0, numThreadsXToDistribute, 0};
-    return {0, 0, numThreadsXToDistribute};
+  SmallVector<int64_t> getThreadsTileSizes() const override {
+    SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size(), 0);
+    if (!tileM)
+      tileSizes.push_back(0);
+    tileSizes.push_back(numThreadsXToDistribute);
+    return tileSizes;
+    //if (tileM)
+    //  return {0, numThreadsXToDistribute, 0};
+    //return {0, 0, numThreadsXToDistribute};
   }
 
-  std::array<int64_t, 3> getWarpsTileSizes() const override {
-    if (tileM)
-      return {0, numWarpsXInBlock, 0};
-    return {0, 0, numWarpsXInBlock};
+  SmallVector<int64_t> getWarpsTileSizes() const override {
+    SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size(), 0);
+    if (!tileM)
+      tileSizes.push_back(0);
+    tileSizes.push_back(numWarpsXInBlock);
+    return tileSizes;
+    //  return {0, numWarpsXInBlock, 0};
+    //return {0, 0, numWarpsXInBlock};
   }
 
-  std::array<int64_t, 4> getInnerLoopTileSizes() const override {
-    return {0, 0, 0, innerLoopTileSize};
+  SmallVector<int64_t> getInnerLoopTileSizes() const override {
+    SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size() + 2, 0);
+    tileSizes.push_back(innerLoopTileSize);
+    return tileSizes;
+    //return {0, 0, 0, innerLoopTileSize};
   }
 
   int64_t getImplicitGemmFilterOperandIndex() const {
-    if (captures.convolutionAffineInputDims[0] + 1 == captures.convolutionAffineInputDims[1])
+    if (captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0])
       return 0;
     return 1;
   }
