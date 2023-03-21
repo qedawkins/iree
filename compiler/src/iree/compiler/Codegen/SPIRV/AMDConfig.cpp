@@ -15,6 +15,7 @@
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVAttributes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -80,14 +81,18 @@ LogicalResult setAMDCodeGenConfig(const spirv::TargetEnv &targetEnv,
     if (isMatmulOrBatchMatmul(linalgOp))
       return setAMDMatmulConfig(linalgOp, targetEnv);
 
-    if (isa<linalg::Conv2DNchwFchwOp, linalg::Conv2DNhwcHwcfOp>(linalgOp)) {
-      Optional<int64_t> coopSubgroupSize = limits.getSubgroupSize();
-      // AMD RDNA architectures supports both wave32 and wave64 modes. Prefer to use
-      // wave32 mode for better performance.
-      if (Optional<int> minSize = limits.getMinSubgroupSize())
-        coopSubgroupSize = *minSize;
-      if (succeeded(setConvOpTransformConfig(linalgOp, *coopSubgroupSize, 16)))
-        return success();
+    //if (isa<linalg::Conv2DNchwFchwOp, linalg::Conv2DNhwcHwcfOp>(linalgOp)) {
+    if (linalg::detail::getMatchConvolutionMessage(
+                mlir::linalg::detail::isConvolutionInterfaceImpl(linalgOp)).empty()) {
+      if (linalgOp.getNumParallelLoops() == 4 && linalgOp.getNumReductionLoops() == 3)  {
+        Optional<int64_t> coopSubgroupSize = limits.getSubgroupSize();
+        // AMD RDNA architectures supports both wave32 and wave64 modes. Prefer to use
+        // wave32 mode for better performance.
+        if (Optional<int> minSize = limits.getMinSubgroupSize())
+          coopSubgroupSize = *minSize;
+        if (succeeded(setConvOpTransformConfig(linalgOp, *coopSubgroupSize, 16)))
+          return success();
+      }
     }
   }
 
