@@ -324,7 +324,7 @@ public:
   /// Matches the given operation, hook for `matchPattern`.
   bool match(Operation *op);
 
-  StructuredOpMatcher &isBatchedConv2d();
+  StructuredOpMatcher &isConv2d();
 
   //===-------------------------------------------------------------------===//
   // Constraints on op rank and dims.
