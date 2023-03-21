@@ -62,6 +62,14 @@ static std::optional<OpOperand *> getFusableUse(Operation *op,
 /// Check if the producer generic op is fusable with the consumer generic op.
 static bool areFusableOps(MLIRContext *context, Operation *producerOp,
                           Operation *consumerOp) {
+  //if (auto linalgConsumerOp = dyn_cast<linalg::LinalgOp>(consumerOp)) {
+  //  if (!llvm::all_of(linalgConsumerOp.getIndexingMapsArray(), [](AffineMap map) {
+  //        return map.isProjectedPermutation();
+  //      })) {
+  //    return false;
+  //  }
+  //}
+
   // Check for i1 return types, if so aggressively fuse to avoid `i1` buffers.
   if (llvm::all_of(producerOp->getResultTypes(), [](Type t) {
         if (t.isInteger(1)) return true;
