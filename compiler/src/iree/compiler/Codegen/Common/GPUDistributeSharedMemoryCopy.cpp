@@ -53,17 +53,14 @@ static const llvm::StringRef kCopyDistributed = "copy_distributed";
 namespace mlir {
 namespace iree_compiler {
 
-// For optimal performance we always want to copy 128 bits
-static constexpr int copyVectorNumBits = 128;
-
 /// Patterns for copy to shared memory mapping. Copy to shared memory are not
 /// part of the launch config but needs to be distributed on the workgroup
 /// picked by the root op.
 static void populateTilingCopyToWorkgroupMemPatterns(
-    RewritePatternSet &patterns, ArrayRef<int64_t> workgroupSize) {
+    RewritePatternSet &patterns, ArrayRef<int64_t> workgroupSize, int copyVectorNumBits) {
   // Tile and distribute copy to workgroup memory.
   linalg::TileSizeComputationFunction wgCopyTileSizeFn =
-      [](OpBuilder &builder, Operation *operation) {
+      [copyVectorNumBits](OpBuilder &builder, Operation *operation) {
         // We tile to 4 as we want each thread to load 4 element in a cyclic
         // distribution.
         SmallVector<Value, 4> tileSizesVal;
@@ -113,7 +110,7 @@ static void populateTilingCopyToWorkgroupMemPatterns(
 /// Compute a tile size so that the numer of iteraton is equal to the flat
 /// workgroup size.
 static Optional<SmallVector<int64_t>> getTileToDistributableSize(
-    linalg::GenericOp copyOp, int64_t flatWorkgroupSize) {
+    linalg::GenericOp copyOp, int64_t flatWorkgroupSize, int copyVectorNumBits) {
   SmallVector<int64_t, 4> shape = copyOp.getStaticLoopRanges();
   unsigned bitWidth = copyOp.getDpsInitOperand(0)
                           ->get()
@@ -142,14 +139,14 @@ static Optional<SmallVector<int64_t>> getTileToDistributableSize(
 /// Pattern to tile copies using serial loops into a shape that can be
 /// distributed onto thread.
 static void populateTileToUnroll(RewritePatternSet &patterns,
-                                 int64_t flatWorkgroupSize) {
+                                 int64_t flatWorkgroupSize, int copyVectorNumBits) {
   linalg::TileSizeComputationFunction wgCopyTileSizeFn =
-      [flatWorkgroupSize](OpBuilder &builder, Operation *operation) {
+      [flatWorkgroupSize, copyVectorNumBits](OpBuilder &builder, Operation *operation) {
         SmallVector<Value, 4> tileSizesVal;
         auto copyOp = dyn_cast<linalg::GenericOp>(operation);
         if (!copyOp) return tileSizesVal;
         Optional<SmallVector<int64_t>> staticSize =
-            getTileToDistributableSize(copyOp, flatWorkgroupSize);
+            getTileToDistributableSize(copyOp, flatWorkgroupSize, copyVectorNumBits);
         for (int64_t dim : *staticSize) {
           tileSizesVal.push_back(
               builder.create<arith::ConstantIndexOp>(operation->getLoc(), dim));
@@ -201,7 +198,7 @@ SmallVector<linalg::ProcInfo> getIds(OpBuilder &b, Location loc,
 
 /// Return the shape of copy op that can be vectorized to a
 /// transfer_read/transfer_write of size `targetVectorSize`.
-SmallVector<int64_t> getNativeDstShape(linalg::GenericOp copyOp) {
+SmallVector<int64_t> getNativeDstShape(linalg::GenericOp copyOp, int copyVectorNumBits) {
   unsigned bitWidth = copyOp.getDpsInitOperand(0)
                           ->get()
                           .getType()
@@ -219,13 +216,13 @@ SmallVector<int64_t> getNativeDstShape(linalg::GenericOp copyOp) {
 
 /// Distribute linalg copy onto threads based on the flat id.
 static void populateTilingAndDistribute(RewritePatternSet &patterns,
-                                        Value flatThreadId) {
+                                        Value flatThreadId, int copyVectorNumBits) {
   linalg::TileSizeComputationFunction wgCopyTileSizeFn =
-      [](OpBuilder &builder, Operation *operation) {
+      [copyVectorNumBits](OpBuilder &builder, Operation *operation) {
         SmallVector<Value, 4> tileSizesVal;
         auto copyOp = dyn_cast<linalg::GenericOp>(operation);
         if (!copyOp) return tileSizesVal;
-        SmallVector<int64_t> staticSize = getNativeDstShape(copyOp);
+        SmallVector<int64_t> staticSize = getNativeDstShape(copyOp, copyVectorNumBits);
         for (int64_t dim : staticSize) {
           tileSizesVal.push_back(
               builder.create<arith::ConstantIndexOp>(operation->getLoc(), dim));
@@ -361,8 +358,13 @@ LogicalResult gpuDistributeSharedMemoryCopy(func::FuncOp funcOp) {
 
   int64_t flatWorkgroupSize =
       workgroupSize[0] * workgroupSize[1] * workgroupSize[2];
-  bool isAligned = llvm::all_of(
-      copiesToWorkgroupMem, [flatWorkgroupSize](linalg::GenericOp copyOp) {
+
+  // For optimal performance we always want to copy 128 bits
+  int copyVectorNumBits = 128;
+  bool isAligned = false;
+  while (copyVectorNumBits >= 32) {
+    isAligned = llvm::all_of(
+      copiesToWorkgroupMem, [flatWorkgroupSize, copyVectorNumBits](linalg::GenericOp copyOp) {
         MemRefType dstMemRefType =
             copyOp.getDpsInitOperand(0)->get().getType().cast<MemRefType>();
         auto shape = dstMemRefType.getShape();
@@ -370,7 +372,11 @@ LogicalResult gpuDistributeSharedMemoryCopy(func::FuncOp funcOp) {
             copyVectorNumBits / dstMemRefType.getElementTypeBitWidth();
         return canPerformVectorAccessUsingAllThreads(shape, flatWorkgroupSize,
                                                      targetVectorSize);
-      });
+    });
+    if (isAligned)
+      break;
+    copyVectorNumBits /= 2;
+  }
   debugPrint(funcOp, "After initial IR cleanup");
 
   if (isAligned) {
@@ -381,7 +387,7 @@ LogicalResult gpuDistributeSharedMemoryCopy(func::FuncOp funcOp) {
     // Step 1. tile copies to get to a shape that can be distributed to
     // 128bits per lane copies.
     RewritePatternSet serialTilingPatterns(context);
-    populateTileToUnroll(serialTilingPatterns, flatWorkgroupSize);
+    populateTileToUnroll(serialTilingPatterns, flatWorkgroupSize, copyVectorNumBits);
     if (failed(applyPatternsAndFoldGreedily(
             funcOp, std::move(serialTilingPatterns)))) {
       return failure();
@@ -392,7 +398,7 @@ LogicalResult gpuDistributeSharedMemoryCopy(func::FuncOp funcOp) {
     Value flatId = createFlatId(funcOp, workgroupSize);
     // Step 2. Distribute the linalg op onto threads.
     RewritePatternSet tileAndDistributePatterns(context);
-    populateTilingAndDistribute(tileAndDistributePatterns, flatId);
+    populateTilingAndDistribute(tileAndDistributePatterns, flatId, copyVectorNumBits);
     if (failed(applyPatternsAndFoldGreedily(
             funcOp, std::move(tileAndDistributePatterns)))) {
       return failure();
@@ -416,9 +422,10 @@ LogicalResult gpuDistributeSharedMemoryCopy(func::FuncOp funcOp) {
     // well aligned on the number of threads.
     // TODO(thomasraoux): Handle this case with padding instead so that we get
     // good performance for more complex shapes.
+    copyVectorNumBits *= 2;
     RewritePatternSet threadLevelTilingPatterns(context);
     populateTilingCopyToWorkgroupMemPatterns(threadLevelTilingPatterns,
-                                             workgroupSize);
+                                             workgroupSize, copyVectorNumBits);
     if (failed(applyPatternsAndFoldGreedily(
             funcOp, std::move(threadLevelTilingPatterns)))) {
       return failure();
