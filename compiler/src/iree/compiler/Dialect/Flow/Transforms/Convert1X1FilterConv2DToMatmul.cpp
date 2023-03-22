@@ -19,6 +19,212 @@ namespace Flow {
 
 namespace {
 
+static void swapMatmulBlockArgs(linalg::GenericOp genericOp) {
+  Value leftOperand = genericOp.getRegion().front().getArgument(0);
+  Value rightOperand = genericOp.getRegion().front().getArgument(1);
+  auto leftUses = leftOperand.getUses();
+  auto rightUses = rightOperand.getUses();
+  leftOperand.replaceUsesWithIf(rightOperand, [&](OpOperand &use) {
+    return llvm::any_of(leftUses, [&](OpOperand &newUse) {
+              return newUse.getOwner() == use.getOwner() &&
+                    newUse.getOperandNumber() == use.getOperandNumber();
+            });
+  });
+  rightOperand.replaceUsesWithIf(leftOperand, [&](OpOperand &use) {
+    return llvm::any_of(rightUses, [&](OpOperand &newUse) {
+              return newUse.getOwner() == use.getOwner() &&
+                    newUse.getOperandNumber() == use.getOperandNumber();
+            });
+  });
+  llvm::SmallDenseSet<Operation *, 2> leftOps;
+  llvm::SmallDenseSet<Operation *, 2> rightOps;
+  for (Operation *user : leftOperand.getUsers())
+    leftOps.insert(user);
+  for (Operation *user : rightOperand.getUsers())
+    rightOps.insert(user);
+
+  for (Operation &op : genericOp.getRegion().front()) {
+    if (leftOps.contains(&op) || rightOps.contains(&op))
+      continue;
+
+    int leftIdx = -1;
+    int rightIdx = -1;
+    for (auto &operand : op.getOpOperands()) {
+      auto definingOp = operand.get().getDefiningOp();
+      if (!definingOp) continue;
+      if (leftOps.contains(definingOp)) {
+        assert(leftIdx < 0 && "Found non-unary or binary op");
+        leftIdx = operand.getOperandNumber();
+      }
+
+      if (rightOps.contains(definingOp)) {
+        assert(rightIdx < 0 && "Found non-unary or binary op");
+        rightIdx = operand.getOperandNumber();
+      }
+    }
+    if (leftIdx >= 0 && rightIdx >= 0) {
+      auto leftVal = op.getOpOperand(leftIdx).get();
+      auto rightVal = op.getOpOperand(rightIdx).get();
+      op.setOperand(leftIdx, rightVal);
+      op.setOperand(rightIdx, leftVal);
+      continue;
+    }
+    if (leftIdx >= 0)
+      leftOps.insert(&op);
+    if (rightIdx >= 0)
+      rightOps.insert(&op);
+  }
+}
+
+class Convert1x1FilterConvGenericToMatmul : public OpRewritePattern<linalg::GenericOp> {
+ public:
+  using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
+                                PatternRewriter &rewriter) const override {
+    mlir::linalg::detail::ConvolutionDimensions dimensions;
+    if (!linalg::detail::getMatchConvolutionMessage(
+                linalg::detail::isConvolutionInterfaceImpl(genericOp, &dimensions)).empty())
+      return failure();
+
+    if (dimensions.outputImage.size() < 2 || dimensions.filterLoop.size() < 2)
+      return failure();
+
+    auto inputType = genericOp.getInputs()[0].getType().cast<ShapedType>();
+    auto filterType = genericOp.getInputs()[1].getType().cast<ShapedType>();
+    auto outputType = genericOp.getOutputs()[0].getType().cast<ShapedType>();
+
+    if (!filterType.hasStaticShape())
+      return failure();
+
+    if (!inputType.hasStaticShape())
+      return failure();
+
+    if (!llvm::all_of(
+        dimensions.dilations, [](unsigned element) { return element == 1; }))
+      return failure();
+
+    if (!llvm::all_of(
+        dimensions.strides, [](unsigned element) { return element == 1; }))
+      return failure();
+
+    Value input = genericOp.getInputs()[0];
+    Value filter = genericOp.getInputs()[1];
+    Value output = genericOp.getOutputs()[0];
+
+    bool isNchw = dimensions.outputChannel[0] < dimensions.outputImage[0];
+    bool isBatched = dimensions.batch.size() > 0;
+
+    auto dimSizes = genericOp.getStaticLoopRanges();
+
+    int n = 0;
+    if (isBatched) n = dimSizes[dimensions.batch[0]];
+    int oc = dimSizes[dimensions.outputChannel[0]];
+    int oh = dimSizes[dimensions.outputImage[0]];
+    int ow = dimSizes[dimensions.outputImage[1]];
+    int ic = dimSizes[dimensions.inputChannel[0]];
+    int fh = dimSizes[dimensions.filterLoop[0]];
+    int fw = dimSizes[dimensions.filterLoop[1]];
+
+    if (fh != 1 || fw != 1)
+      return failure();
+
+    auto loc = genericOp.getLoc();
+    MLIRContext *context = rewriter.getContext();
+
+    SmallVector<ReassociationIndices> filterReassocIndices =
+        isNchw ? SmallVector<ReassociationIndices>{{0}, {1, 2, 3}}
+               : SmallVector<ReassociationIndices>{{0, 1, 2}, {3}};
+    SmallVector<int64_t> filterShape =
+        isNchw ? SmallVector<int64_t>{oc, ic * fh * fw}
+               : SmallVector<int64_t>{ic * fh * fw, oc};
+    auto reshapedFilterType =
+        RankedTensorType::get({oc, ic * fh * fw}, inputType.getElementType());
+    Value reshapedFilter = rewriter.create<tensor::CollapseShapeOp>(
+        loc, reshapedFilterType, filter, filterReassocIndices);
+
+    SmallVector<ReassociationIndices> outputReassocIndices;
+    SmallVector<int64_t> outputShape;
+    SmallVector<int64_t> inputShape;
+    if (isNchw) {
+      outputReassocIndices =
+          isBatched ? SmallVector<ReassociationIndices>{{0}, {1}, {2, 3}}
+                    : SmallVector<ReassociationIndices>{{0}, {1, 2}};
+      outputShape =
+          isBatched ? SmallVector<int64_t>{n, oc, oh * ow}
+                    : SmallVector<int64_t>{oc, oh * ow};
+      inputShape =
+          isBatched ? SmallVector<int64_t>{n, ic, oh * ow}
+                    : SmallVector<int64_t>{ic, oh * ow};
+    } else {
+      outputReassocIndices =
+          isBatched ? SmallVector<ReassociationIndices>{{0}, {1, 2}, {3}}
+                    : SmallVector<ReassociationIndices>{{0, 1}, {2}};
+      outputShape =
+          isBatched ? SmallVector<int64_t>{n, oh * ow, oc}
+                    : SmallVector<int64_t>{oh * ow, oc};
+      inputShape =
+          isBatched ? SmallVector<int64_t>{n, oh * ow, ic}
+                    : SmallVector<int64_t>{oh * ow, ic};
+    }
+    auto reshapedOutputType =
+        RankedTensorType::get(outputShape, outputType.getElementType());
+    Value reshapedOutput = rewriter.create<tensor::CollapseShapeOp>(
+        loc, reshapedOutputType, output, outputReassocIndices);
+    auto reshapedInputType =
+        RankedTensorType::get(inputShape, inputType.getElementType());
+    Value reshapedInput = rewriter.create<tensor::CollapseShapeOp>(
+        loc, reshapedInputType, input, outputReassocIndices);
+
+    // Because the filter does not share the same batch dimension,
+    // the batch dimension is only used in indexing the input and output. Thus
+    // we cannot use existing linalg named ops like linalg.batch_matmul.
+    // i.e. M x K * (B x) K x N = (B x) M x N
+    AffineExpr bDim, mDim, nDim, kDim;
+    if (isBatched)
+      bindDims(context, bDim, mDim, nDim, kDim);
+    else
+      bindDims(context, mDim, nDim, kDim);
+
+    auto parallel = utils::IteratorType::parallel;
+    auto reduction = utils::IteratorType::reduction;
+    int numMatmulLoops = isBatched ? 4 : 3;
+    auto lhsMap = AffineMap::get(numMatmulLoops, 0,
+            isBatched && !isNchw ? SmallVector<AffineExpr>{bDim, mDim, kDim}
+                                 : SmallVector<AffineExpr>{mDim, kDim}, context);
+    auto rhsMap = AffineMap::get(numMatmulLoops, 0,
+            isBatched && isNchw ? SmallVector<AffineExpr>{bDim, kDim, nDim}
+                                : SmallVector<AffineExpr>{kDim, nDim}, context);
+    auto resultMap = AffineMap::get(numMatmulLoops, 0,
+            isBatched ? SmallVector<AffineExpr>{bDim, mDim, nDim}
+                      : SmallVector<AffineExpr>{mDim, nDim}, context);
+    SmallVector<utils::IteratorType> genericIterators;
+    if (isBatched)
+      genericIterators = {parallel, parallel, parallel, reduction};
+    else
+      genericIterators = {parallel, parallel, reduction};
+    auto newGenericOp = rewriter.create<linalg::GenericOp>(
+        loc, reshapedOutputType,
+        /*inputs=*/isNchw ? ValueRange{reshapedFilter, reshapedInput}
+                          : ValueRange{reshapedInput, reshapedFilter},
+        /*outputs=*/ValueRange{reshapedOutput},
+        ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators);
+    IRMapping mapper;
+    genericOp.getRegion().cloneInto(&newGenericOp.getRegion(), mapper);
+
+    if (isNchw) swapMatmulBlockArgs(newGenericOp);
+
+    Value result = newGenericOp.getResults().front();
+
+    auto reshapedResult = rewriter.create<tensor::ExpandShapeOp>(
+        loc, outputType, result, outputReassocIndices);
+
+    rewriter.replaceOp(genericOp, ArrayRef<Value>{reshapedResult});
+
+    return success();
+  }
+};
+
 // Converts linalg.conv_2d_input_nhwc_filter_nhwc op to linalg.matmul
 template <typename Conv2DOpType>
 class Convert1x1FilterConvToMatmul : public OpRewritePattern<Conv2DOpType> {
@@ -175,6 +381,7 @@ struct Convert1X1FilterConv2DToMatmulPass
     patterns.insert<Convert1x1FilterConvToMatmul<linalg::Conv2DNhwcHwcfOp>,
                     Convert1x1FilterConvToMatmul<linalg::Conv2DNchwFchwOp>>(
         context);
+    patterns.insert<Convert1x1FilterConvGenericToMatmul>(context);
     if (failed(applyPatternsAndFoldGreedily(getOperation(),
                                             std::move(patterns)))) {
       return signalPassFailure();
