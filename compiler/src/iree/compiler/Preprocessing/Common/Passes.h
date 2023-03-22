@@ -25,6 +25,9 @@ std::unique_ptr<Pass> createConvertConv2DToImg2ColPass();
 std::unique_ptr<OperationPass<func::FuncOp>>
 createMakeSingleDispatchForFunctionPass();
 
+/// A pass to generalize all conv-like ops.
+std::unique_ptr<Pass> createGeneralizeBatchMatmulsPass();
+
 /// A pass to pad linalg ops to the next integer multiple of `paddingSize`.
 std::unique_ptr<Pass> createPadLinalgOpsToIntegerMultiplePass();
 

@@ -21,6 +21,12 @@ def MakeSingleDispatchForFunction :
   let constructor = "mlir::iree_compiler::IREE::createMakeSingleDispatchForFunctionPass()";
 }
 
+def GeneralizeBatchMatmuls :
+    Pass<"iree-preprocessing-generalize-batch-matmuls", ""> {
+  let summary = "Generalize all batch matmul ops";
+  let constructor = "mlir::iree_compiler::IREE::createGeneralizeBatchMatmulsPass()";
+}
+
 def PadLinalgOps :
     Pass<"iree-preprocessing-pad-linalg-ops", ""> {
   let summary = "Pad linalg ops to the next integer multiple of paddingSize.";
