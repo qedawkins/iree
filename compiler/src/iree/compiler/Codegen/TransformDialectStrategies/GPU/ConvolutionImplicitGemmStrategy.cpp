@@ -86,7 +86,28 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   for (int i = 0, e = captures.convolutionDims.batch.size(); i < e; i++)
     workgroupTileSizes.push_back(1);
 
+  //llvm::errs() << "\n";
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.batch, llvm::errs() << "Batch: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.outputImage, llvm::errs() << "OutputImage: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.outputChannel, llvm::errs() << "OutputChannel: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.filterLoop, llvm::errs() << "FilterLoop: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.inputChannel, llvm::errs() << "InputChannel: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.depth, llvm::errs() << "Depth: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.strides, llvm::errs() << "Strides: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.dilations, llvm::errs() << "Dilations: ");
+  //llvm::errs() << "\n";
+  //llvm::errs() << "\n";
+
   bool isNchw = captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0];
+
   int channelSize = 1;
   int imageSize = 1;
   for (auto dim : captures.convolutionDims.outputChannel)
@@ -119,7 +140,7 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   // Thread-level
   // ============
   numThreadsXInBlock = std::min(maxNumThreadsToUse, 1 * convolutionConfig.subgroupSize);
-  numThreadsXToDistribute = workgroupTileSizes[2];
+  numThreadsXToDistribute = workgroupTileSizes.back();
   numWarpsXInBlock = numThreadsXInBlock / convolutionConfig.subgroupSize;
 
   // Reduction tile size
@@ -176,7 +197,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
           /*tileSizes=*/
           getAsOpFoldResult(b.getI64ArrayAttr(strategy.workgroupTileSizes)),
           /*threadDimMapping=*/
-          b.getArrayAttr(allBlocksRef));
+          b.getArrayAttr(allBlocksRef.take_front(strategy.workgroupTileSizes.size())));
 
   /// The previous fill handle gets invalidated so we match it again.
   Value newFillH =
@@ -212,6 +233,8 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
           b.getDenseI64ArrayAttr(ArrayRef<int64_t>{strategy.getImplicitGemmFilterOperandIndex()}));
   Value promotedMatmulH = promoteOperandsOp.getResult()[0];
 
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
+
   // Step 8. Tile img2col, fill, and trailing elementwise to threads
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
       /*b=*/b,
@@ -237,6 +260,8 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getThreadsTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allThreadAttrs.front()}));
 
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
+
   // Step 9. Tile matmul to warps
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
       /*b=*/b,
@@ -255,7 +280,9 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   vectorizeConfiguration.rankReducingLinalg = true;
   vectorizeConfiguration.rankReducingVector = true;
   b.create<ApplyPatternsOp>(funcH, vectorizeConfiguration);
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
   funcH = b.create<VectorizeOp>(funcH, /*vectorizePadding=*/false, /*vectorizeExtract=*/true);
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Basically a hack to find the parent forall loop of the matmul for wmma unrolling.
   auto forallOpsH = b.create<MatchOp>(variantH, scf::ForallOp::getOperationName());
@@ -293,7 +320,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   variantH = b.create<IREEBufferizeOp>(variantH, /*targetGPU=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 12. Post-bufferization mapping to blocks and threads
   funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
@@ -308,5 +335,5 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   b.create<VectorToMMAConversionOp>(funcH, /*useMmaSync=*/false, /*useWmma=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  //LLVM_DEBUG(b.create<PrintOp>(variantH));
 }
