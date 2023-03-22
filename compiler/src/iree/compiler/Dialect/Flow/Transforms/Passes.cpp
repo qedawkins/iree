@@ -205,7 +205,7 @@ void buildFlowTransformPassPipeline(OpPassManager &passManager,
       // - Convert all elementwise ops to Linalg
       // - Remove unit-extent dimensions.
       .addPass(mlir::createConvertElementwiseToLinalgPass)
-      //.addPass(mlir::createLinalgFoldUnitExtentDimsPass)
+      .addPass(mlir::createLinalgFoldUnitExtentDimsPass)
       .addPass(createRaiseSpecialOps)
       .addPass(createInterchangeGenericOpsPass)
       .addPass(memref::createResolveShapedTypeResultDimsPass)
