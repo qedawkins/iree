@@ -1658,14 +1658,14 @@ rewriteInIm2ColGeneric(RewriterBase & rewriter, linalg::GenericOp genericOp) {
   if (isNchw) {
     outputReassocIndices =
         isBatched ? SmallVector<ReassociationIndices>{{0}, {1}, {2, 3}}
-                  : SmallVector<ReassociationIndices>{{1}, {2, 3}};
+                  : SmallVector<ReassociationIndices>{{0}, {1, 2}};
     outputShape =
         isBatched ? SmallVector<int64_t>{n, oc, oh * ow}
                   : SmallVector<int64_t>{oc, oh * ow};
   } else {
     outputReassocIndices =
         isBatched ? SmallVector<ReassociationIndices>{{0}, {1, 2}, {3}}
-                  : SmallVector<ReassociationIndices>{{1, 2}, {3}};
+                  : SmallVector<ReassociationIndices>{{0, 1}, {2}};
     outputShape =
         isBatched ? SmallVector<int64_t>{n, oh * ow, oc}
                   : SmallVector<int64_t>{oh * ow, oc};
@@ -1738,9 +1738,13 @@ rewriteInIm2ColGeneric(RewriterBase & rewriter, linalg::GenericOp genericOp) {
         // im2col[n, oh*ow, fh*fw*ic] = input[n, sh*oh + fh, sw*ow + fw, ic]
         SmallVector<Value> extractionIndices;
         if (isNchw)
-          extractionIndices = {bIndex, icIndex, hIndex, wIndex};
+          extractionIndices =
+              isBatched ? SmallVector<Value>{bIndex, icIndex, hIndex, wIndex}
+                        : SmallVector<Value>{icIndex, hIndex, wIndex};
         else
-          extractionIndices = {bIndex, hIndex, wIndex, icIndex};
+          extractionIndices =
+              isBatched ? SmallVector<Value>{bIndex, hIndex, wIndex, icIndex}
+                        : SmallVector<Value>{hIndex, wIndex, icIndex};
         Value inputVal = nestedBuilder.create<tensor::ExtractOp>(
                 loc, input, extractionIndices);
         nestedBuilder.create<linalg::YieldOp>(nestedLoc, inputVal);
@@ -1757,13 +1761,15 @@ rewriteInIm2ColGeneric(RewriterBase & rewriter, linalg::GenericOp genericOp) {
     bindDims(context, mDim, nDim, kDim);
 
   int numMatmulLoops = isBatched ? 4 : 3;
-  auto lhsMap = AffineMap::get(numMatmulLoops, 0, {mDim, kDim}, context);
+  auto lhsMap = AffineMap::get(numMatmulLoops, 0,
+          isBatched && !isNchw ? SmallVector<AffineExpr>{bDim, mDim, kDim}
+                               : SmallVector<AffineExpr>{mDim, kDim}, context);
   auto rhsMap = AffineMap::get(numMatmulLoops, 0,
-          isBatched ? SmallVector<AffineExpr>{bDim, kDim, nDim}
-                    : SmallVector<AffineExpr>{kDim, nDim}, context);
+          isBatched && isNchw ? SmallVector<AffineExpr>{bDim, kDim, nDim}
+                              : SmallVector<AffineExpr>{kDim, nDim}, context);
   auto resultMap = AffineMap::get(numMatmulLoops, 0,
           isBatched ? SmallVector<AffineExpr>{bDim, mDim, nDim}
-                    : SmallVector<AffineExpr>{kDim, nDim}, context);
+                    : SmallVector<AffineExpr>{mDim, nDim}, context);
   SmallVector<utils::IteratorType> genericIterators;
   if (isBatched)
     genericIterators = {parallel, parallel, parallel, reduction};
@@ -1771,7 +1777,8 @@ rewriteInIm2ColGeneric(RewriterBase & rewriter, linalg::GenericOp genericOp) {
     genericIterators = {parallel, parallel, reduction};
   auto newGenericOp = rewriter.create<linalg::GenericOp>(
       loc, reshapedOutputType,
-      /*inputs=*/ValueRange{reshapedFilter, img2ColTensor.getResult(0)},
+      /*inputs=*/isNchw ? ValueRange{reshapedFilter, img2ColTensor.getResult(0)}
+                        : ValueRange{img2ColTensor.getResult(0), reshapedFilter},
       /*outputs=*/ValueRange{reshapedOutput},
       ArrayRef<AffineMap>{lhsMap, rhsMap, resultMap}, genericIterators);
   IRMapping mapper;
