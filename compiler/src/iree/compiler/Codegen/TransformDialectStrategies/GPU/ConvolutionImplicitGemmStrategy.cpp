@@ -134,18 +134,24 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
   LLVM_DEBUG(DBGS() << "K size:" << kSize << ", " << kSize % 32 << "\n");
 
-  workgroupTileSizes.push_back(mSize % 32 != 0 ? 16 : 32);
-  workgroupTileSizes.push_back(nSize % 32 != 0 ? 16 : 32);
+  int64_t mTileSize = 128;
+  while (mSize % mTileSize != 0) mTileSize /= 2;
+  workgroupTileSizes.push_back(mTileSize);
+
+  int64_t nTileSize = 128;
+  while (nSize % nTileSize != 0) nTileSize /= 2;
+  workgroupTileSizes.push_back(nTileSize);
 
   // Thread-level
   // ============
-  numThreadsXInBlock = std::min(maxNumThreadsToUse, 1 * convolutionConfig.subgroupSize);
-  numThreadsXToDistribute = workgroupTileSizes.back();
+  numThreadsXInBlock = std::min(maxNumThreadsToUse,
+          iree_compiler::nextMultipleOf(nTileSize == 16 ? nTileSize : nTileSize / 2, convolutionConfig.subgroupSize));
+  numThreadsXToDistribute = std::min(nTileSize, numThreadsXInBlock);
   numWarpsXInBlock = numThreadsXInBlock / convolutionConfig.subgroupSize;
 
   // Reduction tile size
   innerLoopTileSize = kSize % 32 != 0 ? 16 : 32;
-  innerLoopTileSize = 16;
+  //innerLoopTileSize = 16;
 }
 
 /// Builds the transform IR tiling reductions for CUDA targets. Supports
