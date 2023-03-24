@@ -106,7 +106,7 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   //llvm::errs() << "\n";
   //llvm::errs() << "\n";
 
-  bool isNchw = captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0];
+  isNchw = captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0];
 
   int channelSize = 1;
   int imageSize = 1;
@@ -134,18 +134,30 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
   LLVM_DEBUG(DBGS() << "K size:" << kSize << ", " << kSize % 32 << "\n");
 
-  workgroupTileSizes.push_back(mSize % 32 != 0 ? 16 : 32);
-  workgroupTileSizes.push_back(nSize % 32 != 0 ? 16 : 32);
+  int64_t mTileSize = 128;
+  while (mSize % mTileSize != 0) mTileSize /= 2;
+  workgroupTileSizes.push_back(mTileSize);
+
+  int64_t nTileSize = 32;
+  while (nSize % nTileSize != 0) nTileSize /= 2;
+  workgroupTileSizes.push_back(nTileSize);
+
+  tileM = mTileSize > nTileSize;
+  int64_t threadTile = tileM ? mTileSize : nTileSize;
+
+  int64_t im2colTile = isNchw ? nTileSize : mTileSize;
 
   // Thread-level
   // ============
-  numThreadsXInBlock = std::min(maxNumThreadsToUse, 1 * convolutionConfig.subgroupSize);
-  numThreadsXToDistribute = workgroupTileSizes.back();
+  numThreadsXInBlock = std::min(maxNumThreadsToUse,
+          //2 * convolutionConfig.subgroupSize);
+          iree_compiler::nextMultipleOf(threadTile / 2, convolutionConfig.subgroupSize));
+  numThreadsXToDistribute = std::min(threadTile, numThreadsXInBlock);
+  numThreadsXForIm2Col = std::min(im2colTile, numThreadsXInBlock);
   numWarpsXInBlock = numThreadsXInBlock / convolutionConfig.subgroupSize;
 
   // Reduction tile size
   innerLoopTileSize = kSize % 32 != 0 ? 16 : 32;
-  innerLoopTileSize = 16;
 }
 
 /// Builds the transform IR tiling reductions for CUDA targets. Supports
@@ -241,7 +253,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*isolatedParentOpH=*/variantH,
       /*rootH=*/tiledImg2colH,
       /*opsHToFuse=*/{},
-      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getThreadsTileSizes())),
+      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getInputTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allThreadAttrs.front()}));
 
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
@@ -249,7 +261,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*isolatedParentOpH=*/variantH,
       /*rootH=*/maybeBlockTrailingH,
       /*opsHToFuse=*/{},
-      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getThreadsTileSizes())),
+      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getOutputTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allThreadAttrs.front()}));
 
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
@@ -257,7 +269,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*isolatedParentOpH=*/variantH,
       /*rootH=*/maybeFillH,
       /*opsHToFuse=*/{},
-      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getThreadsTileSizes())),
+      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getOutputTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allThreadAttrs.front()}));
 
   LLVM_DEBUG(b.create<PrintOp>(variantH));
