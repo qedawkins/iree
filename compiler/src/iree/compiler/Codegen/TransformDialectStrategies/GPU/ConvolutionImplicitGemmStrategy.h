@@ -33,18 +33,18 @@ class ConvolutionImplicitGemmStrategy : public AbstractConvolutionStrategy {
     return {numWarpsXInBlock, 1, 1};
   }
 
-  SmallVector<int64_t> getFullThreadsTileSizes() const {
+  SmallVector<int64_t> getInputTileSizes() const {
     SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size(), 0);
-    if (!tileM)
+    if (isNchw)
       tileSizes.push_back(0);
-    tileSizes.push_back(numThreadsXInBlock);
+    tileSizes.push_back(numThreadsXForIm2Col);
     return tileSizes;
-    //if (tileM)
-    //  return {0, numThreadsXInBlock, 0};
+    //if (isNchw)
+    //  return {0, numThreadsXForIm2Col, 0};
     //return {0, 0, numThreadsXInBlock};
   }
 
-  SmallVector<int64_t> getThreadsTileSizes() const override {
+  SmallVector<int64_t> getOutputTileSizes() const {
     SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size(), 0);
     if (!tileM)
       tileSizes.push_back(0);
@@ -92,10 +92,12 @@ class ConvolutionImplicitGemmStrategy : public AbstractConvolutionStrategy {
 
   int64_t numThreadsXInBlock;
   int64_t numThreadsXToDistribute;
+  int64_t numThreadsXForIm2Col;
   int64_t numWarpsXInBlock;
   int64_t innerLoopTileSize;
 
   bool tileM = false;
+  bool isNchw = false;
   bool isSpirv = false;
 };
 
