@@ -362,7 +362,7 @@ LogicalResult gpuDistributeSharedMemoryCopy(func::FuncOp funcOp) {
   // For optimal performance we always want to copy 128 bits
   int copyVectorNumBits = 128;
   bool isAligned = false;
-  while (copyVectorNumBits >= 8) {
+  while (copyVectorNumBits >= 32) {
     isAligned = llvm::all_of(
       copiesToWorkgroupMem, [flatWorkgroupSize, copyVectorNumBits](linalg::GenericOp copyOp) {
         MemRefType dstMemRefType =
