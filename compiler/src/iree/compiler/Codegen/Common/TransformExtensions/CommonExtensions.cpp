@@ -25,6 +25,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Conversion/VectorToGPU/VectorToGPU.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -1555,34 +1556,24 @@ static Value createMul(Location loc, Value x, Value y, OpBuilder &builder) {
   return builder.create<arith::MulFOp>(loc, x, y);
 }
 
-static SmallVector<Value, 3> unrollIndex(
+static SmallVector<Value> unrollIndex(
         OpBuilder &b, Location loc, Value index, ArrayRef<int64_t> factors) {
   assert(factors.size() >= 1 && "empty factor list");
-  SmallVector<Value, 3> indices(factors.size());
-  int64_t runningProd = 1;
-  for (int i = factors.size() - 1, end = 0; i >= end; i--) {
-    Value unrolledIndex = index;
-    if (i > 0) {
-      Value modBase =
-        b.create<arith::ConstantOp>(loc, b.getIndexAttr(runningProd * factors[i]));
-      unrolledIndex = b.create<arith::RemUIOp>(loc, unrolledIndex, modBase);
-    }
-    if (runningProd > 1) {
-      Value divDenom =
-        b.create<arith::ConstantOp>(loc, b.getIndexAttr(runningProd));
-      unrolledIndex = b.create<arith::DivUIOp>(loc, unrolledIndex, divDenom);
-    }
-    runningProd *= factors[i];
-    indices[i] = unrolledIndex;
-  }
-  return indices;
+  SmallVector<Value> basis;
+  for (int64_t f : factors)
+    basis.push_back(
+            b.create<arith::ConstantOp>(loc, b.getIndexAttr(f)));
+  FailureOr<SmallVector<Value>> multiIndex = delinearizeIndex(b, loc, index, basis);
+  assert(!failed(multiIndex));
+  return *multiIndex;
 }
 
 static Value getConvolvedIndex(OpBuilder &b, Location loc,
         Value oIndex, Value hIndex, int64_t stride) {
-  Value strideVal = b.create<arith::ConstantOp>(loc, b.getIndexAttr(stride));
-  Value convIndex = b.create<arith::MulIOp>(loc, oIndex, strideVal);
-  return b.create<arith::AddIOp>(loc, convIndex, hIndex);
+  AffineExpr oExpr, hExpr;
+  bindSymbols(b.getContext(), oExpr, hExpr);
+  AffineMap convMap = AffineMap::get(0, 2, stride * oExpr + hExpr);
+  return makeComposedAffineApply(b, loc, convMap, ValueRange{oIndex, hIndex});
 }
 
 static void swapMatmulBlockArgs(linalg::GenericOp genericOp) {
