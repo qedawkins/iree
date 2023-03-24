@@ -58,7 +58,6 @@ struct AbstractConvolutionStrategy : iree_compiler::AbstractConvolutionStrategy 
 
   virtual SmallVector<int64_t> getNumThreadsInBlock() const = 0;
   virtual SmallVector<int64_t> getNumWarpsInBlock() const = 0;
-  virtual SmallVector<int64_t> getThreadsTileSizes() const = 0;
   virtual SmallVector<int64_t> getWarpsTileSizes() const = 0;
   virtual SmallVector<int64_t> getInnerLoopTileSizes() const = 0;
 
