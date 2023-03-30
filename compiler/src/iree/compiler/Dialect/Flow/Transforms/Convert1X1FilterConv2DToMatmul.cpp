@@ -139,7 +139,7 @@ class Convert1x1FilterConvGenericToMatmul : public OpRewritePattern<linalg::Gene
         isNchw ? SmallVector<int64_t>{oc, ic * fh * fw}
                : SmallVector<int64_t>{ic * fh * fw, oc};
     auto reshapedFilterType =
-        RankedTensorType::get({oc, ic * fh * fw}, inputType.getElementType());
+        RankedTensorType::get(filterShape, inputType.getElementType());
     Value reshapedFilter = rewriter.create<tensor::CollapseShapeOp>(
         loc, reshapedFilterType, filter, filterReassocIndices);
 
