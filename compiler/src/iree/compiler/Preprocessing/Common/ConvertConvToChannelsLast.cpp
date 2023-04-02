@@ -82,11 +82,11 @@ static TransposeIndices invertIndices(TransposeIndices targetIndices) {
   return inverted;
 }
 
-static bool isMinorIdentityIndices(TransposeIndices indices) {
+static bool isInnerIdentityIndices(TransposeIndices indices, int64_t rank) {
   return llvm::all_of(llvm::enumerate(indices), [indices](auto e) {
             if (e.index() == 0) return true;
             return indices[e.index()-1] < e.value();
-          });
+          }) && indices.back() == rank - 1;
 }
 
 // Helper to shuffle vectors according to the transpose indices.
@@ -99,6 +99,18 @@ static SmallVector<T> shuffleFromIndices(SmallVector<T> unshuffled,
     shuffled[i.index() + startDim] = unshuffled[i.value()];
   }
   return shuffled;
+}
+
+template <typename T>
+static SmallVector<T> getPackedVector(SmallVector<T> vec,
+                                         TransposeIndices targetIndices) {
+  SmallVector<T> packedShape;
+  for (auto [i, val] : llvm::enumerate(vec))
+    if (!llvm::is_contained(targetIndices, i))
+      packedShape.push_back(val);
+  for (auto i : targetIndices)
+    packedShape.push_back(vec[i]);
+  return packedShape;
 }
 
 //static SmallVector<ReassociationIndices, 4> getUntiledPackReassociationMap(int dimCount) {
@@ -115,17 +127,16 @@ static SmallVector<T> shuffleFromIndices(SmallVector<T> unshuffled,
 //}
 
 static SmallVector<ReassociationIndices, 4> getUntiledPackReassociationMap(
-        TransposeIndices targetIndices) {
+        TransposeIndices targetIndices, int64_t rank) {
   int startDim = *std::min_element(targetIndices.begin(), targetIndices.end());
   int dimCount = targetIndices.size();
   SmallVector<ReassociationIndices, 4> reassociationMap;
   for (int i = 0; i <= startDim; i++)
     reassociationMap.push_back({i});
-  for (int i = startDim + 1; i < dimCount + startDim; i++) {
-    reassociationMap.push_back({dimCount + i});
+  for (int i = startDim + 1; i < dimCount + startDim + 1; i++)
     reassociationMap[startDim].push_back(i);
-  }
-  reassociationMap[startDim].push_back(dimCount + startDim);
+  for (int i = dimCount + startDim + 1; i < dimCount + rank; i++)
+    reassociationMap.push_back({i});
   return reassociationMap;
 }
 
@@ -134,7 +145,7 @@ static SmallVector<ReassociationIndices, 4> getUntiledPackReassociationMap(
 static std::tuple<Value, AffineMap>
 createTransposeAsTensorPack(PatternRewriter &rewriter, Location loc,
                              Value input, AffineMap inputMap, TransposeIndices targetIndices) {
-  if (isMinorIdentityIndices(targetIndices))
+  if (isInnerIdentityIndices(targetIndices, inputMap.getNumResults()))
     return std::make_tuple(input, inputMap);
 
   RankedTensorType inType = input.getType().cast<RankedTensorType>();
@@ -163,9 +174,9 @@ createTransposeAsTensorPack(PatternRewriter &rewriter, Location loc,
     /*padding=*/std::nullopt, SmallVector<int64_t>{});
 
   // Collapse the unit dims created by tensor.pack.
-  auto reassociationMap = getUntiledPackReassociationMap(targetIndices);
+  auto reassociationMap = getUntiledPackReassociationMap(targetIndices, inType.getRank());
   auto transposedInputShape =
-      shuffleFromIndices<int64_t>(llvm::to_vector(inputShape), targetIndices);
+      getPackedVector<int64_t>(llvm::to_vector(inputShape), targetIndices);
 
   auto collapsed = rewriter.create<tensor::CollapseShapeOp>(
     loc, RankedTensorType::get(transposedInputShape, elementType),
@@ -173,7 +184,7 @@ createTransposeAsTensorPack(PatternRewriter &rewriter, Location loc,
 
   SmallVector<AffineExpr> mapResults(inputMap.getResults());
   AffineMap transposedMap = AffineMap::get(inputMap.getNumDims(), inputMap.getNumSymbols(),
-          shuffleFromIndices<AffineExpr>(mapResults, targetIndices),
+          getPackedVector<AffineExpr>(mapResults, targetIndices),
           input.getContext());
   return std::make_tuple(collapsed.getResult(), transposedMap);
 }
@@ -183,10 +194,11 @@ createTransposeAsTensorPack(PatternRewriter &rewriter, Location loc,
 static Value
 createTransposeAsTensorUnPack(PatternRewriter &rewriter, Location loc,
                              Value output, TransposeIndices targetIndices) {
-  if (isMinorIdentityIndices(targetIndices))
+  RankedTensorType outType = output.getType().cast<RankedTensorType>();
+  int64_t rank = outType.getRank();
+  if (isInnerIdentityIndices(targetIndices, rank))
     return output;
 
-  RankedTensorType outType = output.getType().cast<RankedTensorType>();
   auto elementType = outType.getElementType();
   auto outputShape(outType.getShape());
 
@@ -196,65 +208,63 @@ createTransposeAsTensorUnPack(PatternRewriter &rewriter, Location loc,
     expandedOutputShape.push_back(outputShape[i]);
   for (int i = 0, e = targetIndices.size(); i < e; i++)
     expandedOutputShape.push_back(1);
-  for (int i = startDim, e = outType.getRank(); i < e; i++)
+  for (int i = startDim, e = rank; i < e; i++)
     expandedOutputShape.push_back(outputShape[i]);
 
-  auto reassociationMap = getUntiledPackReassociationMap(targetIndices);
+  auto reassociationMap = getUntiledPackReassociationMap(targetIndices, rank);
   auto expandedOutput = rewriter.create<tensor::ExpandShapeOp>(
     loc, RankedTensorType::get(expandedOutputShape, elementType),
     output, reassociationMap);
 
   SmallVector<OpFoldResult> tileSizes;
   //for (int64_t i = 0, end = targetIndices.size(); i < end; i++) {
-  for (int64_t i = startDim, end = targetIndices.size() + startDim; i < end; i++) {
-    if (ShapedType::isDynamic(outputShape[i]))
-      tileSizes.push_back(rewriter.create<tensor::DimOp>(loc, output, i).getResult());
+  for (auto i : getNormalizedIndices(targetIndices)) {
+    int64_t dim = i + rank - targetIndices.size();
+    if (ShapedType::isDynamic(outputShape[dim]))
+      tileSizes.push_back(rewriter.create<tensor::DimOp>(loc, output, dim).getResult());
     else
-      tileSizes.push_back(rewriter.getIndexAttr(outputShape[i]));
+      tileSizes.push_back(rewriter.getIndexAttr(outputShape[dim]));
   }
 
   SmallVector<OpFoldResult> transposedOutputShape;
-  for (int64_t i = 0, end = startDim; i < end; i++) {
-    if (ShapedType::isDynamic(outputShape[i]))
-      transposedOutputShape.push_back(rewriter.create<tensor::DimOp>(loc, output, i).getResult());
+  int64_t nChannels = 0;
+  for (int64_t i = 0, end = rank; i < end; i++) {
+    auto *where = llvm::find(targetIndices, i);
+    int64_t dim;
+    if (where == targetIndices.end())
+      dim = i - nChannels++;
     else
-      transposedOutputShape.push_back(rewriter.getIndexAttr(outputShape[i]));
+      dim = rank - targetIndices.size() + (where - targetIndices.begin());
+    if (ShapedType::isDynamic(outputShape[dim]))
+      transposedOutputShape.push_back(rewriter.create<tensor::DimOp>(loc, output, dim).getResult());
+    else
+      transposedOutputShape.push_back(rewriter.getIndexAttr(outputShape[dim]));
   }
-  transposedOutputShape.append(tileSizes);
-  transposedOutputShape = shuffleFromIndices<OpFoldResult>(transposedOutputShape, targetIndices);
 
   Value empty = rewriter.create<tensor::EmptyOp>(
     loc, transposedOutputShape, elementType);
 
   auto unpackedOutput = rewriter.create<tensor::UnPackOp>(
-    loc, expandedOutput, empty, invertIndices(targetIndices),
+    loc, expandedOutput, empty, targetIndices,
     tileSizes, SmallVector<int64_t>{});
   return unpackedOutput.getResult();
 }
 
 static TransposeIndices collectChannelTransposeIndices(AffineMap map,
         SmallVector<SmallVector<unsigned, 2>> transposeDimTargets) {
-  TransposeIndices indices;
   SmallVector<TransposeIndices> channelIndices(transposeDimTargets.size());
-  bool foundChannel = false;
   for (auto [index, result] : llvm::enumerate(map.getResults())) {
-    // Separate the input channel indices from others while maintaining the order of indices.
     if (result.isa<AffineDimExpr>()) {
-      bool foundDim = false;
       for (auto [channelVec, dimCategory] : llvm::zip_equal(channelIndices, transposeDimTargets)) {
         if (llvm::is_contained(dimCategory, result.cast<AffineDimExpr>().getPosition())) {
-          foundDim = true;
-          foundChannel = true;
           channelVec.push_back(index);
           break;
         }
       }
-      if (foundDim)
-        continue;
     }
-    if (foundChannel) indices.push_back(index);
   }
 
+  TransposeIndices indices;
   for (auto channelVec : channelIndices)
     indices.append(channelVec);
   return indices;
@@ -314,9 +324,9 @@ static LogicalResult transposeConvLikeLinalgOp(PatternRewriter &rewriter,
   auto outputIndices = collectChannelTransposeIndices(outputMap, {convDims.outputChannel});
 
   // Don't transpose if there's no change to the op.
-  if (isMinorIdentityIndices(inputIndices) &&
-          isMinorIdentityIndices(filterIndices) &&
-          isMinorIdentityIndices(outputIndices))
+  if (isInnerIdentityIndices(inputIndices, inputMap.getNumResults()) &&
+          isInnerIdentityIndices(filterIndices, filterMap.getNumResults()) &&
+          isInnerIdentityIndices(outputIndices, outputMap.getNumResults()))
     return failure();
 
   auto [transposedInput, transposedInputMap] =
@@ -345,7 +355,7 @@ static LogicalResult transposeConvLikeLinalgOp(PatternRewriter &rewriter,
 
   auto returnToNCHW =
       createTransposeAsTensorUnPack(rewriter, loc,
-              transposedConvResult, invertIndices(outputIndices));
+              transposedConvResult, outputIndices);
 
   rewriter.replaceOp(convOp, returnToNCHW);
   return success();
@@ -478,8 +488,8 @@ struct ConvertConvToChannelsLastPass
 
     {
       RewritePatternSet patterns(context);
-      //patterns.add<linalg::GeneralizeOuterUnitDimsPackOpPattern,
-      //             linalg::GeneralizeOuterUnitDimsUnPackOpPattern>(context);
+      patterns.add<linalg::GeneralizeOuterUnitDimsPackOpPattern,
+                   linalg::GeneralizeOuterUnitDimsUnPackOpPattern>(context);
       patterns.insert<GeneralizeLinalgTransposeOp>(context);
       patterns.insert<GeneralizeUntiledPackOrUnPackOp<tensor::PackOp>>(context);
       patterns.insert<GeneralizeUntiledPackOrUnPackOp<tensor::UnPackOp>>(context);
