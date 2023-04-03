@@ -83,10 +83,11 @@ static TransposeIndices invertIndices(TransposeIndices targetIndices) {
 }
 
 static bool isInnerIdentityIndices(TransposeIndices indices, int64_t rank) {
-  return llvm::all_of(llvm::enumerate(indices), [indices](auto e) {
+  return indices.empty() ||
+         (llvm::all_of(llvm::enumerate(indices), [indices](auto e) {
             if (e.index() == 0) return true;
             return indices[e.index()-1] < e.value();
-          }) && indices.back() == rank - 1;
+          }) && indices.back() == rank - 1);
 }
 
 // Helper to shuffle vectors according to the transpose indices.
@@ -231,10 +232,12 @@ createTransposeAsTensorUnPack(PatternRewriter &rewriter, Location loc,
   for (int64_t i = 0, end = rank; i < end; i++) {
     auto *where = llvm::find(targetIndices, i);
     int64_t dim;
-    if (where == targetIndices.end())
-      dim = i - nChannels++;
-    else
+    if (where == targetIndices.end()) {
+      dim = i - nChannels;
+    } else {
       dim = rank - targetIndices.size() + (where - targetIndices.begin());
+      nChannels++;
+    }
     if (ShapedType::isDynamic(outputShape[dim]))
       transposedOutputShape.push_back(rewriter.create<tensor::DimOp>(loc, output, dim).getResult());
     else
@@ -455,6 +458,28 @@ class GeneralizeLinalgTransposeOp final
   }
 };
 
+class FoldCancellingUnPackPackOps final
+    : public OpRewritePattern<tensor::UnPackOp> {
+ public:
+  using OpRewritePattern<tensor::UnPackOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::UnPackOp unpackOp,
+                                PatternRewriter &rewriter) const override {
+    return tensor::UnPackOp::canonicalize(unpackOp, rewriter);
+  }
+};
+
+class FoldCancellingPackUnPackOps final
+    : public OpRewritePattern<tensor::PackOp> {
+ public:
+  using OpRewritePattern<tensor::PackOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::PackOp packOp,
+                                PatternRewriter &rewriter) const override {
+    return tensor::PackOp::canonicalize(packOp, rewriter);
+  }
+};
+
 struct ConvertConvToChannelsLastPass
     : public ConvertConvToChannelsLastBase<ConvertConvToChannelsLastPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -481,6 +506,15 @@ struct ConvertConvToChannelsLastPass
       RewritePatternSet patterns(context);
       linalg::populateDataLayoutPropagationPatterns(
               patterns, [](Operation *op) { return true; });
+      if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns)))) {
+        return signalPassFailure();
+      }
+    }
+
+    {
+      RewritePatternSet patterns(context);
+      patterns.insert<FoldCancellingPackUnPackOps>(context);
+      patterns.insert<FoldCancellingUnPackPackOps>(context);
       if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns)))) {
         return signalPassFailure();
       }
