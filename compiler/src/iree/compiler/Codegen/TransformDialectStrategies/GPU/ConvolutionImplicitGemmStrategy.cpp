@@ -336,7 +336,8 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
 
   // Step 12. Post-bufferization mapping to blocks and threads
   funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
-  funcH = buildMapToBlockAndThreads(b, funcH, strategy.getNumThreadsInBlock());
+  funcH = buildMapToBlockAndThreads(b, funcH,
+          strategy.getNumThreadsInBlock(), strategy.getNumWarpsInBlock());
   b.create<HoistStaticAllocOp>(funcH);
   funcH = b.create<GpuDistributeSharedMemoryCopyOp>(TypeRange{pdlOperationType}, funcH);
   ApplyPatternsOpPatterns distributeConfiguration;
