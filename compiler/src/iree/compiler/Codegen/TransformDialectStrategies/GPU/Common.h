@@ -41,7 +41,8 @@ int64_t adjustNumberOfWarpsForBlockShuffle(int64_t numWarpsToUse,
 /// Takes a handle to a func.func and returns an updated handle to a
 /// func.func.
 Value buildMapToBlockAndThreads(ImplicitLocOpBuilder& b, Value funcH,
-                                ArrayRef<int64_t> blockSize);
+                                ArrayRef<int64_t> blockSize,
+                                ArrayRef<int64_t> warpCounts = {});
 
 /// Post-bufferization vector distribution with rank-reduction.
 /// Takes a handle to a func.func and returns an updated handle to a
