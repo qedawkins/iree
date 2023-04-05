@@ -143,11 +143,11 @@ static SmallVector<ReassociationIndices, 4> getUntiledPackReassociationMap(
 
 // Transpose the given tensor based on the given transpose indices. Marks the
 // created transpose based on the propagation direction.
-static std::tuple<Value, AffineMap>
+static std::tuple<Value, std::optional<tensor::PackOp>, AffineMap>
 createTransposeAsTensorPack(PatternRewriter &rewriter, Location loc,
                              Value input, AffineMap inputMap, TransposeIndices targetIndices) {
   if (isInnerIdentityIndices(targetIndices, inputMap.getNumResults()))
-    return std::make_tuple(input, inputMap);
+    return std::make_tuple(input, std::nullopt, inputMap);
 
   RankedTensorType inType = input.getType().cast<RankedTensorType>();
   auto elementType = inType.getElementType();
@@ -187,7 +187,7 @@ createTransposeAsTensorPack(PatternRewriter &rewriter, Location loc,
   AffineMap transposedMap = AffineMap::get(inputMap.getNumDims(), inputMap.getNumSymbols(),
           getPackedVector<AffineExpr>(mapResults, targetIndices),
           input.getContext());
-  return std::make_tuple(collapsed.getResult(), transposedMap);
+  return std::make_tuple(collapsed.getResult(), packedInput, transposedMap);
 }
 
 // Transpose the given tensor based on the given transpose indices. Marks the
@@ -250,6 +250,7 @@ createTransposeAsTensorUnPack(PatternRewriter &rewriter, Location loc,
   auto unpackedOutput = rewriter.create<tensor::UnPackOp>(
     loc, expandedOutput, empty, targetIndices,
     tileSizes, SmallVector<int64_t>{});
+  unpackedOutput->setAttr("__unpack__", rewriter.getUnitAttr());
   return unpackedOutput.getResult();
 }
 
@@ -332,11 +333,11 @@ static LogicalResult transposeConvLikeLinalgOp(PatternRewriter &rewriter,
           isInnerIdentityIndices(outputIndices, outputMap.getNumResults()))
     return failure();
 
-  auto [transposedInput, transposedInputMap] =
+  auto [transposedInput, inputPack, transposedInputMap] =
       createTransposeAsTensorPack(rewriter, loc, input, inputMap, inputIndices);
-  auto [transposedFilter, transposedFilterMap] =
+  auto [transposedFilter, filterPack, transposedFilterMap] =
       createTransposeAsTensorPack(rewriter, loc, filter, filterMap, filterIndices);
-  auto [transposedOutput, transposedOutputMap] =
+  auto [transposedOutput, outputPack, transposedOutputMap] =
       createTransposeAsTensorPack(rewriter, loc, output, outputMap, outputIndices);
 
   // Don't transpose if there's no change to the op.
@@ -344,6 +345,27 @@ static LogicalResult transposeConvLikeLinalgOp(PatternRewriter &rewriter,
           transposedFilterMap == filterMap &&
           transposedOutputMap == outputMap)
     return failure();
+
+  Value convDest = transposedOutput;
+  if (auto fillOp = output.getDefiningOp<linalg::FillOp>()) {
+    if (outputPack) {
+      auto outputDest = outputPack->getDest().getDefiningOp<tensor::EmptyOp>();
+      auto elementType = outputDest.getType().getElementType();
+
+      auto dimToTileMapping = outputPack->getDimAndTileMapping();
+      SmallVector<OpFoldResult> mixedSizes = outputDest.getMixedSizes();
+      SmallVector<OpFoldResult> collapsedSizes;
+      for (auto [index, size] : llvm::enumerate(mixedSizes))
+        if (!dimToTileMapping.count(index))
+          collapsedSizes.push_back(size);
+
+      auto emptyOp =
+        rewriter.create<tensor::EmptyOp>(loc, collapsedSizes, elementType);
+
+      convDest =
+        rewriter.create<linalg::FillOp>(loc, fillOp.getInputs(), emptyOp.getResult()).result();
+    }
+  }
 
   SmallVector<unsigned> newDimOrder;
   newDimOrder.append(convDims.batch);
@@ -353,7 +375,7 @@ static LogicalResult transposeConvLikeLinalgOp(PatternRewriter &rewriter,
   newDimOrder.append(convDims.inputChannel);
 
   Value transposedConvResult = convBuilder(rewriter, loc, convOp,
-          transposedInput, transposedFilter, transposedOutput,
+          transposedInput, transposedFilter, convDest,
           transposedInputMap, transposedFilterMap, transposedOutputMap, newDimOrder);
 
   auto returnToNCHW =
