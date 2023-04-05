@@ -332,7 +332,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   variantH = b.create<IREEBufferizeOp>(variantH, /*targetGPU=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  //LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 12. Post-bufferization mapping to blocks and threads
   funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
@@ -348,5 +348,5 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   b.create<VectorToMMAConversionOp>(funcH, /*useMmaSync=*/false, /*useWmma=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  //LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 }
