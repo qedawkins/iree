@@ -134,11 +134,16 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
   LLVM_DEBUG(DBGS() << "K size:" << kSize << ", " << kSize % 32 << "\n");
 
-  int64_t mTileSize = 128;
+  int64_t mTileSize = 32;
+  int64_t nTileSize = 128;
+  if (isNchw) {
+    mTileSize = 128;
+    nTileSize = 32;
+  }
+
   while (mSize % mTileSize != 0) mTileSize /= 2;
   workgroupTileSizes.push_back(mTileSize);
 
-  int64_t nTileSize = 32;
   while (nSize % nTileSize != 0) nTileSize /= 2;
   workgroupTileSizes.push_back(nTileSize);
 
