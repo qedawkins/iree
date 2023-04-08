@@ -114,19 +114,6 @@ static SmallVector<T> getPackedVector(SmallVector<T> vec,
   return packedShape;
 }
 
-//static SmallVector<ReassociationIndices, 4> getUntiledPackReassociationMap(int dimCount) {
-//  SmallVector<ReassociationIndices, 4> reassociationMap;
-//  int end = dimCount - 1;
-//  ReassociationIndices finalDim{end};
-//  for (int i = 0; i < end; i++) {
-//    reassociationMap.push_back({i});
-//    finalDim.push_back(end + 1 + i);
-//  }
-//  finalDim.push_back(2*end + 1);
-//  reassociationMap.push_back(finalDim);
-//  return reassociationMap;
-//}
-
 static SmallVector<ReassociationIndices, 4> getUntiledPackReassociationMap(
         TransposeIndices targetIndices, int64_t rank) {
   int startDim = *std::min_element(targetIndices.begin(), targetIndices.end());
@@ -154,22 +141,17 @@ createTransposeAsTensorPack(PatternRewriter &rewriter, Location loc,
   auto inputShape(inType.getShape());
 
   SmallVector<OpFoldResult> transposedTileSizes;
-  //for (int64_t i = startDim, end = targetIndices.size() + startDim; i < end; i++) {
   for (auto i : targetIndices) {
     if (ShapedType::isDynamic(inputShape[i]))
       transposedTileSizes.push_back(rewriter.create<tensor::DimOp>(loc, input, i).getResult());
     else
       transposedTileSizes.push_back(rewriter.getIndexAttr(inputShape[i]));
   }
-  //auto transposedTileSizes =
-  //    shuffleFromIndices<OpFoldResult>(tileSizes, targetIndices);
 
   // Pack the input tensor.
   auto empty = tensor::PackOp::createDestinationTensor(
       rewriter, loc, input, transposedTileSizes, targetIndices, SmallVector<int64_t>{});
   auto packedInput = rewriter.create<tensor::PackOp>(
-    //loc, input, empty, invertIndices(targetIndices),
-    //shuffleFromIndices<OpFoldResult>(tileSizes, invertIndices(targetIndices)),
     loc, input, empty, targetIndices,
     transposedTileSizes,
     /*padding=*/std::nullopt, SmallVector<int64_t>{});
@@ -218,7 +200,6 @@ createTransposeAsTensorUnPack(PatternRewriter &rewriter, Location loc,
     output, reassociationMap);
 
   SmallVector<OpFoldResult> tileSizes;
-  //for (int64_t i = 0, end = targetIndices.size(); i < end; i++) {
   for (auto i : getNormalizedIndices(targetIndices)) {
     int64_t dim = i + rank - targetIndices.size();
     if (ShapedType::isDynamic(outputShape[dim]))
