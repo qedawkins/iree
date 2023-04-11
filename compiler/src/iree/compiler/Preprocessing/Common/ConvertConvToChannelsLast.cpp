@@ -454,6 +454,78 @@ struct ConvertLinalgConvOp
 // Propagation patterns
 //=====================================================================
 
+class BubbleUpPackThroughPadOp final
+    : public OpRewritePattern<tensor::PackOp> {
+ public:
+  using OpRewritePattern<tensor::PackOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::PackOp packOp,
+                                PatternRewriter &rewriter) const override {
+    auto padOp = packOp.getSource().getDefiningOp<tensor::PadOp>();
+    if (!padOp)
+      return failure();
+
+    if (!padOp.getResult().hasOneUse())
+      return failure();
+
+    // TODO: Enable padding.
+    if (packOp.getPaddingValue())
+      return failure();
+
+    // TODO: Enable outer dims perm.
+    if (!packOp.getOuterDimsPerm().empty())
+      return failure();
+
+    // We want to move the pack not the insert_slice.
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(padOp);
+
+    Location loc = padOp->getLoc();
+    auto mixedTiles = packOp.getMixedTiles();
+    auto innerDimsPos = packOp.getInnerDimsPos();
+    auto outerDimsPerm = packOp.getOuterDimsPerm();
+    if (!packOp.getDest().getDefiningOp<tensor::EmptyOp>())
+      return failure();
+
+    // Bail out if one of the padded dimension is a tiled one.
+    llvm::SmallBitVector paddedDims = padOp.getPaddedDims();
+    llvm::SmallBitVector innerDims(paddedDims.size());
+    for (int64_t dim : innerDimsPos)
+      innerDims.flip(dim);
+    if (paddedDims.anyCommon(innerDims))
+      return failure();
+
+    Value paddingVal = padOp.getConstantPaddingValue();
+    if (!paddingVal)
+      return failure();
+
+    auto empty = tensor::PackOp::createDestinationTensor(
+        rewriter, loc, padOp.getSource(), mixedTiles, innerDimsPos,
+        outerDimsPerm);
+    Value packedSource = rewriter.create<tensor::PackOp>(
+            loc, padOp.getSource(), empty, innerDimsPos, mixedTiles,
+            /*padding=*/std::nullopt, outerDimsPerm);
+
+    // If we have `outer_dims_perms` we need to adjust the padded dimensions.
+    SmallVector<OpFoldResult> lowPad = padOp.getMixedLowPad();
+    SmallVector<OpFoldResult> highPad = padOp.getMixedHighPad();
+    if (!outerDimsPerm.empty()) {
+      applyPermutationToVector<OpFoldResult>(lowPad, outerDimsPerm);
+      applyPermutationToVector<OpFoldResult>(highPad, outerDimsPerm);
+    }
+    // Add zero padding for the point loops.
+    size_t pointLoopsSize = innerDimsPos.size();
+    lowPad.append(pointLoopsSize, rewriter.getIndexAttr(0));
+    highPad.append(pointLoopsSize, rewriter.getIndexAttr(0));
+
+    auto newPadOp = rewriter.create<tensor::PadOp>(
+        loc, /*result=*/Type(), packedSource, lowPad, highPad,
+        paddingVal, padOp.getNofold());
+    rewriter.replaceOp(packOp, newPadOp.getResult());
+    return success();
+  }
+};
+
 class BubbleUpPackThroughTensorInsertSlice final
     : public OpRewritePattern<tensor::PackOp> {
  public:
@@ -762,6 +834,7 @@ struct ConvertConvToChannelsLastPass
       linalg::populateDataLayoutPropagationPatterns(
               patterns, [](Operation *op) { return true; });
       patterns.insert<BubbleUpPackThroughTensorInsertSlice>(context);
+      patterns.insert<BubbleUpPackThroughPadOp>(context);
       if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns)))) {
         return signalPassFailure();
       }
