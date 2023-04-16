@@ -488,6 +488,24 @@ static LogicalResult verifyImplicitGemmCompatibleConvolutionCaptures(
   //llvm::errs() << "\n";
   //llvm::errs() << "\n";
 
+  if (captures.convolutionDims.filterLoop.empty()) {
+    int mSize = 1;
+    for (auto dim : captures.convolutionDims.batch)
+      mSize *= captures.convolutionOpSizes[dim];
+
+    int nSize = 1;
+    for (auto dim : captures.convolutionDims.outputChannel)
+      nSize *= captures.convolutionOpSizes[dim];
+
+    int kSize = 1;
+    for (auto dim : captures.convolutionDims.inputChannel)
+      kSize *= captures.convolutionOpSizes[dim];
+
+    if (mSize % 16 != 0 || nSize % 16 != 0 || kSize % 16 != 0)
+      return failure();
+    return success();
+  }
+
   bool isNchw = captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0];
   int channelSize = 1;
   int imageSize = 1;

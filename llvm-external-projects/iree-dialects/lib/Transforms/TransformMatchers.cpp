@@ -162,6 +162,8 @@ transform_ext::StructuredOpMatcher::isConv2d() {
     if (!linalg::detail::getMatchConvolutionMessage(
             mlir::linalg::detail::isConvolutionInterfaceImpl(linalgOp, &convDims)).empty())
       return false;
+    if (linalg::isaContractionOpInterface(linalgOp) && linalgOp.getNumReductionLoops() == 2)
+      return true;
     if (convDims.outputImage.size() != 2 || convDims.filterLoop.size() != 2)
       return false;
     return true;
