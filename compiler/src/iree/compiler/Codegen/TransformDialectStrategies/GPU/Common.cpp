@@ -545,6 +545,25 @@ static ConvolutionConfig getConvolutionConfig(
 static LogicalResult verifyImplicitGemmCompatibleConvolutionCaptures(
     const transform_ext::MatchedConvolutionCaptures &captures,
     const GPUModel &gpuModel) {
+  // llvm::errs() << "\n";
+  // llvm::errs() << "\n";
+  // llvm::interleaveComma(captures.convolutionDims.batch, llvm::errs() <<
+  // "Batch: "); llvm::errs() << "\n";
+  // llvm::interleaveComma(captures.convolutionDims.outputImage, llvm::errs() <<
+  // "OutputImage: "); llvm::errs() << "\n";
+  // llvm::interleaveComma(captures.convolutionDims.outputChannel, llvm::errs()
+  // << "OutputChannel: "); llvm::errs() << "\n";
+  // llvm::interleaveComma(captures.convolutionDims.filterLoop, llvm::errs() <<
+  // "FilterLoop: "); llvm::errs() << "\n";
+  // llvm::interleaveComma(captures.convolutionDims.inputChannel, llvm::errs()
+  // << "InputChannel: "); llvm::errs() << "\n";
+  // llvm::interleaveComma(captures.convolutionDims.depth, llvm::errs() <<
+  // "Depth: "); llvm::errs() << "\n";
+  // llvm::interleaveComma(captures.convolutionDims.strides, llvm::errs() <<
+  // "Strides: "); llvm::errs() << "\n";
+  // llvm::interleaveComma(captures.convolutionDims.dilations, llvm::errs() <<
+  // "Dilations: "); llvm::errs() << "\n"; llvm::errs() << "\n";
+
   bool isNchw = captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0];
   int channelSize = 1;
   int imageSize = 1;

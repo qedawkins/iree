@@ -79,13 +79,6 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   assert(maxNumThreadsToUse > 0 && "maxNumThreadsToUse must be > 0");
   assert(maxNumThreadsToUse >= convolutionConfig.subgroupSize && "need at least a warp?");
 
-  // Block-level
-  // ===========
-
-  // Batch dimension
-  for (int i = 0, e = captures.convolutionDims.batch.size(); i < e; i++)
-    workgroupTileSizes.push_back(1);
-
   //llvm::errs() << "\n";
   //llvm::errs() << "\n";
   //llvm::interleaveComma(captures.convolutionDims.batch, llvm::errs() << "Batch: ");
@@ -106,63 +99,181 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
   //llvm::errs() << "\n";
   //llvm::errs() << "\n";
 
-  isNchw = captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0];
+  if (captures.convolutionDims.inputChannel.size() == 1 &&
+      captures.convolutionDims.outputChannel.size() == 1) {
+    // Block-level
+    // ===========
 
-  int channelSize = 1;
-  int imageSize = 1;
-  for (auto dim : captures.convolutionDims.outputChannel)
-    channelSize *= captures.convolutionOpSizes[dim];
-  for (auto dim : captures.convolutionDims.outputImage)
-    imageSize *= captures.convolutionOpSizes[dim];
+    // Batch dimension
+    for (int i = 0, e = captures.convolutionDims.batch.size(); i < e; i++)
+      workgroupTileSizes.push_back(1);
 
-  int mSize, nSize;
-  if (isNchw) {
-    mSize = channelSize;
-    nSize = imageSize;
+    isNchw = captures.convolutionDims.outputChannel[0] <
+             captures.convolutionDims.outputImage[0];
+
+    int channelSize = 1;
+    int imageSize = 1;
+    for (auto dim : captures.convolutionDims.outputChannel)
+      channelSize *= captures.convolutionOpSizes[dim];
+    for (auto dim : captures.convolutionDims.outputImage)
+      imageSize *= captures.convolutionOpSizes[dim];
+
+    int mSize, nSize;
+    if (isNchw) {
+      mSize = channelSize;
+      nSize = imageSize;
+    } else {
+      mSize = imageSize;
+      nSize = channelSize;
+    }
+
+    int kSize = 1;
+    for (auto dim : captures.convolutionDims.filterLoop)
+      kSize *= captures.convolutionOpSizes[dim];
+    for (auto dim : captures.convolutionDims.inputChannel)
+      kSize *= captures.convolutionOpSizes[dim];
+
+    LLVM_DEBUG(DBGS() << "M size:" << mSize << ", " << mSize % 32 << "\n");
+    LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
+    LLVM_DEBUG(DBGS() << "K size:" << kSize << ", " << kSize % 32 << "\n");
+
+    int64_t mTileSize = 32;
+    int64_t nTileSize = 64;
+    if (isNchw) {
+      mTileSize = 64;
+      nTileSize = 32;
+    }
+
+    while (mSize % mTileSize != 0) mTileSize /= 2;
+    workgroupTileSizes.push_back(mTileSize);
+
+    while (nSize % nTileSize != 0) nTileSize /= 2;
+    workgroupTileSizes.push_back(nTileSize);
+
+    tileM = mTileSize > nTileSize;
+    int64_t threadTile = tileM ? mTileSize : nTileSize;
+
+    int64_t im2colTile = isNchw ? nTileSize : mTileSize;
+
+    // Thread-level
+    // ============
+    numThreadsXInBlock =
+        std::min(maxNumThreadsToUse,
+                 // 2 * convolutionConfig.subgroupSize);
+                 iree_compiler::nextMultipleOf(threadTile / 2,
+                                               convolutionConfig.subgroupSize));
+    numThreadsXToDistribute = std::min(threadTile, numThreadsXInBlock);
+    numThreadsXForIm2Col = std::min(im2colTile, numThreadsXInBlock);
+    numWarpsXInBlock = numThreadsXInBlock / convolutionConfig.subgroupSize;
+
+    // Reduction tile size
+    innerLoopTileSize = kSize % 32 != 0 ? 16 : 32;
+
+    // Build tile size vectors.
+
+    reductionLoopTileSizes =
+        SmallVector<int64_t>(captures.convolutionDims.batch.size() + 2, 0);
+    reductionLoopTileSizes.push_back(innerLoopTileSize);
+
+    im2ColThreadTileSizes =
+        SmallVector<int64_t>(captures.convolutionDims.batch.size(), 0);
+    if (isNchw) im2ColThreadTileSizes.push_back(0);
+    im2ColThreadTileSizes.push_back(numThreadsXForIm2Col);
+
+    elementwiseThreadTileSizes =
+        SmallVector<int64_t>(captures.convolutionDims.batch.size(), 0);
+    if (!tileM) elementwiseThreadTileSizes.push_back(0);
+    elementwiseThreadTileSizes.push_back(numThreadsXToDistribute);
+
+    matmulWarpTileSizes =
+        SmallVector<int64_t>(captures.convolutionDims.batch.size(), 0);
+    if (!tileM) matmulWarpTileSizes.push_back(0);
+    matmulWarpTileSizes.push_back(numWarpsXInBlock);
+  } else if (captures.convolutionDims.inputChannel.size() == 2 ||
+             captures.convolutionDims.outputChannel.size() == 2) {
+    // Block-level
+    // ===========
+
+    // Batch dimension
+    for (int i = 0, e = captures.convolutionDims.batch.size(); i < e; i++)
+      workgroupTileSizes.push_back(1);
+
+    // Extra Outer Channel dimension
+    for (int i = 0, e = captures.convolutionDims.outputChannel.size() - 1;
+         i < e; i++)
+      workgroupTileSizes.push_back(1);
+
+    int channelSize = 1;
+    int imageSize =
+        captures
+            .convolutionOpSizes[captures.convolutionDims.outputImage.back()];
+    for (auto dim : captures.convolutionDims.outputChannel)
+      channelSize *= captures.convolutionOpSizes[dim];
+
+    int mSize = imageSize;
+    int nSize = channelSize;
+
+    int kSize = 1;
+    for (auto dim : captures.convolutionDims.filterLoop)
+      kSize *= captures.convolutionOpSizes[dim];
+    for (auto dim : captures.convolutionDims.inputChannel)
+      kSize *= captures.convolutionOpSizes[dim];
+
+    LLVM_DEBUG(DBGS() << "M size:" << mSize << ", " << mSize % 32 << "\n");
+    LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
+    LLVM_DEBUG(DBGS() << "K size:" << kSize << ", " << kSize % 32 << "\n");
+
+    int64_t mTileSize = 128;
+    int64_t nTileSize = nSize;
+
+    while (mSize % mTileSize != 0) mTileSize /= 2;
+    workgroupTileSizes.push_back(mTileSize);
+
+    workgroupTileSizes.push_back(nTileSize);
+
+    int64_t threadTile = mTileSize;
+    int64_t im2colTile = mTileSize;
+
+    // Thread-level
+    // ============
+    numThreadsXInBlock =
+        std::min(maxNumThreadsToUse,
+                 // 2 * convolutionConfig.subgroupSize);
+                 iree_compiler::nextMultipleOf(threadTile / 2,
+                                               convolutionConfig.subgroupSize));
+    numThreadsXToDistribute = std::min(threadTile, numThreadsXInBlock);
+    numThreadsXForIm2Col = std::min(im2colTile, numThreadsXInBlock);
+    numWarpsXInBlock = numThreadsXInBlock / convolutionConfig.subgroupSize;
+
+    // Reduction tile size
+    innerLoopTileSize = kSize % 32 != 0 ? 16 : 32;
+
+    // Build tile size vectors.
+
+    reductionLoopTileSizes = SmallVector<int64_t>(
+        captures.convolutionDims.batch.size() +
+            captures.convolutionDims.outputChannel.size() + 1,
+        0);
+    reductionLoopTileSizes.push_back(innerLoopTileSize);
+
+    im2ColThreadTileSizes =
+        SmallVector<int64_t>(captures.convolutionDims.batch.size(), 0);
+    im2ColThreadTileSizes.push_back(numThreadsXForIm2Col);
+
+    elementwiseThreadTileSizes = SmallVector<int64_t>(
+        captures.convolutionDims.batch.size() +
+            captures.convolutionDims.outputChannel.size() - 1,
+        0);
+    elementwiseThreadTileSizes.push_back(numThreadsXToDistribute);
+
+    matmulWarpTileSizes = SmallVector<int64_t>(
+        captures.convolutionDims.batch.size() +
+            captures.convolutionDims.outputChannel.size() - 1,
+        0);
+    matmulWarpTileSizes.push_back(numWarpsXInBlock);
   } else {
-    mSize = imageSize;
-    nSize = channelSize;
+    assert(false && "should not have matched implicit gemm yet");
   }
-
-  int kSize = 1;
-  for (auto dim : captures.convolutionDims.filterLoop)
-    kSize *= captures.convolutionOpSizes[dim];
-  for (auto dim : captures.convolutionDims.inputChannel)
-    kSize *= captures.convolutionOpSizes[dim];
-
-  LLVM_DEBUG(DBGS() << "M size:" << mSize << ", " << mSize % 32 << "\n");
-  LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
-  LLVM_DEBUG(DBGS() << "K size:" << kSize << ", " << kSize % 32 << "\n");
-
-  int64_t mTileSize = 32;
-  int64_t nTileSize = 128;
-  if (isNchw) {
-    mTileSize = 128;
-    nTileSize = 32;
-  }
-
-  while (mSize % mTileSize != 0) mTileSize /= 2;
-  workgroupTileSizes.push_back(mTileSize);
-
-  while (nSize % nTileSize != 0) nTileSize /= 2;
-  workgroupTileSizes.push_back(nTileSize);
-
-  tileM = mTileSize > nTileSize;
-  int64_t threadTile = tileM ? mTileSize : nTileSize;
-
-  int64_t im2colTile = isNchw ? nTileSize : mTileSize;
-
-  // Thread-level
-  // ============
-  numThreadsXInBlock = std::min(maxNumThreadsToUse,
-          //2 * convolutionConfig.subgroupSize);
-          iree_compiler::nextMultipleOf(threadTile / 2, convolutionConfig.subgroupSize));
-  numThreadsXToDistribute = std::min(threadTile, numThreadsXInBlock);
-  numThreadsXForIm2Col = std::min(im2colTile, numThreadsXInBlock);
-  numWarpsXInBlock = numThreadsXInBlock / convolutionConfig.subgroupSize;
-
-  // Reduction tile size
-  innerLoopTileSize = kSize % 32 != 0 ? 16 : 32;
 }
 
 /// Builds the transform IR tiling reductions for CUDA targets. Supports
@@ -171,7 +282,7 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
 void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
     ImplicitLocOpBuilder &b, Value variantH,
     const ConvolutionImplicitGemmStrategy &strategy) {
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   ApplyPatternsOpPatterns emptyConfiguration;
   auto pdlOperationType = pdl::OperationType::get(b.getContext());
@@ -200,6 +311,8 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   Value funcH =
       b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
   b.create<ApplyPatternsOp>(funcH, configuration);
+
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 4. Create the block/mapping tiling level and fuse.
   auto [fusionTargetH, fusionGroupH] =
@@ -232,8 +345,9 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       b, tileResult.resultingFusedOpsHandles.front(), tileResult.tiledOpH);
 
   // Step 6. Tile the reduction loop
-  auto tileToScfForOp = b.create<transform::TileToScfForOp>(TypeRange{pdlOperationType, pdlOperationType}, blockMatmulH, ValueRange{},
-          strategy.getInnerLoopTileSizes());
+  auto tileToScfForOp = b.create<transform::TileToScfForOp>(
+      TypeRange{pdlOperationType, pdlOperationType}, blockMatmulH, ValueRange{},
+      strategy.getReductionLoopTileSizes());
   auto innerLoopH = tileToScfForOp.getLoops()[0];
   auto matmulLoopK = tileToScfForOp.getTiledLinalgOp();
 
@@ -241,7 +355,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   //maybeFillH = b.create<FuseIntoContainingOp>(maybeFillH, innerLoopH).getResult();
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 7. Promote to shared memory
   auto promoteOperandsOp = b.create<PromoteOperandsOp>(
@@ -250,7 +364,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
           b.getDenseI64ArrayAttr(ArrayRef<int64_t>{strategy.getImplicitGemmFilterOperandIndex()}));
   Value promotedMatmulH = promoteOperandsOp.getResult()[0];
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 8. Tile img2col, fill, and trailing elementwise to threads
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
@@ -258,7 +372,8 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*isolatedParentOpH=*/variantH,
       /*rootH=*/tiledImg2colH,
       /*opsHToFuse=*/{},
-      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getInputTileSizes())),
+      /*numThreads=*/
+      getAsOpFoldResult(b.getI64ArrayAttr(strategy.getIm2ColThreadTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allThreadAttrs.front()}));
 
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
@@ -266,7 +381,9 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*isolatedParentOpH=*/variantH,
       /*rootH=*/maybeBlockTrailingH,
       /*opsHToFuse=*/{},
-      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getOutputTileSizes())),
+      /*numThreads=*/
+      getAsOpFoldResult(
+          b.getI64ArrayAttr(strategy.getElementwiseThreadTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allThreadAttrs.front()}));
 
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
@@ -274,10 +391,12 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*isolatedParentOpH=*/variantH,
       /*rootH=*/maybeFillH,
       /*opsHToFuse=*/{},
-      /*numThreads=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getOutputTileSizes())),
+      /*numThreads=*/
+      getAsOpFoldResult(
+          b.getI64ArrayAttr(strategy.getElementwiseThreadTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allThreadAttrs.front()}));
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 9. Tile matmul to warps
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
@@ -285,10 +404,11 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       /*isolatedParentOpH=*/variantH,
       /*rootH=*/promotedMatmulH,
       /*opsHToFuse=*/{},
-      /*numWarps=*/getAsOpFoldResult(b.getI64ArrayAttr(strategy.getWarpsTileSizes())),
+      /*numWarps=*/
+      getAsOpFoldResult(b.getI64ArrayAttr(strategy.getMatmulWarpTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allWarpAttrs.front()}));
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 10. Vectorize and unroll to wmma sizes
   funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
@@ -297,9 +417,9 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   vectorizeConfiguration.rankReducingLinalg = true;
   vectorizeConfiguration.rankReducingVector = true;
   b.create<ApplyPatternsOp>(funcH, vectorizeConfiguration);
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
   funcH = b.create<VectorizeOp>(funcH, /*vectorizePadding=*/false, /*vectorizeExtract=*/true);
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Basically a hack to find the parent forall loop of the matmul for wmma unrolling.
   auto forallOpsH = b.create<MatchOp>(variantH, scf::ForallOp::getOperationName());
@@ -320,7 +440,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
     unrollConfiguration.unrollVectorsGpuWmma = true;
   b.create<ApplyPatternsToNestedOp>(matmulLoop, unrollConfiguration);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 11. Bufferize
   ApplyPatternsOpPatterns foldConfiguration;
@@ -337,7 +457,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   variantH = b.create<IREEBufferizeOp>(variantH, /*targetGPU=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 12. Post-bufferization mapping to blocks and threads
   funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
@@ -353,5 +473,5 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   b.create<VectorToMMAConversionOp>(funcH, /*useMmaSync=*/false, /*useWmma=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  LLVM_DEBUG(b.create<PrintOp>(variantH));
+  // LLVM_DEBUG(b.create<PrintOp>(variantH));
 }

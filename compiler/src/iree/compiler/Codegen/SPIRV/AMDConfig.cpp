@@ -86,8 +86,8 @@ LogicalResult setAMDCodeGenConfig(const spirv::TargetEnv &targetEnv,
     mlir::linalg::detail::ConvolutionDimensions dims;
     if (linalg::detail::getMatchConvolutionMessage(
                 mlir::linalg::detail::isConvolutionInterfaceImpl(linalgOp, &dims)).empty()) {
-      if (dims.outputImage.size() >= 2 && dims.filterLoop.size() >= 2
-              && linalgOp.getNumReductionLoops() == 3)  {
+      if (dims.outputImage.size() >= 2 && dims.filterLoop.size() >= 2 &&
+          linalgOp.getNumReductionLoops() >= 3) {
         Optional<int64_t> coopSubgroupSize = limits.getSubgroupSize();
         // AMD RDNA architectures supports both wave32 and wave64 modes. Prefer to use
         // wave32 mode for better performance.
