@@ -58,6 +58,8 @@ class ConvolutionImplicitGemmStrategy : public AbstractConvolutionStrategy {
     return reductionLoopTileSizes;
   }
 
+  bool doIm2Col = true;
+
  private:
   ConvolutionImplicitGemmStrategy(
       MLIRContext *context,
