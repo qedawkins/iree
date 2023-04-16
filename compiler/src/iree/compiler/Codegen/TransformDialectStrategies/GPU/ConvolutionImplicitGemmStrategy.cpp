@@ -217,8 +217,16 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
     int kSize = 1;
     for (auto dim : captures.convolutionDims.filterLoop)
       kSize *= captures.convolutionOpSizes[dim];
-    for (auto dim : captures.convolutionDims.inputChannel)
-      kSize *= captures.convolutionOpSizes[dim];
+    if (captures.convolutionDims.inputChannel.size() > 1) {
+      for (int i = 0, e = captures.convolutionDims.inputChannel.size() - 1;
+           i < e; i++)
+        kSize *=
+            captures
+                .convolutionOpSizes[captures.convolutionDims.inputChannel[i]];
+    } else {
+      kSize *= captures.convolutionOpSizes[captures.convolutionDims.inputChannel
+                                               .front()];
+    }
 
     LLVM_DEBUG(DBGS() << "M size:" << mSize << ", " << mSize % 32 << "\n");
     LLVM_DEBUG(DBGS() << "N size:" << nSize << ", " << nSize % 32 << "\n");
@@ -251,14 +259,24 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
 
     // Build tile size vectors.
 
-    reductionLoopTileSizes = SmallVector<int64_t>(
-        captures.convolutionDims.batch.size() +
-            captures.convolutionDims.outputChannel.size() + 1,
-        0);
-    reductionLoopTileSizes.push_back(innerLoopTileSize);
+    if (captures.convolutionDims.inputChannel.size() > 1) {
+      reductionLoopTileSizes = SmallVector<int64_t>(
+          captures.convolutionDims.batch.size() +
+              captures.convolutionDims.outputChannel.size() - 1,
+          0);
+      reductionLoopTileSizes.push_back(1);
+    } else {
+      reductionLoopTileSizes = SmallVector<int64_t>(
+          captures.convolutionDims.batch.size() +
+              captures.convolutionDims.outputChannel.size() + 1,
+          0);
+      reductionLoopTileSizes.push_back(innerLoopTileSize);
+    }
 
-    im2ColThreadTileSizes =
-        SmallVector<int64_t>(captures.convolutionDims.batch.size(), 0);
+    im2ColThreadTileSizes = SmallVector<int64_t>(
+        captures.convolutionDims.batch.size() +
+            captures.convolutionDims.inputChannel.size() - 1,
+        0);
     im2ColThreadTileSizes.push_back(numThreadsXForIm2Col);
 
     elementwiseThreadTileSizes = SmallVector<int64_t>(
@@ -269,6 +287,7 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
 
     matmulWarpTileSizes = SmallVector<int64_t>(
         captures.convolutionDims.batch.size() +
+            captures.convolutionDims.inputChannel.size() - 1 +
             captures.convolutionDims.outputChannel.size() - 1,
         0);
     matmulWarpTileSizes.push_back(numWarpsXInBlock);
