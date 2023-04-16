@@ -7,6 +7,7 @@
 #include "iree/compiler/Preprocessing/Common/PassDetail.h"
 #include "iree/compiler/Preprocessing/Common/Passes.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/ADT/StringRef.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
@@ -25,6 +26,8 @@
 namespace mlir {
 namespace iree_compiler {
 namespace IREE {
+
+static const StringLiteral fullTileTransposeMarker = "__fully_transpose_tile__";
 
 using TransposeIndices = SmallVector<int64_t, 4>;
 using ConvBuilderFn = std::function<Value(OpBuilder &b, Location loc,
@@ -444,6 +447,8 @@ struct ConvertLinalgConvOp
 
   LogicalResult matchAndRewrite(linalg::LinalgOp op,
                                 PatternRewriter &rewriter) const override {
+    if (op->hasAttr(fullTileTransposeMarker))
+      return transposeConvLikeLinalgOp(rewriter, op, 0);
     return transposeConvLikeLinalgOp(rewriter, op, tilingFactor);
   }
  private:
