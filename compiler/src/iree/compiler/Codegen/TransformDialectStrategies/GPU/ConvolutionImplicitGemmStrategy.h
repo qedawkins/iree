@@ -33,53 +33,30 @@ class ConvolutionImplicitGemmStrategy : public AbstractConvolutionStrategy {
     return {numWarpsXInBlock, 1, 1};
   }
 
-  SmallVector<int64_t> getInputTileSizes() const {
-    SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size(), 0);
-    if (isNchw)
-      tileSizes.push_back(0);
-    tileSizes.push_back(numThreadsXForIm2Col);
-    return tileSizes;
-    //if (isNchw)
-    //  return {0, numThreadsXForIm2Col, 0};
-    //return {0, 0, numThreadsXInBlock};
-  }
-
-  SmallVector<int64_t> getOutputTileSizes() const {
-    SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size(), 0);
-    if (!tileM)
-      tileSizes.push_back(0);
-    tileSizes.push_back(numThreadsXToDistribute);
-    return tileSizes;
-    //if (tileM)
-    //  return {0, numThreadsXToDistribute, 0};
-    //return {0, 0, numThreadsXToDistribute};
-  }
-
-  SmallVector<int64_t> getWarpsTileSizes() const override {
-    SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size(), 0);
-    if (!tileM)
-      tileSizes.push_back(0);
-    tileSizes.push_back(numWarpsXInBlock);
-    return tileSizes;
-    //  return {0, numWarpsXInBlock, 0};
-    //return {0, 0, numWarpsXInBlock};
-  }
-
-  SmallVector<int64_t> getInnerLoopTileSizes() const override {
-    SmallVector<int64_t> tileSizes(captures.convolutionDims.batch.size() + 2, 0);
-    tileSizes.push_back(innerLoopTileSize);
-    return tileSizes;
-    //return {0, 0, 0, innerLoopTileSize};
-  }
-
   int64_t getImplicitGemmFilterOperandIndex() const {
-    if (captures.convolutionDims.outputChannel[0] < captures.convolutionDims.outputImage[0])
+    if (captures.convolutionDims.outputChannel.back() < captures.convolutionDims.outputImage.back())
       return 0;
     return 1;
   }
 
   bool getIsSpirv() const {
     return isSpirv;
+  }
+
+  SmallVector<int64_t> getIm2ColThreadTileSizes() const {
+    return im2ColThreadTileSizes;
+  }
+
+  SmallVector<int64_t> getElementwiseThreadTileSizes() const {
+    return elementwiseThreadTileSizes;
+  }
+
+  SmallVector<int64_t> getMatmulWarpTileSizes() const {
+    return matmulWarpTileSizes;
+  }
+
+  SmallVector<int64_t> getReductionLoopTileSizes() const {
+    return reductionLoopTileSizes;
   }
 
  private:
@@ -95,6 +72,11 @@ class ConvolutionImplicitGemmStrategy : public AbstractConvolutionStrategy {
   int64_t numThreadsXForIm2Col;
   int64_t numWarpsXInBlock;
   int64_t innerLoopTileSize;
+
+  SmallVector<int64_t> reductionLoopTileSizes;
+  SmallVector<int64_t> im2ColThreadTileSizes;
+  SmallVector<int64_t> elementwiseThreadTileSizes;
+  SmallVector<int64_t> matmulWarpTileSizes;
 
   bool tileM = false;
   bool isNchw = false;
