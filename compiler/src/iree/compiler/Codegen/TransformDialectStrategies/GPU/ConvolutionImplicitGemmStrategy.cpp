@@ -366,8 +366,8 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   // Step 1. Call the matcher. Note that this is the same matcher as used to
   // trigger this compilation path, so it must always apply.
   b.create<transform_ext::RegisterMatchCallbacksOp>();
-  auto [maybeFillH, convolutionH, maybeTrailingH] =
-      unpackRegisteredMatchCallback<3>(
+  auto [maybePadH, maybeFillH, convolutionH, maybeTrailingH] =
+      unpackRegisteredMatchCallback<4>(
           b, "convolution", transform::FailurePropagationMode::Propagate,
           variantH);
 
