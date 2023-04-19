@@ -660,7 +660,6 @@ DiagnosedSilenceableFailure transform_dialect::GpuDistributeSharedMemoryCopyOp::
     func::FuncOp funcOp, transform::ApplyToEachResultList &results,
     transform::TransformState &state) {
   SmallVector<linalg::GenericOp> copiesFromWorkgroupMem;
-  OpBuilder builder(funcOp.getContext());
   funcOp.walk([&](linalg::GenericOp copyOp) {
     if (copyOp.getDpsInputOperands().size() != 1 ||
             copyOp.getDpsInitOperands().size() != 1)
@@ -681,12 +680,26 @@ DiagnosedSilenceableFailure transform_dialect::GpuDistributeSharedMemoryCopyOp::
         (!destGpuSpace || destGpuSpace.getValue() != gpu::GPUDialect::getWorkgroupAddressSpace()))
       return;
 
-    setMarker(copyOp, getCopyToWorkgroupMemoryMarker());
-    // Insert barriers immediately after copies to workgroup memory.
-    if (destGpuSpace && destGpuSpace.getValue() == gpu::GPUDialect::getWorkgroupAddressSpace()) {
-      builder.setInsertionPointAfter(copyOp);
-      builder.create<gpu::BarrierOp>(copyOp.getLoc());
+    if (destGpuSpace && destGpuSpace.getValue() == gpu::GPUDialect::getWorkgroupAddressSpace() &&
+        !copyOp.getDpsInitOperand(0)->get().getDefiningOp<memref::AllocOp>()) {
+      return;
     }
+
+    setMarker(copyOp, getCopyToWorkgroupMemoryMarker());
+  });
+
+  // Add markers to existing transfers to shared memory to help cleanup barriers.
+  funcOp.walk([&](vector::TransferWriteOp copyOp) {
+    auto sourceType = copyOp.getSource().getType().dyn_cast<MemRefType>();
+    auto sourceSpace = sourceType.getMemorySpace();
+    if (!sourceSpace)
+      return;
+
+    auto sourceGpuSpace = sourceSpace.dyn_cast_or_null<gpu::AddressSpaceAttr>();
+    if (!sourceGpuSpace || sourceGpuSpace.getValue() != gpu::GPUDialect::getWorkgroupAddressSpace())
+      return;
+
+    setMarker(copyOp, getCopyToWorkgroupMemoryMarker());
   });
 
   if (failed(mlir::iree_compiler::gpuDistributeSharedMemoryCopy(funcOp))) {
