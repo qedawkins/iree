@@ -358,7 +358,7 @@ void mlir::iree_compiler::gpu::ConvolutionImplicitGemmStrategy::configure(
 void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
     ImplicitLocOpBuilder &b, Value variantH,
     const ConvolutionImplicitGemmStrategy &strategy) {
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   ApplyPatternsOpPatterns emptyConfiguration;
   auto pdlOperationType = pdl::OperationType::get(b.getContext());
@@ -439,7 +439,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   //maybeFillH = b.create<FuseIntoContainingOp>(maybeFillH, innerLoopH).getResult();
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 7. Promote to shared memory
   auto promoteOperandsOp = b.create<PromoteOperandsOp>(
@@ -451,7 +451,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
             : ArrayRef<int64_t>{0, 1}));
   Value promotedMatmulH = promoteOperandsOp.getResult()[0];
 
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 8. Tile img2col, fill, and trailing elementwise to threads
   if (strategy.doIm2Col) {
@@ -484,7 +484,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
           b.getI64ArrayAttr(strategy.getElementwiseThreadTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allThreadAttrs.front()}));
 
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 9. Tile matmul to warps
   iree_compiler::buildTileFuseDistToForallWithNumThreads(
@@ -496,7 +496,7 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       getAsOpFoldResult(b.getI64ArrayAttr(strategy.getMatmulWarpTileSizes())),
       /*threadDimMapping=*/b.getArrayAttr({strategy.allWarpAttrs.front()}));
 
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 10. Vectorize and unroll to wmma sizes
   funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
@@ -505,39 +505,29 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   vectorizeConfiguration.rankReducingLinalg = true;
   vectorizeConfiguration.rankReducingVector = true;
   b.create<ApplyPatternsOp>(funcH, vectorizeConfiguration);
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
   funcH = b.create<VectorizeOp>(funcH, /*vectorizePadding=*/false, /*vectorizeExtract=*/true);
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Basically a hack to find the parent forall loop of the matmul for wmma unrolling.
-  if (strategy.doIm2Col || true) {
-    auto forallOpsH = b.create<MatchOp>(variantH, scf::ForallOp::getOperationName());
-    int numLoops = strategy.doIm2Col ? 3 : 2;
-    int resultPos = strategy.doIm2Col ? 1 : 0;
-    if (strategy.captures.maybeFillElementalTypeBitWidth > 0) {
-      numLoops++;
-      resultPos++;
-    }
-    if (strategy.captures.maybeTrailingOutputElementalTypeBitWidth > 0)
-      numLoops++;
-    Value matmulLoop = b.create<SplitHandlesOp>(forallOpsH, numLoops)->getResult(resultPos);
-
-    ApplyPatternsOpPatterns unrollConfiguration;
-    if (strategy.getIsSpirv())
-      unrollConfiguration.unrollVectorsGpuCoopMat = true;
-    else
-      unrollConfiguration.unrollVectorsGpuWmma = true;
-    b.create<ApplyPatternsToNestedOp>(matmulLoop, unrollConfiguration);
-  //} else {
-  //  ApplyPatternsOpPatterns unrollConfiguration;
-  //  if (strategy.getIsSpirv())
-  //    unrollConfiguration.unrollVectorsGpuCoopMat = true;
-  //  else
-  //    unrollConfiguration.unrollVectorsGpuWmma = true;
-  //  b.create<ApplyPatternsOp>(funcH, unrollConfiguration);
+  auto forallOpsH = b.create<MatchOp>(variantH, scf::ForallOp::getOperationName());
+  int numLoops = strategy.doIm2Col ? 3 : 2;
+  int resultPos = strategy.doIm2Col ? 1 : 0;
+  if (strategy.captures.maybeFillElementalTypeBitWidth > 0) {
+    numLoops++;
+    resultPos++;
   }
+  if (strategy.captures.maybeTrailingOutputElementalTypeBitWidth > 0)
+    numLoops++;
+  Value matmulLoop = b.create<SplitHandlesOp>(forallOpsH, numLoops)->getResult(resultPos);
 
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  ApplyPatternsOpPatterns unrollConfiguration;
+  if (strategy.getIsSpirv())
+    unrollConfiguration.unrollVectorsGpuCoopMat = true;
+  else
+    unrollConfiguration.unrollVectorsGpuWmma = true;
+  b.create<ApplyPatternsToNestedOp>(matmulLoop, unrollConfiguration);
+
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 11. Bufferize
   ApplyPatternsOpPatterns foldConfiguration;
@@ -554,13 +544,14 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   variantH = b.create<IREEBufferizeOp>(variantH, /*targetGPU=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 
   // Step 12. Post-bufferization mapping to blocks and threads
   funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
   funcH = buildMapToBlockAndThreads(b, funcH,
           strategy.getNumThreadsInBlock(), strategy.getNumWarpsInBlock());
   b.create<HoistStaticAllocOp>(funcH);
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
   funcH = b.create<GpuDistributeSharedMemoryCopyOp>(TypeRange{pdlOperationType}, funcH);
   ApplyPatternsOpPatterns distributeConfiguration;
   eraseConfiguration.foldMemrefAliases = true;
@@ -570,5 +561,5 @@ void mlir::iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   b.create<VectorToMMAConversionOp>(funcH, /*useMmaSync=*/false, /*useWmma=*/true);
   variantH = buildCanonicalizationAndEnablingTransforms(b, emptyConfiguration, variantH);
 
-  // LLVM_DEBUG(b.create<PrintOp>(variantH));
+  LLVM_DEBUG(b.create<PrintOp>(variantH));
 }
