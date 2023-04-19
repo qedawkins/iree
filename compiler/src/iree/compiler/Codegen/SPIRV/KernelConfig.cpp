@@ -44,6 +44,12 @@ constexpr int kMaxVectorNumBits = 128;
 namespace mlir {
 namespace iree_compiler {
 
+llvm::cl::opt<std::string> clSPIRVCodegenTransformDialectFileName(
+    "iree-codegen-spirv-use-transform-dialect",
+    llvm::cl::desc(
+        "MLIR file containing a transform dialect specification to apply"),
+    llvm::cl::init(""));
+
 llvm::cl::opt<bool> clSPIRVEnableTransformDialectJit(
     "iree-codegen-spirv-enable-transform-dialect-jit",
     llvm::cl::desc("enable the usage of the transform dialect JIT"),
@@ -1432,6 +1438,15 @@ static LogicalResult setSPIRVOpConfig(const spirv::TargetEnv &targetEnv,
     // If the op already has a lowering configuration specified from the
     // original source by the user, then use it directly.
     return setUserConfig(entryPointFn, rootOp, compilationInfo);
+  }
+
+  if (!clSPIRVCodegenTransformDialectFileName.empty()) {
+    MLIRContext *context = entryPointFn.getContext();
+    auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
+        context, CodeGenPipeline::TransformDialectCodegen);
+    LLVM_DEBUG(llvm::dbgs() << "using user specified transform dialect...\n");
+
+    return setTranslationInfo(entryPointFn, translationInfo);
   }
 
   // First try to find a proper CodeGen configuration to tile and vectorize for
