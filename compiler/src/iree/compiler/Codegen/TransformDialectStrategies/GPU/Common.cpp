@@ -636,7 +636,7 @@ LogicalResult mlir::iree_compiler::gpu::matchAndSetConvolutionStrategy(
       auto strategy = ConvolutionImplicitGemmStrategy::create(op->getContext(), captures,
                                                      convolutionConfig);
       return buildConvolutionImplicitGemmStrategy(b, variant, strategy);
-    } else if (convolutionConfig.strategy == ConvolutionStrategy::ImplicitGemm) {
+    } else if (convolutionConfig.strategy == ConvolutionStrategy::PaddedImplicitGemm) {
       auto strategy = ConvolutionPaddedImplicitGemmStrategy::create(op->getContext(), captures,
                                                      convolutionConfig);
       return buildConvolutionPaddedImplicitGemmStrategy(b, variant, strategy);

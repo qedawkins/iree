@@ -46,6 +46,10 @@ class ConvolutionPaddedImplicitGemmStrategy : public AbstractConvolutionStrategy
     return im2ColThreadTileSizes;
   }
 
+  SmallVector<int64_t> getInputPadThreadTileSizes() const {
+    return inputPadThreadTileSizes;
+  }
+
   SmallVector<int64_t> getElementwiseThreadTileSizes() const {
     return elementwiseThreadTileSizes;
   }
@@ -81,6 +85,7 @@ class ConvolutionPaddedImplicitGemmStrategy : public AbstractConvolutionStrategy
 
   SmallVector<int64_t> reductionLoopTileSizes;
   SmallVector<int64_t> im2ColThreadTileSizes;
+  SmallVector<int64_t> inputPadThreadTileSizes;
   SmallVector<int64_t> elementwiseThreadTileSizes;
   SmallVector<int64_t> matmulWarpTileSizes;
 
