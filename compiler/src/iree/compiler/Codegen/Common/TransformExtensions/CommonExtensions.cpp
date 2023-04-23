@@ -25,6 +25,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Conversion/VectorToGPU/VectorToGPU.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -1722,6 +1723,9 @@ transform_dialect::ConvertConv2DToImg2ColAndAdjustWorkgroupCountOp::applyToOne(
             return rewriteInIm2Col(rewriter, op);
           })
           .Case([&](linalg::Conv2DNchwFchwOp op) {
+            return rewriteInIm2Col(rewriter, op);
+          })
+          .Case([&](linalg::GenericOp op) {
             return rewriteInIm2Col(rewriter, op);
           })
           .Default([&](Operation *op) {
