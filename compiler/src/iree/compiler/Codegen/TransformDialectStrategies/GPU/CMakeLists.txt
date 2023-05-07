@@ -16,12 +16,14 @@ iree_cc_library(
   HDRS
     "AbstractGemmLikeStrategy.h"
     "Common.h"
+    "ConvolutionImplicitGemmStrategy.h"
     "MatmulTensorCoreStrategy.h"
     "SmallReductionStrategy.h"
     "StagedReductionStrategy.h"
   SRCS
     "AbstractGemmLikeStrategy.cpp"
     "Common.cpp"
+    "ConvolutionImplicitGemmStrategy.cpp"
     "MatmulTensorCoreStrategy.cpp"
     "SmallReductionStrategy.cpp"
     "StagedReductionStrategy.cpp"
