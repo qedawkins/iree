@@ -10,6 +10,7 @@
 #include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensions.h"
 #include "iree/compiler/Codegen/LLVMGPU/TransformExtensions/LLVMGPUExtensions.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/Common/Common.h"
+#include "iree/compiler/Codegen/TransformDialectStrategies/GPU/ConvolutionImplicitGemmStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/MatmulTensorCoreStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/SmallReductionStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/StagedReductionStrategy.h"
@@ -48,6 +49,11 @@ llvm::cl::opt<bool> clGPUEnableTransformDialectAlignedMatmul(
     "iree-codegen-llvmgpu-enable-transform-dialect-aligned-matmul",
     llvm::cl::desc(
         "activate the matmul tensorcore strategy for tile aligned shapes"),
+    llvm::cl::init(false));
+
+llvm::cl::opt<bool> clGPUEnableTransformDialectImplicitGemmStrategy(
+    "iree-codegen-llvmgpu-enable-transform-dialect-implicit-gemm-strategy",
+    llvm::cl::desc("activate the convolution implicit gemm strategy"),
     llvm::cl::init(false));
 
 // TODO: significantly better namespacing.
@@ -430,9 +436,9 @@ std::tuple<Value, Value, Value> mlir::iree_compiler::gpu::buildDistributeCopies(
       paddedMatmulOpH.getType(), paddedMatmulOpH, b.getI64IntegerAttr(1));
 
   // Rewrite aligned pads as destination passing (linalg.copy)
-  if (strategy.alignedLhs())
+  if (strategy.alignedLhs() && strategy.packingDimensions[0])
     lhsH = b.create<RewriteInDestinationPassingStyleOp>(lhsH.getType(), lhsH);
-  if (strategy.alignedRhs())
+  if (strategy.alignedRhs() && strategy.packingDimensions[1])
     rhsH = b.create<RewriteInDestinationPassingStyleOp>(rhsH.getType(), rhsH);
 
   AbstractGemmLikeStrategy::MappingInfo lhsCopyMapping =
@@ -510,7 +516,8 @@ void mlir::iree_compiler::gpu::buildMatmulVectorization(
     configuration.rankReducingVector = true;
     b.create<ApplyPatternsOp>(funcH, configuration);
   }
-  b.create<transform::VectorizeOp>(funcH);
+  b.create<transform::VectorizeOp>(funcH, /*vectorizePadding=*/false,
+                                   /*vectorizeExtract=*/true);
   {
     ApplyPatternsOpPatterns configuration;
     variantH = iree_compiler::buildCanonicalizationAndEnablingTransforms(
@@ -902,6 +909,98 @@ static LogicalResult matchAndSetMatmulStrategy(func::FuncOp entryPoint,
   return success();
 }
 
+static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
+                                                    linalg::LinalgOp op,
+                                                    const GPUModel &gpuModel) {
+  if (!clGPUEnableTransformDialectImplicitGemmStrategy) {
+    LDBG("--Implicit gemm strategy flag turned off\n");
+    return failure();
+  }
+  if (!gpuModel.hasTF32TensorCore) {
+    LDBG("--Implicit gemm strategy no TF32 tensor core\n");
+    return failure();
+  }
+
+  // 1. Match a reduction and surrounding ops.
+  StructuredOpMatcher *fill;
+  StructuredOpMatcher *convolution;
+  StructuredOpMatcher *trailing;
+  transform_ext::MatchedConvolutionCaptures captures;
+  transform_ext::MatcherContext matcherContext;
+  makeConvolutionMatcher(matcherContext, convolution, fill, trailing, captures);
+  if (!matchPattern(op, *convolution)) {
+    LDBG("--Implicit gemm strategy fail to match\n");
+    return failure();
+  }
+
+  // We are very peculiar about the dispatches we want to match for now:
+  //   - f32 only atm.
+  //   - Mandatory fill op.
+  //   - Require minimum tile alignment due to img2col.
+  //   - Otherwise, we take it.
+  if (!fill->getCaptured() || trailing->getCaptured()) {
+    LDBG("--Implicit gemm strategy fill / trailing preconditions failed\n");
+    return failure();
+  }
+
+  // TODO: Capture in the matcher.
+  if (!captures.inputElementType.isF32() ||
+      !captures.filterElementType.isF32() ||
+      !captures.outputElementType.isF32()) {
+    LDBG("--Implicit gemm strategy elemental type check failed\n");
+    return failure();
+  }
+
+  // Currently requires a typical 2d named convolution (conv_2d_nchw/nhwc).
+  if (captures.convolutionDims.outputChannel.size() != 1) {
+    return failure();
+  }
+  if (captures.convolutionDims.inputChannel.size() != 1) {
+    return failure();
+  }
+  if (captures.convolutionDims.outputImage.size() != 2) {
+    return failure();
+  }
+  if (captures.convolutionDims.filterLoop.size() != 2) {
+    return failure();
+  }
+  if (captures.convolutionDims.batch.size() != 1) {
+    return failure();
+  }
+
+  int64_t channelSize = 1;
+  for (auto dim : captures.convolutionDims.outputChannel)
+    channelSize *= captures.convolutionOpSizes[dim];
+  int64_t imageSize = 1;
+  for (auto dim : captures.convolutionDims.outputImage)
+    imageSize *= captures.convolutionOpSizes[dim];
+
+  int64_t derivedK = 1;
+  for (auto dim : captures.convolutionDims.filterLoop)
+    derivedK *= captures.convolutionOpSizes[dim];
+  for (auto dim : captures.convolutionDims.inputChannel)
+    derivedK *= captures.convolutionOpSizes[dim];
+
+  // Require tile-aligned due to the img2col op.
+  if (channelSize % 64 || imageSize % 64 || derivedK % 16) {
+    LDBG("--Implicit gemm strategy alignment check failed\n");
+    return failure();
+  }
+
+  // 2. Construct the configuration and the strategy builder.
+  // TODO: Generalize along the HW axis.
+  auto strategyBuilder = [&](ImplicitLocOpBuilder &b, Value variant) {
+    iree_compiler::gpu::ImplicitGemmStrategy strategy(op->getContext(),
+                                                      captures);
+    return buildConvolutionImplicitGemmStrategy(b, variant, strategy);
+  };
+
+  // 3. Build strategy embedded into the IR.
+  mlir::iree_compiler::createTransformRegion(entryPoint, strategyBuilder);
+
+  return success();
+}
+
 LogicalResult mlir::iree_compiler::gpu::matchAndSetTransformStrategy(
     func::FuncOp entryPoint, Operation *op, const GPUModel &gpuModel) {
   LDBG("Look up a TD strategy for entryPoint:\n" << entryPoint << "\n");
@@ -916,6 +1015,11 @@ LogicalResult mlir::iree_compiler::gpu::matchAndSetTransformStrategy(
   }
   if (succeeded(matchAndSetMatmulStrategy(entryPoint, linalgOp, gpuModel))) {
     LDBG("Activate matmul\n");
+    return success();
+  }
+  if (succeeded(
+          matchAndSetConvolutionStrategy(entryPoint, linalgOp, gpuModel))) {
+    LDBG("Activate implicit gemm\n");
     return success();
   }
   // TODO: Add more transform dialect strategy for other kind of dispatch
