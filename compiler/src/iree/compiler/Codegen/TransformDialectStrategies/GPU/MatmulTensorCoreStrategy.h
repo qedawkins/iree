@@ -40,8 +40,6 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
 
   void initDefaultValues();
 
-  LogicalResult verify() const;
-
   int64_t m() const override {
     assert(captures.matmulOpSizes.size() == 3 && "need 3 sizes");
     return captures.matmulOpSizes[0];
