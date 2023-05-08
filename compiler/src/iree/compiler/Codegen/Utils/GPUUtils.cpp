@@ -587,10 +587,12 @@ std::optional<SmallVector<int64_t>> getWmmaNativeVectorSize(Operation *op) {
   }
   if ((OpTrait::hasElementwiseMappableTraits(op) && op->getNumResults() == 1)) {
     if (auto vecType = op->getResultTypes()[0].dyn_cast<VectorType>()) {
-      SmallVector<int64_t> nativeSize(vecType.getRank() - 2, 1);
-      // Map elementwise ops to the output shape.
-      nativeSize.append({m, n});
-      return nativeSize;
+      if (vecType.getRank() >= 2) {
+        SmallVector<int64_t> nativeSize(vecType.getRank() - 2, 1);
+        // Map elementwise ops to the output shape.
+        nativeSize.append({m, n});
+        return nativeSize;
+      }
     }
   }
   return std::nullopt;
