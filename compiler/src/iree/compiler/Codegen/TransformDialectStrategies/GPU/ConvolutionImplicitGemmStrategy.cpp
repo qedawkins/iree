@@ -327,6 +327,7 @@ buildTileFuseToSingleScfFor(ImplicitLocOpBuilder &b, Value isolatedParentOpH,
 void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
     ImplicitLocOpBuilder &b, Value variantH,
     const ImplicitGemmStrategy &strategy) {
+  strategy.dump();
   assert(strategy.totalNumThreads() ==
              strategy.totalNumWarps() * kCudaWarpSize &&
          "Number of threads specified by warps must match total number of "
@@ -385,6 +386,7 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   // TODO: assumes a single func::FuncOp to transform, needs hardening.
   // TODO: extract info from strategy.
   Value funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
+  // b.create<transform::PrintOp>(TypeRange{}, variantH);
   funcH = buildMapToBlockAndThreads(b, funcH, strategy.numThreads,
                                     strategy.numWarps);
 

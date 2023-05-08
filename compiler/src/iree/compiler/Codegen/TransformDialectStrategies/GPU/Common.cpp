@@ -89,6 +89,7 @@ using iree_compiler::IREE::transform_dialect::ShareForallOperandsOp;
 using transform::FuseIntoContainingOp;
 using transform::MatchOp;
 using transform::RewriteInDestinationPassingStyleOp;
+using transform::PrintOp;
 using transform::ScalarizeOp;
 using transform::SequenceOp;
 using transform_ext::MatchCallbackOp;
@@ -341,8 +342,13 @@ Value mlir::iree_compiler::gpu::buildPadMatmul(
     ImplicitLocOpBuilder &b, Value matmulOpH,
     const AbstractGemmLikeStrategy &strategy) {
   // TODO: Better upstream builder.
+  SmallVector<Attribute> padVals;
+  for (auto padVal : strategy.paddingValues) {
+    padVals.push_back(b.getF16FloatAttr(padVal));
+  }
+  // matmulOpH.getType(), matmulOpH, b.getF32ArrayAttr(strategy.paddingValues),
   return b.create<transform::PadOp>(
-      matmulOpH.getType(), matmulOpH, b.getF32ArrayAttr(strategy.paddingValues),
+      matmulOpH.getType(), matmulOpH, b.getArrayAttr(padVals),
       b.getI64ArrayAttr(strategy.paddingDimensions),
       b.getI64ArrayAttr(strategy.packingDimensions), ArrayAttr());
 }
@@ -895,10 +901,10 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     LDBG("--Implicit gemm strategy flag turned off\n");
     return failure();
   }
-  if (!gpuModel.hasTF32TensorCore) {
-    LDBG("--Implicit gemm strategy no TF32 tensor core\n");
-    return failure();
-  }
+  //if (!gpuModel.hasTF32TensorCore) {
+  //  LDBG("--Implicit gemm strategy no TF32 tensor core\n");
+  //  return failure();
+  //}
 
   // 1. Match a reduction and surrounding ops.
   StructuredOpMatcher *fill;
@@ -923,8 +929,8 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
   }
 
   // TODO: Capture in the matcher.
-  if (!captures.inputElementType.isF32() || !captures.filterElementType.isF32() ||
-      !captures.outputElementType.isF32()) {
+  if (!captures.inputElementType.isF16() || !captures.filterElementType.isF16() ||
+      !captures.outputElementType.isF16()) {
     LDBG("--Implicit gemm strategy elemental type check failed\n");
     return failure();
   }
