@@ -82,6 +82,7 @@ using iree_compiler::IREE::transform_dialect::
 using iree_compiler::IREE::transform_dialect::ShareForallOperandsOp;
 using transform::FuseIntoContainingOp;
 using transform::MatchOp;
+using transform::RewriteInDestinationPassingStyleOp;
 using transform::ScalarizeOp;
 using transform::SequenceOp;
 using transform_ext::MatchCallbackOp;
@@ -417,18 +418,35 @@ Value mlir::iree_compiler::gpu::buildDistributeOnePadOrCopy(
 std::tuple<Value, Value, Value> mlir::iree_compiler::gpu::buildDistributeCopies(
     ImplicitLocOpBuilder &b, Value variantH, Value paddedMatmulOpH,
     const AbstractGemmLikeStrategy &strategy) {
-  // Explicitly materialize the parent parallel_insert into a copy to avoid late
-  // bufferization interferences.
-  // TODO: Avoid brittle rematching.
-  Value insertSliceH = b.create<transform::MatchOp>(
-      variantH, tensor::ParallelInsertSliceOp::getOperationName());
-  Value copyBackOpH = b.create<transform::InsertSliceToCopyOp>(
-      insertSliceH.getType(), insertSliceH);
+  // Aligned vs unaligned handling deviates here by converting the pads to
+  // copies for the aligned case.
+  // TODO: Unify aligned and unaligned codegen.
+  Value copyBackOpH;
+  if (!strategy.alignedRes()) {
+    // Explicitly materialize the parent parallel_insert into a copy to avoid
+    // late bufferization interferences.
+    // TODO: Avoid brittle rematching.
+    Value insertSliceH = b.create<transform::MatchOp>(
+        variantH, tensor::ParallelInsertSliceOp::getOperationName());
+    copyBackOpH = b.create<transform::InsertSliceToCopyOp>(
+        insertSliceH.getType(), insertSliceH);
+  } else {
+    Value resH = b.create<transform::GetProducerOfOperand>(
+        paddedMatmulOpH.getType(), paddedMatmulOpH, b.getI64IntegerAttr(2));
+    copyBackOpH =
+        b.create<RewriteInDestinationPassingStyleOp>(resH.getType(), resH);
+  }
 
   Value lhsH = b.create<transform::GetProducerOfOperand>(
       paddedMatmulOpH.getType(), paddedMatmulOpH, b.getI64IntegerAttr(0));
   Value rhsH = b.create<transform::GetProducerOfOperand>(
       paddedMatmulOpH.getType(), paddedMatmulOpH, b.getI64IntegerAttr(1));
+
+  // Rewrite aligned pads as destination passing (linalg.copy)
+  if (strategy.alignedLhs())
+    lhsH = b.create<RewriteInDestinationPassingStyleOp>(lhsH.getType(), lhsH);
+  if (strategy.alignedRhs())
+    rhsH = b.create<RewriteInDestinationPassingStyleOp>(rhsH.getType(), rhsH);
 
   AbstractGemmLikeStrategy::MappingInfo lhsCopyMapping =
       strategy.lhsCopyMapping();
@@ -442,12 +460,14 @@ std::tuple<Value, Value, Value> mlir::iree_compiler::gpu::buildDistributeCopies(
       b, variantH, rhsH, /*numThreads=*/rhsCopyMapping.numThreads,
       /*threadDimMapping=*/rhsCopyMapping.threadMapping, /*foldIfBranch=*/true);
 
-  AbstractGemmLikeStrategy::MappingInfo resCopyMapping =
-      strategy.resCopyMapping();
-  copyBackOpH = buildDistributeOnePadOrCopy(
-      b, variantH, copyBackOpH,
-      /*numThreads=*/resCopyMapping.numThreads,
-      /*threadDimMapping=*/rhsCopyMapping.threadMapping);
+  if (!strategy.alignedRes()) {
+    AbstractGemmLikeStrategy::MappingInfo resCopyMapping =
+        strategy.resCopyMapping();
+    copyBackOpH = buildDistributeOnePadOrCopy(
+        b, variantH, copyBackOpH,
+        /*numThreads=*/resCopyMapping.numThreads,
+        /*threadDimMapping=*/rhsCopyMapping.threadMapping);
+  }
 
   return std::make_tuple(lhsCopyOpH, rhsCopyOpH, copyBackOpH);
 }
@@ -469,24 +489,32 @@ void mlir::iree_compiler::gpu::buildMatmulVectorization(
         b, configuration, variantH);
   }
   // Apply vector masking.
-  AbstractGemmLikeStrategy::MappingInfo lhsCopyMapping =
-      strategy.lhsCopyMapping();
-  b.create<transform::MaskedVectorizeOp>(lhsCopyOpH, ValueRange(), false,
-                                         lhsCopyMapping.tileSizes);
-  AbstractGemmLikeStrategy::MappingInfo rhsCopyMapping =
-      strategy.rhsCopyMapping();
-  b.create<transform::MaskedVectorizeOp>(rhsCopyOpH, ValueRange(), false,
-                                         rhsCopyMapping.tileSizes);
-  AbstractGemmLikeStrategy::MappingInfo resCopyMapping =
-      strategy.resCopyMapping();
-  b.create<transform::MaskedVectorizeOp>(copyBackOpH, ValueRange(), false,
-                                         resCopyMapping.tileSizes);
+  if (!strategy.alignedLhs()) {
+    AbstractGemmLikeStrategy::MappingInfo lhsCopyMapping =
+        strategy.lhsCopyMapping();
+    b.create<transform::MaskedVectorizeOp>(lhsCopyOpH, ValueRange(), false,
+                                           lhsCopyMapping.tileSizes);
+  }
+  if (!strategy.alignedRhs()) {
+    AbstractGemmLikeStrategy::MappingInfo rhsCopyMapping =
+        strategy.rhsCopyMapping();
+    b.create<transform::MaskedVectorizeOp>(rhsCopyOpH, ValueRange(), false,
+                                           rhsCopyMapping.tileSizes);
+  }
+  if (!strategy.alignedRes()) {
+    AbstractGemmLikeStrategy::MappingInfo resCopyMapping =
+        strategy.resCopyMapping();
+    b.create<transform::MaskedVectorizeOp>(copyBackOpH, ValueRange(), false,
+                                           resCopyMapping.tileSizes);
+  }
 
   // TODO: don't rematch, apply on the variant op directly.
   Value funcH =
       b.create<transform::MatchOp>(variantH, func::FuncOp::getOperationName());
   // TODO: avoid functional style transform so we can apply to the variant.
-  funcH = b.create<transform::LowerMaskedTransfersOp>(funcH.getType(), funcH);
+  if (!strategy.alignedLhs() || !strategy.alignedRhs() ||
+      !strategy.alignedRes())
+    funcH = b.create<transform::LowerMaskedTransfersOp>(funcH.getType(), funcH);
   {
     ApplyPatternsOpPatterns configuration;
     configuration.rankReducingLinalg = true;
@@ -852,14 +880,14 @@ static LogicalResult matchAndSetMatmulStrategy(func::FuncOp entryPoint,
   //   - n and k are not aligned to the tile sizes (conservatively, take 64, 16)
   // Other cases currently result in folding and fall back to the default
   // unaligned IREE strategy.
-  bool supportedUnalignedCases =
-      (matmulSize[0] % 64 != 0 && matmulSize[2] % 16 != 0) ||
-      (matmulSize[1] % 64 != 0 && matmulSize[2] % 16 != 0);
+  // bool supportedUnalignedCases =
+  //    (matmulSize[0] % 64 != 0 && matmulSize[2] % 16 != 0) ||
+  //    (matmulSize[1] % 64 != 0 && matmulSize[2] % 16 != 0);
 
-  if (!supportedUnalignedCases) {
-    LDBG("--Matmul strategy alignment check failed\n");
-    return failure();
-  }
+  // if (!supportedUnalignedCases) {
+  //   LDBG("--Matmul strategy alignment check failed\n");
+  //   return failure();
+  // }
 
   // 2. Construct the configuration and the strategy builder.
   // TODO: Generalize along the HW axis.
