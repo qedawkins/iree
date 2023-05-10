@@ -334,8 +334,13 @@ Value mlir::iree_compiler::gpu::buildPadMatmul(
     ImplicitLocOpBuilder &b, Value matmulOpH,
     const AbstractGemmLikeStrategy &strategy) {
   // TODO: Better upstream builder.
+  SmallVector<Attribute> padVals;
+  for (auto padVal : strategy.paddingValues) {
+    padVals.push_back(b.getF16FloatAttr(padVal));
+  }
+  //    matmulOpH.getType(), matmulOpH, b.getF32ArrayAttr(strategy.paddingValues),
   return b.create<transform::PadOp>(
-      matmulOpH.getType(), matmulOpH, b.getF32ArrayAttr(strategy.paddingValues),
+      matmulOpH.getType(), matmulOpH, b.getArrayAttr(padVals),
       b.getI64ArrayAttr(strategy.paddingDimensions),
       b.getI64ArrayAttr(strategy.packingDimensions), ArrayAttr());
 }
@@ -798,10 +803,10 @@ static LogicalResult matchAndSetMatmulStrategy(func::FuncOp entryPoint,
     LDBG("--Matmul strategy flag turned off\n");
     return failure();
   }
-  if (!gpuModel.hasTF32TensorCore) {
-    LDBG("--Matmul strategy no TF32 tensor core\n");
-    return failure();
-  }
+  //if (!gpuModel.hasTF32TensorCore) {
+  //  LDBG("--Matmul strategy no TF32 tensor core\n");
+  //  return failure();
+  //}
 
   // 1. Match a reduction and surrounding ops.
   StructuredOpMatcher *fill;
@@ -826,8 +831,8 @@ static LogicalResult matchAndSetMatmulStrategy(func::FuncOp entryPoint,
     return failure();
   }
 
-  if (!captures.lhsElementType.isF32() || !captures.rhsElementType.isF32() ||
-      !captures.outputElementType.isF32()) {
+  if (!captures.lhsElementType.isF16() || !captures.rhsElementType.isF16() ||
+      !captures.outputElementType.isF16()) {
     LDBG("--Matmul strategy elemental type check failed\n");
     return failure();
   }
