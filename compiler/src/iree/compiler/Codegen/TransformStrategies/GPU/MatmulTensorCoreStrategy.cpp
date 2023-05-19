@@ -14,7 +14,6 @@
 #include "iree/compiler/Codegen/TransformStrategies/GPU/MappingInfo.h"
 #include "iree/compiler/Codegen/TransformStrategies/GPU/Strategies.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -55,113 +54,22 @@ using iree_compiler::IREE::transform_dialect::
 using transform::MatchOp;
 using transform_ext::RegisterMatchCallbacksOp;
 
-/// Options to set the default values of the matmul strategy.
-
-static llvm::cl::list<int64_t> clBlockTileSizes(
-    "td-matmul-strategy-blk-sizes",
-    llvm::cl::desc("block tile size for dims (x,y,z) for the transform "
-                   "dialect matmul strategy"),
-    llvm::cl::list_init(ArrayRef<int64_t>{128, 128, 1}),
-    llvm::cl::CommaSeparated);
-static llvm::cl::opt<int64_t> clReductionTileSize(
-    "td-matmul-strategy-reduc-size",
-    llvm::cl::desc(
-        "reduction tile sized for the transform dialect matmul strategy"),
-    llvm::cl::init(16));
-static llvm::cl::list<int64_t> clNumThreads(
-    "td-matmul-strategy-num-threads",
-    llvm::cl::desc("number of threads for dims (x,y,z) for the transform "
-                   "dialect matmul strategy"),
-    llvm::cl::list_init(ArrayRef<int64_t>{64, 2, 1}), llvm::cl::CommaSeparated);
-static llvm::cl::list<int64_t> clNumWarps(
-    "td-matmul-strategy-num-warps",
-    llvm::cl::desc("number of warps for dims (x,y,z) for the transform "
-                   "dialect matmul strategy"),
-    llvm::cl::list_init(ArrayRef<int64_t>{2, 2, 1}), llvm::cl::CommaSeparated);
-static llvm::cl::opt<bool> clUseAsyncCopies(
-    "td-matmul-strategy-use-async-copies",
-    llvm::cl::desc("use mma sync for the transform dialect matmul strategy"),
-    llvm::cl::init(true));
-static llvm::cl::opt<bool> clUseMmaSync(
-    "td-matmul-strategy-use-mma-sync",
-    llvm::cl::desc("use mma sync for the transform dialect matmul strategy"),
-    llvm::cl::init(true));
-static llvm::cl::opt<int64_t> clPipelineDepth(
-    "td-matmul-strategy-pipeline-depth",
-    llvm::cl::desc("pipeline depth for the transform dialect matmul strategy"),
-    llvm::cl::init(3));
-
 void MatmulStrategy::initDefaultValues() {
-  blockTileSizes =
-      SmallVector<int64_t>{clBlockTileSizes.begin(), clBlockTileSizes.end()};
-  numThreads = SmallVector<int64_t>{clNumThreads.begin(), clNumThreads.end()};
-  numWarps = SmallVector<int64_t>{clNumWarps.begin(), clNumWarps.end()};
-  reductionTileSize = clReductionTileSize;
-  useAsyncCopies = clUseAsyncCopies;
-  useMmaSync = clUseMmaSync;
-  pipelineDepth = clPipelineDepth;
+  // // Pull in tile configs from flags.
+  // AbstractGemmLikeStrategy::initDefaultValues();
 
   // TODO: Capture input/output element types properly for configuring the
   // padding values.
   paddingValues = {0.0f, 0.0f, 0.0f};
   paddingDimensions = {0, 1, 2};
   packingDimensions = {1, 1, 1};
-
-  if (!clBlockTileSizes.isDefaultAssigned() ||
-      !clNumThreads.isDefaultAssigned() || !clNumWarps.isDefaultAssigned() ||
-      reductionTileSize != clReductionTileSize.getDefault().getValue() ||
-      useAsyncCopies != clUseAsyncCopies.getDefault().getValue() ||
-      useMmaSync != clUseMmaSync.getDefault().getValue() ||
-      pipelineDepth != clPipelineDepth.getDefault().getValue()) {
-    cliOptionsSpecified = true;
-  }
 }
 
 LLVM_DUMP_METHOD void MatmulStrategy::dump() const { print(llvm::errs()); }
 
 void MatmulStrategy::print(llvm::raw_ostream &os) const {
   os << "\n--- Matmul strategy ---\n";
-  os << "- forced by CLI specification: "
-     << (cliOptionsSpecified ? "true" : "false") << "\n";
-  os << "- block tile sizes: {";
-  bool isFirst = true;
-  for (int64_t blockTileSize : blockTileSizes) {
-    if (!isFirst) os << ", ";
-    os << blockTileSize;
-    isFirst = false;
-  }
-  os << "}\n";
-  os << "- reduction tile size: " << reductionTileSize << '\n';
-
-  os << "- number of threads: {";
-  isFirst = true;
-  for (int64_t numThreadsForDim : numThreads) {
-    if (!isFirst) os << ", ";
-    os << numThreadsForDim;
-    isFirst = false;
-  }
-  os << "}\n";
-
-  os << "- number of warps: {";
-  isFirst = true;
-  for (int64_t numWarpsForDim : numWarps) {
-    if (!isFirst) os << ", ";
-    os << numWarpsForDim;
-    isFirst = false;
-  }
-  os << "}\n";
-  os << "- use async copies: " << useAsyncCopies << '\n';
-  os << "- use mma sync: " << useMmaSync << '\n';
-  os << "- pipeline depth: " << pipelineDepth << '\n';
-
-  os << "\n-- Derived quantities --\n";
-  os << "- lhs copy:\n";
-  lhsCopyMapping().print(os << "    -> ");
-  os << "\n- rhs copy:\n";
-  rhsCopyMapping().print(os << "    -> ");
-  os << "\n- res copy:\n";
-  resCopyMapping().print(os << "    -> ");
-  os << "\n";
+  AbstractGemmLikeStrategy::print(os);
 }
 
 static std::tuple<Value, Value, Value, Value>

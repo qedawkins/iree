@@ -22,9 +22,22 @@ namespace gpu {
 struct GPUModel;
 
 struct AbstractGemmLikeStrategy {
-  AbstractGemmLikeStrategy() {}
+  AbstractGemmLikeStrategy() { initDefaultValues(); }
 
   virtual ~AbstractGemmLikeStrategy();
+
+  //===--------------------------------------------------------------------===//
+  // Helpers and parameters for configuring the strategy.
+  //===--------------------------------------------------------------------===//
+
+  /// Initialize values from the CLI. Set cliOptionsSpecified to true if the
+  /// default CLI values have been overriden.
+  virtual void initDefaultValues();
+
+  /// Encodes whether the user has specified any CLI options. When true, the
+  /// strategy should just run what was specified and is not allowed to
+  /// override the user's choices.
+  bool cliOptionsSpecified = false;
 
   //===--------------------------------------------------------------------===//
   // Parameters that control the tiling and mapping.
@@ -89,7 +102,7 @@ struct AbstractGemmLikeStrategy {
   int64_t pipelineDepth;
   virtual MappingInfo computeMapping() const = 0;
 
-  virtual LogicalResult validate() const = 0;
+  virtual LogicalResult validate() const;
 
   //===--------------------------------------------------------------------===//
   // Problem-related quantities.
