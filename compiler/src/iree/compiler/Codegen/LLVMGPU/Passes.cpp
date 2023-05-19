@@ -560,6 +560,11 @@ void addGPUTransformDialectPasses(OpPassManager &passManager) {
   //      schedule once applied.
   //   2. if transform.do_not_dce_operands ops are introduced.
   passManager.addPass(createDropSchedulePass());
+
+  // TODO: Remove the following pass the plumb support for #hal.descriptor_type
+  // memory space through the stack.
+  passManager.nest<ModuleOp>().addNestedPass<func::FuncOp>(
+      createEraseHALDescriptorTypeFromMemRefPass());
 }
 
 void buildLLVMGPUTransformPassPipeline(OpPassManager &pm, bool useROCM) {
