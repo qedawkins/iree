@@ -311,10 +311,6 @@ static LogicalResult matchAndSetMatmulStrategy(func::FuncOp entryPoint,
     LDBG("--Matmul strategy flag turned off\n");
     return failure();
   }
-  if (!gpuModel.hasTF32TensorCore) {
-    LDBG("--Matmul strategy no TF32 tensor core\n");
-    return failure();
-  }
 
   // 1. Match a reduction and surrounding ops.
   StructuredOpMatcher *fill;
@@ -338,12 +334,6 @@ static LogicalResult matchAndSetMatmulStrategy(func::FuncOp entryPoint,
   //   - Otherwise, we take it.
   if (!fill->getCaptured() || trailing->getCaptured()) {
     LDBG("--Matmul strategy fill / trailing preconditions failed\n");
-    return failure();
-  }
-
-  if (!captures.lhsElementType.isF32() || !captures.rhsElementType.isF32() ||
-      !captures.outputElementType.isF32()) {
-    LDBG("--Matmul strategy elemental type check failed\n");
     return failure();
   }
 
@@ -382,11 +372,18 @@ static LogicalResult matchAndSetMatmulStrategy(func::FuncOp entryPoint,
     return failure();
   }
 
+  iree_compiler::gpu::MatmulStrategy strategy =
+      getMatmulConfig(op->getContext(), captures, gpuModel);
+
+  // Validate the strategy configuration against the compilation target.
+  if (failed(strategy.validate(gpuModel))) {
+    LDBG("--Matmul strategy failed to validate\n");
+    return failure();
+  }
+
   // 2. Construct the configuration and the strategy builder.
   // TODO: Generalize along the HW axis.
   auto strategyBuilder = [&](ImplicitLocOpBuilder &b, Value variant) {
-    iree_compiler::gpu::MatmulStrategy strategy =
-        getMatmulConfig(op->getContext(), captures, gpuModel);
     return buildMatmulTensorCoreStrategy(b, variant, strategy);
   };
 

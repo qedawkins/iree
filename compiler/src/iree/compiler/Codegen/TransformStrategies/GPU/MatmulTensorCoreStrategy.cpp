@@ -55,14 +55,18 @@ using transform::MatchOp;
 using transform_ext::RegisterMatchCallbacksOp;
 
 void MatmulStrategy::initDefaultValues() {
-  // // Pull in tile configs from flags.
-  // AbstractGemmLikeStrategy::initDefaultValues();
-
-  // TODO: Capture input/output element types properly for configuring the
-  // padding values.
-  paddingValues = {0.0f, 0.0f, 0.0f};
+  // Set the configuration for padding the matmul.
+  paddingValueTypes = {captures.lhsElementType, captures.rhsElementType,
+                       captures.outputElementType};
   paddingDimensions = {0, 1, 2};
   packingDimensions = {1, 1, 1};
+
+  lhsElementalBitWidth = captures.lhsElementType.getIntOrFloatBitWidth();
+  rhsElementalBitWidth = captures.rhsElementType.getIntOrFloatBitWidth();
+  resElementalBitWidth = captures.outputElementType.getIntOrFloatBitWidth();
+
+  // Pull in tile configs from flags.
+  AbstractGemmLikeStrategy::initDefaultValues();
 }
 
 LLVM_DUMP_METHOD void MatmulStrategy::dump() const { print(llvm::errs()); }
@@ -70,6 +74,60 @@ LLVM_DUMP_METHOD void MatmulStrategy::dump() const { print(llvm::errs()); }
 void MatmulStrategy::print(llvm::raw_ostream &os) const {
   os << "\n--- Matmul strategy ---\n";
   AbstractGemmLikeStrategy::print(os);
+}
+
+LogicalResult MatmulStrategy::validate(const GPUModel &gpuModel) const {
+  // First validate the parent strategy.
+  if (failed(AbstractGemmLikeStrategy::validate(gpuModel))) return failure();
+
+  Type lhsElementType = captures.lhsElementType;
+  Type rhsElementType = captures.rhsElementType;
+  Type resElementType = captures.outputElementType;
+
+  if (lhsElementType != rhsElementType) {
+    LDBG("--Matmul strategy mixed input types\n");
+    return failure();
+  }
+
+  // Currently this is restricted by the supported vector unroll types/shapes
+  // for WMMA.
+  // TODO: Remove this once proper support for unrolling is in place.
+  if (!lhsElementType.isF32() && !lhsElementType.isF16()) {
+    LDBG("--Matmul strategy failed elemental type check\n");
+    return failure();
+  }
+
+  if (useMmaSync) {
+    if (!gpuModel.hasMmaSync) {
+      LDBG("--Matmul strategy target does not support MMA.SYNC operations\n");
+      return failure();
+    }
+    // // For unaligned f16 inputs conversion to subgroup_mma ops is failing and
+    // // thus blowing up the generated code. Turn off f16 for mma sync for now.
+    // if (!captures.lhsElementType.isF32() || !gpuModel.hasTF32TensorCore) {
+    //   LDBG("--Matmul strategy no TF32 tensor core\n");
+    //   return failure();
+    // }
+  } else {
+    // Verify WMMA.
+    // Hard coded to reflect current WMMA unrolling support.
+    int reqM = 16;
+    int reqN = 16;
+    int reqK = lhsElementType.isF32() ? 8 : 16;
+    if (llvm::all_of(gpuModel.supportedWMMAConfigs,
+                     [&](iree_compiler::gpu::MMAConfig config) {
+                       return config.m != reqM || config.n != reqN ||
+                              config.k != reqK ||
+                              config.aType != lhsElementType ||
+                              config.bType != rhsElementType ||
+                              config.cType != resElementType;
+                     })) {
+      LDBG("--Matmul strategy failed wmma type check\n");
+      return failure();
+    }
+  }
+
+  return success();
 }
 
 static std::tuple<Value, Value, Value, Value>
@@ -107,10 +165,6 @@ buildMatmulStrategyBlockDistribution(ImplicitLocOpBuilder &b, Value variantH,
 
 void iree_compiler::gpu::buildMatmulTensorCoreStrategy(
     ImplicitLocOpBuilder &b, Value variantH, const MatmulStrategy &strategy) {
-  if (failed(strategy.validate())) {
-    strategy.print(llvm::errs());
-    assert(false && "invalid strategy");
-  }
   LLVM_DEBUG(strategy.print(DBGS()));
 
   // Step 1. Apply block-level part of the strategy, keeps everything fused.
@@ -125,10 +179,9 @@ void iree_compiler::gpu::buildMatmulTensorCoreStrategy(
       /*canonicalize=*/false);
 
   // Step 2. Pad the matmul op.
-  // TODO: use captured type information to configure the padding values.
   auto paddedMatmulOpH =
       buildPad(b, tileReductionResult.tiledOpH,
-               b.getF32ArrayAttr(strategy.paddingValues).getValue(),
+               strategy.getZeroPadAttrFromElementalTypes(b).getValue(),
                strategy.paddingDimensions, strategy.packingDimensions);
 
   // Step 3. Hoist the padding of the output operand above the reduction loop.

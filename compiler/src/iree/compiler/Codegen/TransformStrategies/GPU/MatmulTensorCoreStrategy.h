@@ -46,7 +46,7 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
   /// default CLI values have been overriden.
   void initDefaultValues() override;
 
-  LogicalResult verify() const;
+  LogicalResult validate(const GPUModel &gpuModel) const override;
 
   int64_t m() const override {
     assert(captures.matmulOpSizes.size() == 3 && "need 3 sizes");
@@ -91,7 +91,9 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
     return CopyMapping::getMappingInfo(
         ctx, totalNumThreads(),
         /*alignment=*/k(),
-        /*copySizes=*/ArrayRef<int64_t>{blockTileM(), reductionTileSize});
+        /*copySizes=*/ArrayRef<int64_t>{blockTileM(), reductionTileSize},
+        /*favorPredication=*/false,
+        /*elementalBitWidth=*/lhsElementalBitWidth);
   }
   LogicalResult validateLhsCopyMapping() const override {
     MappingInfo mapping = lhsCopyMapping();
@@ -110,7 +112,9 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
     return CopyMapping::getMappingInfo(
         ctx, totalNumThreads(),
         /*alignment=*/n(),
-        /*copySizes=*/ArrayRef<int64_t>{reductionTileSize, blockTileN()});
+        /*copySizes=*/ArrayRef<int64_t>{reductionTileSize, blockTileN()},
+        /*favorPredication=*/false,
+        /*elementalBitWidth=*/rhsElementalBitWidth);
   }
   LogicalResult validateRhsCopyMapping() const override {
     MappingInfo mapping = rhsCopyMapping();
@@ -129,7 +133,9 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
     return CopyMapping::getMappingInfo(
         ctx, totalNumThreads(),
         /*alignment=*/n(),
-        /*copySizes=*/ArrayRef<int64_t>{blockTileM(), blockTileN()});
+        /*copySizes=*/ArrayRef<int64_t>{blockTileM(), blockTileN()},
+        /*favorPredication=*/false,
+        /*elementalBitWidth=*/resElementalBitWidth);
   }
 
   LogicalResult validateResCopyMapping() const override {

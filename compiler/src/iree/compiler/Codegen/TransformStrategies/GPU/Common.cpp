@@ -74,7 +74,7 @@ using transform::SequenceOp;
 /// Return max(1, (value * 32) / bitwidth).
 int64_t mlir::iree_compiler::gpu::scaleUpByBitWidth(int64_t value,
                                                     int64_t bitWidth) {
-  assert((bitWidth & bitWidth - 1) == 0 && "bitWidth must be a power of 2");
+  assert((bitWidth & (bitWidth - 1)) == 0 && "bitWidth must be a power of 2");
   return std::max((value * 32) / bitWidth, int64_t(1));
 }
 

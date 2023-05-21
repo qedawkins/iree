@@ -41,7 +41,8 @@ static llvm::cl::list<int64_t> clNumWarps(
     llvm::cl::list_init(ArrayRef<int64_t>{2, 2, 1}), llvm::cl::CommaSeparated);
 static llvm::cl::opt<bool> clUseAsyncCopies(
     "td-matmul-strategy-use-async-copies",
-    llvm::cl::desc("use mma sync for the transform dialect matmul strategy"),
+    llvm::cl::desc(
+        "use asynchronous copies for the transform dialect matmul strategy"),
     llvm::cl::init(true));
 static llvm::cl::opt<bool> clUseMmaSync(
     "td-matmul-strategy-use-mma-sync",
@@ -76,57 +77,25 @@ void AbstractGemmLikeStrategy::initDefaultValues() {
       pipelineDepth != clPipelineDepth.getDefault().getValue()) {
     cliOptionsSpecified = true;
   }
+
+  // Adjust default reduction tile size for f16.
+  if (reductionTileSize == clReductionTileSize.getDefault().getValue())
+    reductionTileSize = lhsElementalBitWidth == 32 ? 16 : 32;
 }
 
-LLVM_DUMP_METHOD void AbstractGemmLikeStrategy::dump() const {
-  print(llvm::errs());
+ArrayAttr AbstractGemmLikeStrategy::getZeroPadAttrFromElementalTypes(
+    OpBuilder &b) const {
+  SmallVector<Attribute> paddingValues;
+  for (Type t : paddingValueTypes) paddingValues.push_back(b.getZeroAttr(t));
+  return b.getArrayAttr(paddingValues);
 }
 
-void AbstractGemmLikeStrategy::print(llvm::raw_ostream &os) const {
-  os << "- forced by CLI specification: "
-     << (cliOptionsSpecified ? "true" : "false") << "\n";
-  os << "- block tile sizes: {";
-  bool isFirst = true;
-  for (int64_t blockTileSize : blockTileSizes) {
-    if (!isFirst) os << ", ";
-    os << blockTileSize;
-    isFirst = false;
-  }
-  os << "}\n";
-  os << "- reduction tile size: " << reductionTileSize << '\n';
+//===--------------------------------------------------------------------===//
+// Validation of support for the configured strategy.
+//===--------------------------------------------------------------------===//
 
-  os << "- number of threads: {";
-  isFirst = true;
-  for (int64_t numThreadsForDim : numThreads) {
-    if (!isFirst) os << ", ";
-    os << numThreadsForDim;
-    isFirst = false;
-  }
-  os << "}\n";
-
-  os << "- number of warps: {";
-  isFirst = true;
-  for (int64_t numWarpsForDim : numWarps) {
-    if (!isFirst) os << ", ";
-    os << numWarpsForDim;
-    isFirst = false;
-  }
-  os << "}\n";
-  os << "- use async copies: " << useAsyncCopies << '\n';
-  os << "- use mma sync: " << useMmaSync << '\n';
-  os << "- pipeline depth: " << pipelineDepth << '\n';
-
-  os << "\n-- Derived quantities --\n";
-  os << "- lhs copy:\n";
-  lhsCopyMapping().print(os << "    -> ");
-  os << "\n- rhs copy:\n";
-  rhsCopyMapping().print(os << "    -> ");
-  os << "\n- res copy:\n";
-  resCopyMapping().print(os << "    -> ");
-  os << "\n";
-}
-
-LogicalResult AbstractGemmLikeStrategy::validate() const {
+LogicalResult AbstractGemmLikeStrategy::validate(
+    const GPUModel &gpuModel) const {
   if (totalNumThreads() != totalNumWarps() * kCudaWarpSize) {
     llvm::errs() << "Number of threads specified by warps must match total "
                     "number of threads\n";
@@ -177,8 +146,8 @@ LogicalResult AbstractGemmLikeStrategy::validate() const {
                    << " block tile size in N";
       return failure();
     }
-    if (reductionTileSize < kMinMmaSyncMinK) {
-      llvm::errs() << "mma.sync requires at least " << kMinMmaSyncMinK
+    if (reductionTileSize < kMinMmaSyncMinK()) {
+      llvm::errs() << "mma.sync requires at least " << kMinMmaSyncMinK()
                    << " block tile size in K";
       return failure();
     }
@@ -203,11 +172,63 @@ LogicalResult AbstractGemmLikeStrategy::validate() const {
                    << " block tile size in N";
       return failure();
     }
-    if (reductionTileSize < kMinWmmaMinK) {
-      llvm::errs() << "wmma requires at least " << kMinWmmaMinK
+    if (reductionTileSize < kMinWmmaMinK()) {
+      llvm::errs() << "wmma requires at least " << kMinWmmaMinK()
                    << " block tile size in K";
       return failure();
     }
   }
   return success();
+}
+
+//===--------------------------------------------------------------------===//
+// Strategy printing for debugging.
+//===--------------------------------------------------------------------===//
+
+LLVM_DUMP_METHOD void AbstractGemmLikeStrategy::dump() const {
+  print(llvm::errs());
+}
+
+void AbstractGemmLikeStrategy::print(llvm::raw_ostream &os) const {
+  os << "- forced by CLI specification: "
+     << (cliOptionsSpecified ? "true" : "false") << "\n";
+  os << "- block tile sizes: {";
+  bool isFirst = true;
+  for (int64_t blockTileSize : blockTileSizes) {
+    if (!isFirst) os << ", ";
+    os << blockTileSize;
+    isFirst = false;
+  }
+  os << "}\n";
+  os << "- reduction tile size: " << reductionTileSize << '\n';
+
+  os << "- number of threads: {";
+  isFirst = true;
+  for (int64_t numThreadsForDim : numThreads) {
+    if (!isFirst) os << ", ";
+    os << numThreadsForDim;
+    isFirst = false;
+  }
+  os << "}\n";
+
+  os << "- number of warps: {";
+  isFirst = true;
+  for (int64_t numWarpsForDim : numWarps) {
+    if (!isFirst) os << ", ";
+    os << numWarpsForDim;
+    isFirst = false;
+  }
+  os << "}\n";
+  os << "- use async copies: " << useAsyncCopies << '\n';
+  os << "- use mma sync: " << useMmaSync << '\n';
+  os << "- pipeline depth: " << pipelineDepth << '\n';
+
+  os << "\n-- Derived quantities --\n";
+  os << "- lhs copy:\n";
+  lhsCopyMapping().print(os << "    -> ");
+  os << "\n- rhs copy:\n";
+  rhsCopyMapping().print(os << "    -> ");
+  os << "\n- res copy:\n";
+  resCopyMapping().print(os << "    -> ");
+  os << "\n";
 }
