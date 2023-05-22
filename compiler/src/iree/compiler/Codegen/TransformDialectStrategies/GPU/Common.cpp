@@ -959,10 +959,6 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     LDBG("--Implicit gemm strategy flag turned off\n");
     return failure();
   }
-  if (!gpuModel.hasTF32TensorCore) {
-    LDBG("--Implicit gemm strategy no TF32 tensor core\n");
-    return failure();
-  }
 
   // 1. Match a reduction and surrounding ops.
   StructuredOpMatcher *fill;
@@ -986,12 +982,58 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     return failure();
   }
 
-  // TODO: Capture in the matcher.
-  if (!captures.inputElementType.isF32() ||
-      !captures.filterElementType.isF32() ||
-      !captures.outputElementType.isF32()) {
-    LDBG("--Implicit gemm strategy elemental type check failed\n");
+  // TODO: This should be inferred directly from the shape of the input
+  // (i.e. input indexing map) rather than iterator classes.
+  bool filterLHS = captures.convolutionDims.outputChannel[0] <
+                   captures.convolutionDims.outputImage[0];
+
+  Type lhsElementType =
+      filterLHS ? captures.filterElementType : captures.inputElementType;
+  Type rhsElementType =
+      filterLHS ? captures.inputElementType : captures.filterElementType;
+  Type resElementType = captures.outputElementType;
+
+  if (lhsElementType != rhsElementType) {
+    LDBG("--Implicit gemm strategy mixed input types\n");
     return failure();
+  }
+
+  // Currently this is restricted by the supported vector unroll types/shapes
+  // for WMMA.
+  // TODO: Remove this once proper support for unrolling is in place.
+  if (!lhsElementType.isF32() && !lhsElementType.isF16()) {
+    LDBG("--Implicit gemm strategy failed elemental type check\n");
+    return failure();
+  }
+
+  if (clGPUTransformDialectUseMmaSync) {
+    if (!gpuModel.hasMmaSync) {
+      LDBG(
+          "--Implicit gemm strategy target does not support MMA.SYNC "
+          "operations\n");
+      return failure();
+    }
+    if (!lhsElementType.isF32() || !gpuModel.hasTF32TensorCore) {
+      LDBG("--Implicit gemm strategy no TF32 tensor core\n");
+      return failure();
+    }
+  } else {
+    // Verify WMMA.
+    // Hard coded to reflect current WMMA unrolling support.
+    int reqM = 16;
+    int reqN = 16;
+    int reqK = lhsElementType.isF32() ? 8 : 16;
+    if (llvm::all_of(gpuModel.supportedWMMAConfigs,
+                     [&](iree_compiler::gpu::MMAConfig config) {
+                       return config.m != reqM || config.n != reqN ||
+                              config.k != reqK ||
+                              config.aType != lhsElementType ||
+                              config.bType != rhsElementType ||
+                              config.cType != resElementType;
+                     })) {
+      LDBG("--Implicit gemm strategy failed wmma type check\n");
+      return failure();
+    }
   }
 
   // Currently requires a typical 2d named convolution (conv_2d_nchw/nhwc).
@@ -1033,8 +1075,8 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
   // 2. Construct the configuration and the strategy builder.
   // TODO: Generalize along the HW axis.
   auto strategyBuilder = [&](ImplicitLocOpBuilder &b, Value variant) {
-    iree_compiler::gpu::ImplicitGemmStrategy strategy(op->getContext(),
-                                                      captures);
+    iree_compiler::gpu::ImplicitGemmStrategy strategy(
+        op->getContext(), captures, clGPUTransformDialectUseMmaSync);
     return buildConvolutionImplicitGemmStrategy(b, variant, strategy);
   };
 
