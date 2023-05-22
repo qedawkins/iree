@@ -57,7 +57,7 @@ using transform_ext::RegisterMatchCallbacksOp;
 
 /// Options to set the default values of the matmul strategy.
 
-void ImplicitGemmStrategy::initDefaultValues() {
+void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
   assert(captures.convolutionDims.outputChannel.size() >= 1 &&
          "requires at least one output channel dimension");
   assert(captures.convolutionDims.inputChannel.size() >= 1 &&
@@ -92,11 +92,14 @@ void ImplicitGemmStrategy::initDefaultValues() {
     derivedK *= captures.convolutionOpSizes[dim];
 
   // Pull in tile configs from flags.
-  AbstractGemmLikeStrategy::initDefaultValues();
+  AbstractGemmLikeStrategy::initDefaultValues(optUseMmaSync);
 
-  // TODO: Capture input/output element types properly for configuring the
-  // padding values.
-  paddingValues = {0.0f, 0.0f, 0.0f};
+  // Set the configuration for padding the gemm.
+  paddingValueTypes = filterLHS ? SmallVector<Type>{captures.filterElementType,
+                                                    captures.inputElementType}
+                                : SmallVector<Type>{captures.inputElementType,
+                                                    captures.filterElementType};
+  paddingValueTypes.push_back(captures.outputElementType);
   paddingDimensions = {1, 2, 3};
   // TODO: Re-enable once padding works with the img2col op.
   packingDimensions =
@@ -248,7 +251,7 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   // Step 2. Pad the matmul op.
   auto paddedMatmulOpH =
       buildPad(b, tileReductionResult.tiledOpH,
-               b.getF32ArrayAttr(strategy.paddingValues).getValue(),
+               strategy.getZeroPadAttrFromElementalTypes(b).getValue(),
                strategy.paddingDimensions, strategy.packingDimensions);
 
   // Step 3. Hoist the padding of the output operand above the reduction loop.

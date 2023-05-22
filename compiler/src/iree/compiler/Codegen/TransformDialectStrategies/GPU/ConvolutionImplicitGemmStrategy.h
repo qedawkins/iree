@@ -27,9 +27,10 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
  public:
   ImplicitGemmStrategy(
       MLIRContext *context,
-      const transform_ext::MatchedConvolutionCaptures &captures)
+      const transform_ext::MatchedConvolutionCaptures &captures,
+      bool optUseMmaSync)
       : AbstractGemmLikeStrategy(), ctx(context), captures(captures) {
-    initDefaultValues();
+    initDefaultValues(optUseMmaSync);
   }
 
   ImplicitGemmStrategy(const ImplicitGemmStrategy &) = default;
@@ -39,11 +40,21 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   MLIRContext *ctx;
   transform_ext::MatchedConvolutionCaptures captures;
 
-  void initDefaultValues() override;
+  void initDefaultValues(bool optUseMmaSync = false);
 
   int64_t m() const override { return derivedM; }
   int64_t n() const override { return derivedN; }
   int64_t k() const override { return derivedK; }
+
+  int64_t blockTileM() const override {
+    assert(blockTileSizes.size() >= 3 && "need at least 3 block tile sizes");
+    return blockTileSizes[0];
+  }
+  int64_t blockTileN() const override {
+    assert(blockTileSizes.size() >= 3 && "need at least 3 block tile sizes");
+    return blockTileSizes[1];
+  }
+  int64_t blockTileK() const override { return reductionTileSize; }
 
   using AbstractGemmLikeStrategy::MappingInfo;
 
@@ -51,7 +62,7 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
     // 2D named convolutions are always batched.
     return MappingInfo{
         /*numThreads=*/{},
-        /*tileSizes=*/{blockTileSizes[2], blockTileSizes[1], blockTileSizes[0]},
+        /*tileSizes=*/{blockTileSizes[2], blockTileM(), blockTileN()},
         /*threadMapping=*/{blockZ(ctx), blockY(ctx), blockX(ctx)}};
   }
 
@@ -63,8 +74,8 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
     assert(totalNumThreads() % numThreadsK == 0 &&
            "num threads must be divisible by num threads along k");
     int64_t numThreadsM = totalNumThreads() / numThreadsK;
-    assert(blockTileSizes[1] % numThreadsM == 0 &&
-           "blockTileSizes[1] must be divisible by numThreadsM");
+    assert(blockTileM() % numThreadsM == 0 &&
+           "blockTileM must be divisible by numThreadsM");
     assert(reductionTileSize % numThreadsK == 0 &&
            "reductionTileSize must be divisible by numThreadsK");
     // Filter does not have the batch dimension so we check where the filter is.
@@ -73,9 +84,9 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
         filterLHS ? SmallVector<int64_t>{numThreadsM, numThreadsK}
                   : SmallVector<int64_t>{0, numThreadsM, numThreadsK},
         /*tileSizes=*/
-        filterLHS ? SmallVector<int64_t>{blockTileSizes[1] / numThreadsM,
+        filterLHS ? SmallVector<int64_t>{blockTileM() / numThreadsM,
                                          reductionTileSize / numThreadsK}
-                  : SmallVector<int64_t>{blockTileSizes[1] / numThreadsM,
+                  : SmallVector<int64_t>{0, blockTileM() / numThreadsM,
                                          reductionTileSize / numThreadsK},
         /*threadMapping=*/{linearIdX(ctx), linearIdY(ctx)}};
   }
@@ -83,13 +94,13 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   MappingInfo rhsCopyMapping() const override {
     assert(blockTileSizes[0] % rhsCopyVectorSize() == 0 &&
            "vector size must divide blockTileSizes[0]");
-    int64_t numThreadsN = blockTileSizes[0] / rhsCopyVectorSize();
+    int64_t numThreadsN = blockTileN() / rhsCopyVectorSize();
     assert(totalNumThreads() % numThreadsN == 0 &&
            "num threads must be divisible by num threads along n");
     int64_t numThreadsK = totalNumThreads() / numThreadsN;
     assert(reductionTileSize % numThreadsK == 0 &&
            "reductionTileSize must be divisible by numThreadsK");
-    assert(blockTileSizes[0] % numThreadsN == 0 &&
+    assert(blockTileN() % numThreadsN == 0 &&
            "blockTileSizes[0] must be divisible by numThreadsN");
     return MappingInfo{
         /*numThreads=*/
@@ -97,27 +108,27 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
                   : SmallVector<int64_t>{numThreadsK, numThreadsN},
         /*tileSizes=*/
         filterLHS ? SmallVector<int64_t>{0, reductionTileSize / numThreadsK,
-                                         blockTileSizes[0] / numThreadsN}
+                                         blockTileN() / numThreadsN}
                   : SmallVector<int64_t>{reductionTileSize / numThreadsK,
-                                         blockTileSizes[0] / numThreadsN},
+                                         blockTileN() / numThreadsN},
         /*threadMapping=*/{linearIdY(ctx), linearIdX(ctx)}};
   }
   // RES copy is of size mxn.
   MappingInfo resCopyMapping() const override {
-    assert(blockTileSizes[0] % resCopyVectorSize() == 0 &&
+    assert(blockTileN() % resCopyVectorSize() == 0 &&
            "vector size must divide n");
-    int64_t numThreadsN = blockTileSizes[0] / resCopyVectorSize();
+    int64_t numThreadsN = blockTileN() / resCopyVectorSize();
     assert(totalNumThreads() % numThreadsN == 0 &&
            "num threads must be divisible by num threads along n");
     int64_t numThreadsM = totalNumThreads() / numThreadsN;
-    assert(blockTileSizes[1] % numThreadsM == 0 &&
+    assert(blockTileM() % numThreadsM == 0 &&
            "blockTileSizes[1] must be divisible by numThreadsM");
-    assert(blockTileSizes[0] % numThreadsN == 0 &&
+    assert(blockTileN() % numThreadsN == 0 &&
            "blockTileSizes[0] must be divisible by numThreadsN");
     return MappingInfo{
         /*numThreads=*/{0, numThreadsM, numThreadsN},
         /*tileSizes=*/
-        {1, blockTileSizes[1] / numThreadsM, blockTileSizes[0] / numThreadsN},
+        {1, blockTileM() / numThreadsM, blockTileN() / numThreadsN},
         /*threadMapping=*/{linearIdY(ctx), linearIdX(ctx)}};
   }
   // COMPUTE is of size mxn.
