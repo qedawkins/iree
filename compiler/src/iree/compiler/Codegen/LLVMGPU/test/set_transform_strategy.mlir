@@ -348,7 +348,7 @@ hal.executable.variant public @cuda_nvptx_fb, target = <"cuda", "cuda-nvptx-fb",
 // CHECK: transform.iree.hoist_static_alloc %{{.*}} : (!pdl.operation) -> ()
 // CHECK: transform.iree.apply_patterns %{{.*}} {fold_memref_aliases}
 // CHECK: transform.iree.apply_patterns %{{.*}} {extract_address_computations}
-// CHECK: transform.iree.apply_patterns %{{.*}} {unroll_vectors_gpu_wmma}
+// CHECK: transform.iree.unroll_vectors_gpu_wmma %{{.*}} [16, 16, 8]
 // CHECK: transform.structured.hoist_redundant_vector_transfers
 // CHECK: transform.iree.vector.vector_to_mma_conversion %{{.*}} {use_wmma} : (!pdl.operation) -> ()
 // CHECK: transform.iree.apply_patterns %{{.*}} {canonicalization, cse, fold_memref_aliases, licm, tiling_canonicalization} : (!pdl.operation) -> ()

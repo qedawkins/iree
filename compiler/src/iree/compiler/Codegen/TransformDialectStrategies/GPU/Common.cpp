@@ -1010,11 +1010,10 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     return failure();
   }
 
+  iree_compiler::gpu::MMAShape targetWmmaShape;
   if (clGPUTransformDialectUseMmaSync) {
     if (!gpuModel.hasMmaSync) {
-      LDBG(
-          "--Implicit gemm strategy target does not support MMA.SYNC "
-          "operations\n");
+      LDBG("--Implicit gemm strategy target does not support MMA.SYNC operations\n");
       return failure();
     }
     if (!lhsElementType.isF32() || !gpuModel.hasTF32TensorCore) {
@@ -1024,16 +1023,17 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
   } else {
     // Verify WMMA.
     // Hard coded to reflect current WMMA unrolling support.
-    int reqM = 16;
-    int reqN = 16;
-    int reqK = lhsElementType.isF32() ? 8 : 16;
     if (llvm::all_of(gpuModel.supportedWMMAConfigs,
                      [&](iree_compiler::gpu::MMAConfig config) {
-                       return config.m != reqM || config.n != reqN ||
-                              config.k != reqK ||
-                              config.aType != lhsElementType ||
-                              config.bType != rhsElementType ||
-                              config.cType != resElementType;
+                       if (config.aType != lhsElementType ||
+                           config.bType != rhsElementType ||
+                           config.cType != resElementType) {
+                         return true;
+                       }
+                       targetWmmaShape.m = config.m;
+                       targetWmmaShape.n = config.n;
+                       targetWmmaShape.k = config.k;
+                       return false;
                      })) {
       LDBG("--Implicit gemm strategy failed wmma type check\n");
       return failure();
@@ -1080,7 +1080,8 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
   // TODO: Generalize along the HW axis.
   auto strategyBuilder = [&](ImplicitLocOpBuilder &b, Value variant) {
     iree_compiler::gpu::ImplicitGemmStrategy strategy(
-        op->getContext(), captures, clGPUTransformDialectUseMmaSync);
+        op->getContext(), captures, clGPUTransformDialectUseMmaSync,
+        targetWmmaShape);
     return buildConvolutionImplicitGemmStrategy(b, variant, strategy);
   };
 
