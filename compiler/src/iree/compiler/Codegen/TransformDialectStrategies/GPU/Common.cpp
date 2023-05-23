@@ -1002,14 +1002,6 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     return failure();
   }
 
-  // Currently this is restricted by the supported vector unroll types/shapes
-  // for WMMA.
-  // TODO: Remove this once proper support for unrolling is in place.
-  if (!lhsElementType.isF32() && !lhsElementType.isF16()) {
-    LDBG("--Implicit gemm strategy failed elemental type check\n");
-    return failure();
-  }
-
   iree_compiler::gpu::MMAShape targetWmmaShape;
   if (clGPUTransformDialectUseMmaSync) {
     if (!gpuModel.hasMmaSync) {
