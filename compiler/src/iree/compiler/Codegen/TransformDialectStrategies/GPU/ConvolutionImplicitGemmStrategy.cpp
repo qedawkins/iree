@@ -241,7 +241,7 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
          "Number of threads specified by warps must match total number of "
          "threads");
   // Step 1. Apply block-level part of the strategy, keeps everything fused.
-  auto [fillH, img2colH, matmulH, maybeTiledTrailingHBlock, forall] =
+  auto [fillH, img2colH, matmulH, maybeTiledTrailingBlockH, forall] =
       buildConvolutionStrategyBlockDistribution(b, variantH, strategy);
   // Tile reduction loop.
   SmallVector<int64_t> tileSizes{0, 0, 0, strategy.reductionTileSize};
@@ -272,6 +272,28 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   auto [lhsCopyOpH, rhsCopyOpH, copyBackOpH] =
       buildDistributeCopies(b, variantH, paddedMatmulOpH, strategy);
 
+  // Step 4.5. Distribute trailing elementwise: SIMT for WMMA.
+  AbstractGemmLikeStrategy::MappingInfo resCopyMapping =
+      strategy.resCopyMapping();
+  iree_compiler::buildTileFuseDistToForallWithNumThreads(
+      /*b=*/b,
+      /*isolatedParentOpH=*/variantH,
+      /*rootH=*/maybeTiledTrailingBlockH,
+      /*opsHToFuse=*/{},
+      /*numThreads=*/
+      getAsOpFoldResult(b.getI64ArrayAttr(resCopyMapping.numThreads)),
+      /*threadDimMapping=*/b.getArrayAttr(resCopyMapping.threadMapping));
+
+  // Currently we distribute the fill with SIMT for WMMA with trailing
+  // elementwise to avoid producing a huge number of scalar loads since we're
+  // promoting the C matix anyway.
+  if (!strategy.useMmaSync) {
+    buildTileFuseDistToForallWithNumThreads(
+        b, variantH, fillOpH, ValueRange(),
+        getAsOpFoldResult(b.getI64ArrayAttr(resCopyMapping.numThreads)),
+        b.getArrayAttr(resCopyMapping.threadMapping));
+  }
+
   // Step 5. Distribute to warps: SIMD programming model.
   // TODO: get the number of warps from strategy.
   ImplicitGemmStrategy::MappingInfo computeMapping = strategy.computeMapping();
@@ -279,10 +301,12 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
       b, variantH, paddedMatmulOpH, ValueRange(),
       getAsOpFoldResult(b.getI64ArrayAttr(computeMapping.numThreads)),
       b.getArrayAttr(computeMapping.threadMapping));
-  buildTileFuseDistToForallWithNumThreads(
-      b, variantH, fillOpH, ValueRange(),
-      getAsOpFoldResult(b.getI64ArrayAttr(computeMapping.numThreads)),
-      b.getArrayAttr(computeMapping.threadMapping));
+  if (strategy.useMmaSync) {
+    buildTileFuseDistToForallWithNumThreads(
+        b, variantH, fillOpH, ValueRange(),
+        getAsOpFoldResult(b.getI64ArrayAttr(computeMapping.numThreads)),
+        b.getArrayAttr(computeMapping.threadMapping));
+  }
 
   // Step 6. Rank-reduce and vectorize.
   buildMatmulVectorization(b, variantH, lhsCopyOpH, rhsCopyOpH, copyBackOpH,

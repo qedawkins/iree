@@ -981,8 +981,8 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
   //   - Mandatory fill op.
   //   - Require minimum tile alignment due to img2col.
   //   - Otherwise, we take it.
-  if (!fill->getCaptured() || trailing->getCaptured()) {
-    LDBG("--Implicit gemm strategy fill / trailing preconditions failed\n");
+  if (!fill->getCaptured()) {
+    LDBG("--Implicit gemm strategy fill precondition failed\n");
     return failure();
   }
 
