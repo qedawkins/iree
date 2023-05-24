@@ -100,7 +100,8 @@ void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
                                 : SmallVector<Type>{captures.inputElementType,
                                                     captures.filterElementType};
   paddingValueTypes.push_back(captures.outputElementType);
-  paddingDimensions = {1, 2, 3};
+  int64_t batchCount = captures.convolutionDims.batch.size();
+  paddingDimensions = {0 + batchCount, 1 + batchCount, 2 + batchCount};
   // TODO: Re-enable once padding works with the img2col op.
   packingDimensions =
       filterLHS ? SmallVector<int64_t>{1, 0, 1} : SmallVector<int64_t>{0, 1, 1};
@@ -244,7 +245,9 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   auto [fillH, img2colH, matmulH, maybeTiledTrailingBlockH, forall] =
       buildConvolutionStrategyBlockDistribution(b, variantH, strategy);
   // Tile reduction loop.
-  SmallVector<int64_t> tileSizes{0, 0, 0, strategy.reductionTileSize};
+  SmallVector<int64_t> tileSizes(strategy.captures.convolutionDims.batch.size(),
+                                 0);
+  tileSizes.append({0, 0, strategy.reductionTileSize});
   auto tileReductionResult =
       buildTileFuseToSingleScfFor(b, variantH, matmulH, img2colH, tileSizes);
 

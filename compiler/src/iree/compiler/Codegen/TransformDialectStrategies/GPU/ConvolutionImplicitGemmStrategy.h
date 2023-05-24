@@ -63,11 +63,14 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   using AbstractGemmLikeStrategy::MappingInfo;
 
   MappingInfo getBlockMapping() const override {
-    // 2D named convolutions are always batched.
-    return MappingInfo{
-        /*numThreads=*/{},
-        /*tileSizes=*/{blockTileSizes[2], blockTileM(), blockTileN()},
-        /*threadMapping=*/{blockZ(ctx), blockY(ctx), blockX(ctx)}};
+    assert(batchSize() <= 1 && "More than one batch dimension unsupported");
+    SmallVector<int64_t> tileSizes(batchSize(), blockTileSizes[2]);
+    tileSizes.append({blockTileM(), blockTileN()});
+    SmallVector<Attribute> threadMapping(batchSize(), blockZ(ctx));
+    threadMapping.append({blockY(ctx), blockX(ctx)});
+    return MappingInfo{/*numThreads=*/{},
+                       /*tileSizes=*/tileSizes,
+                       /*threadMapping=*/threadMapping};
   }
 
   // LHS copy or img2col is of size mxk.
@@ -82,17 +85,16 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
            "blockTileM must be divisible by numThreadsM");
     assert(reductionTileSize % numThreadsK == 0 &&
            "reductionTileSize must be divisible by numThreadsK");
+
     // Filter does not have the batch dimension so we check where the filter is.
-    return MappingInfo{
-        /*numThreads=*/
-        filterLHS ? SmallVector<int64_t>{numThreadsM, numThreadsK}
-                  : SmallVector<int64_t>{0, numThreadsM, numThreadsK},
-        /*tileSizes=*/
-        filterLHS ? SmallVector<int64_t>{blockTileM() / numThreadsM,
-                                         reductionTileSize / numThreadsK}
-                  : SmallVector<int64_t>{0, blockTileM() / numThreadsM,
-                                         reductionTileSize / numThreadsK},
-        /*threadMapping=*/{linearIdX(ctx), linearIdY(ctx)}};
+    SmallVector<int64_t> threadCounts((1 - filterLHS) * batchSize(), 0);
+    threadCounts.append({numThreadsM, numThreadsK});
+    SmallVector<int64_t> tileSizes((1 - filterLHS) * batchSize(), 0);
+    tileSizes.append(
+        {blockTileM() / numThreadsM, reductionTileSize / numThreadsK});
+    return MappingInfo{/*numThreads=*/threadCounts,
+                       /*tileSizes=*/tileSizes,
+                       /*threadMapping=*/{linearIdX(ctx), linearIdY(ctx)}};
   }
   // RHS copy or img2col is of size kxn.
   MappingInfo rhsCopyMapping() const override {
@@ -106,16 +108,16 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
            "reductionTileSize must be divisible by numThreadsK");
     assert(blockTileN() % numThreadsN == 0 &&
            "blockTileSizes[0] must be divisible by numThreadsN");
-    return MappingInfo{
-        /*numThreads=*/
-        filterLHS ? SmallVector<int64_t>{0, numThreadsK, numThreadsN}
-                  : SmallVector<int64_t>{numThreadsK, numThreadsN},
-        /*tileSizes=*/
-        filterLHS ? SmallVector<int64_t>{0, reductionTileSize / numThreadsK,
-                                         blockTileN() / numThreadsN}
-                  : SmallVector<int64_t>{reductionTileSize / numThreadsK,
-                                         blockTileN() / numThreadsN},
-        /*threadMapping=*/{linearIdY(ctx), linearIdX(ctx)}};
+
+    // Filter does not have the batch dimension so we check where the filter is.
+    SmallVector<int64_t> threadCounts(filterLHS * batchSize(), 0);
+    threadCounts.append({numThreadsK, numThreadsN});
+    SmallVector<int64_t> tileSizes(filterLHS * batchSize(), 0);
+    tileSizes.append(
+        {reductionTileSize / numThreadsK, blockTileN() / numThreadsN});
+    return MappingInfo{/*numThreads=*/threadCounts,
+                       /*tileSizes=*/tileSizes,
+                       /*threadMapping=*/{linearIdY(ctx), linearIdX(ctx)}};
   }
   // RES copy is of size mxn.
   MappingInfo resCopyMapping() const override {
@@ -129,15 +131,20 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
            "blockTileSizes[1] must be divisible by numThreadsM");
     assert(blockTileN() % numThreadsN == 0 &&
            "blockTileSizes[0] must be divisible by numThreadsN");
-    return MappingInfo{
-        /*numThreads=*/{0, numThreadsM, numThreadsN},
-        /*tileSizes=*/
-        {1, blockTileM() / numThreadsM, blockTileN() / numThreadsN},
-        /*threadMapping=*/{linearIdY(ctx), linearIdX(ctx)}};
+
+    SmallVector<int64_t> threadCounts(batchSize(), 0);
+    threadCounts.append({numThreadsM, numThreadsN});
+    SmallVector<int64_t> tileSizes(batchSize(), 1);
+    tileSizes.append({blockTileM() / numThreadsM, blockTileN() / numThreadsN});
+    return MappingInfo{/*numThreads=*/threadCounts,
+                       /*tileSizes=*/tileSizes,
+                       /*threadMapping=*/{linearIdY(ctx), linearIdX(ctx)}};
   }
   // COMPUTE is of size mxn.
   MappingInfo computeMapping() const override {
-    return MappingInfo{/*numThreads=*/{0, numWarps[0], numWarps[1]},
+    SmallVector<int64_t> warpCounts(batchSize(), 0);
+    warpCounts.append({numWarps[0], numWarps[1]});
+    return MappingInfo{/*numThreads=*/warpCounts,
                        /*tileSizes=*/{},
                        /*threadMapping=*/{warpY(ctx), warpX(ctx)}};
   }
@@ -146,6 +153,8 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   LLVM_DUMP_METHOD void dump() const;
 
  private:
+  int64_t batchSize() const { return captures.convolutionDims.batch.size(); }
+
   // For NCHW convolutions, the filter will be the LHS of the GEMM.
   bool filterLHS = false;
 

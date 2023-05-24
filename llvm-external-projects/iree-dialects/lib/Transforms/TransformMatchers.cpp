@@ -1303,8 +1303,8 @@ void transform_ext::makeConvolutionMatcher(
     MatchedConvolutionCaptures &captures) {
   // The core part of the matcher is anchored on a particular convolution op.
   auto &convolution =
-      m_StructuredOp<linalg::Conv2DNchwFchwOp, linalg::Conv2DNhwcHwcfOp>(
-          matcherContext)
+      m_StructuredOp<linalg::Conv2DNchwFchwOp, linalg::Conv2DNhwcHwcfOp,
+                     linalg::GenericOp>(matcherContext)
           // Capture convolution dim classifications.
           .convolutionDims(CaptureConvDims(captures.convolutionDims))
           // Capture op sizes.

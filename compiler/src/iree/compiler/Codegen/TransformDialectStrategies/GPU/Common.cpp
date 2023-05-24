@@ -986,6 +986,23 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     return failure();
   }
 
+  // Currently requires a 2d convolution.
+  if (captures.convolutionDims.outputChannel.size() != 1) {
+    return failure();
+  }
+  if (captures.convolutionDims.inputChannel.size() != 1) {
+    return failure();
+  }
+  if (captures.convolutionDims.outputImage.size() != 2) {
+    return failure();
+  }
+  if (captures.convolutionDims.filterLoop.size() != 2) {
+    return failure();
+  }
+  if (captures.convolutionDims.batch.size() > 1) {
+    return failure();
+  }
+
   // TODO: This should be inferred directly from the shape of the input
   // (i.e. input indexing map) rather than iterator classes.
   bool filterLHS = captures.convolutionDims.outputChannel[0] <
@@ -1032,23 +1049,6 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     }
   }
 
-  // Currently requires a typical 2d named convolution (conv_2d_nchw/nhwc).
-  if (captures.convolutionDims.outputChannel.size() != 1) {
-    return failure();
-  }
-  if (captures.convolutionDims.inputChannel.size() != 1) {
-    return failure();
-  }
-  if (captures.convolutionDims.outputImage.size() != 2) {
-    return failure();
-  }
-  if (captures.convolutionDims.filterLoop.size() != 2) {
-    return failure();
-  }
-  if (captures.convolutionDims.batch.size() != 1) {
-    return failure();
-  }
-
   int64_t channelSize = 1;
   for (auto dim : captures.convolutionDims.outputChannel)
     channelSize *= captures.convolutionOpSizes[dim];
@@ -1063,7 +1063,7 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     derivedK *= captures.convolutionOpSizes[dim];
 
   // Require tile-aligned due to the img2col op.
-  if (channelSize % 64 || imageSize % 64 || derivedK % 16) {
+  if (channelSize % 16 || imageSize % 16 || derivedK % 16) {
     LDBG("--Implicit gemm strategy alignment check failed\n");
     return failure();
   }
