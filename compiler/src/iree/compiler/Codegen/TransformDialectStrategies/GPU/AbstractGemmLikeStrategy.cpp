@@ -130,7 +130,7 @@ static int64_t getCopyVectorSize(int64_t innerExtent, int64_t outerCopyExtent,
 
   // Finally, ensure that the remaining threads will divide the outer dim of the
   // tile.
-  int64_t minResidualElements = totalNumThreads / innerCopyExtent;
+  int64_t minResidualElements = std::max(totalNumThreads / innerCopyExtent, (int64_t)1);
   assert(outerCopyExtent % minResidualElements == 0 &&
          "fewer elements to copy than total number of threads");
   int64_t maxCopiedElementsPerVector = outerCopyExtent / minResidualElements;

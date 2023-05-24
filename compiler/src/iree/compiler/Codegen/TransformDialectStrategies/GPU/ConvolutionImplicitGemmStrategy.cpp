@@ -111,6 +111,21 @@ void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
   pipelineDepth = 0;
 }
 
+void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
+  while (blockTileSizes[0] > n()) blockTileSizes[0] /= 2;
+  while (blockTileSizes[1] > m()) blockTileSizes[1] /= 2;
+  while (reductionTileSize > k()) reductionTileSize /= 2;
+
+  while (blockTileSizes[0] < numThreads[0] && numWarps[0] > 1) {
+    numThreads[0] /= 2;
+    numWarps[0] /= 2;
+  }
+  while (blockTileSizes[1] < (numThreads[1] * numThreads[0]) && numWarps[1] > 1) {
+    numThreads[1] /= 2;
+    numWarps[1] /= 2;
+  }
+}
+
 LLVM_DUMP_METHOD void ImplicitGemmStrategy::dump() const {
   print(llvm::errs());
 }

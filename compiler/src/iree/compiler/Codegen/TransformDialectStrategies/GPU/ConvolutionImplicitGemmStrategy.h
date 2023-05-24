@@ -35,6 +35,7 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
         ctx(context),
         captures(captures) {
     initDefaultValues(optUseMmaSync);
+    adjustBlockTileSizesForShape();
   }
 
   ImplicitGemmStrategy(const ImplicitGemmStrategy &) = default;
@@ -46,17 +47,19 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
 
   void initDefaultValues(bool optUseMmaSync = false);
 
+  void adjustBlockTileSizesForShape();
+
   int64_t m() const override { return derivedM; }
   int64_t n() const override { return derivedN; }
   int64_t k() const override { return derivedK; }
 
   int64_t blockTileM() const override {
     assert(blockTileSizes.size() >= 3 && "need at least 3 block tile sizes");
-    return blockTileSizes[0];
+    return blockTileSizes[1];
   }
   int64_t blockTileN() const override {
     assert(blockTileSizes.size() >= 3 && "need at least 3 block tile sizes");
-    return blockTileSizes[1];
+    return blockTileSizes[0];
   }
   int64_t blockTileK() const override { return reductionTileSize; }
 
@@ -98,8 +101,8 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   }
   // RHS copy or img2col is of size kxn.
   MappingInfo rhsCopyMapping() const override {
-    assert(blockTileSizes[0] % rhsCopyVectorSize() == 0 &&
-           "vector size must divide blockTileSizes[0]");
+    assert(blockTileN() % rhsCopyVectorSize() == 0 &&
+           "vector size must divide blockTileN");
     int64_t numThreadsN = blockTileN() / rhsCopyVectorSize();
     assert(totalNumThreads() % numThreadsN == 0 &&
            "num threads must be divisible by num threads along n");
@@ -107,7 +110,7 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
     assert(reductionTileSize % numThreadsK == 0 &&
            "reductionTileSize must be divisible by numThreadsK");
     assert(blockTileN() % numThreadsN == 0 &&
-           "blockTileSizes[0] must be divisible by numThreadsN");
+           "blockTileN must be divisible by numThreadsN");
 
     // Filter does not have the batch dimension so we check where the filter is.
     SmallVector<int64_t> threadCounts(filterLHS * batchSize(), 0);
@@ -143,7 +146,7 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   // COMPUTE is of size mxn.
   MappingInfo computeMapping() const override {
     SmallVector<int64_t> warpCounts(batchSize(), 0);
-    warpCounts.append({numWarps[0], numWarps[1]});
+    warpCounts.append({numWarps[1], numWarps[0]});
     return MappingInfo{/*numThreads=*/warpCounts,
                        /*tileSizes=*/{},
                        /*threadMapping=*/{warpY(ctx), warpX(ctx)}};
