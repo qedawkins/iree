@@ -587,6 +587,8 @@ std::optional<SmallVector<int64_t>> getWmmaNativeVectorSize(
     return nativeSize;
   }
   if (auto writeOp = dyn_cast<vector::TransferWriteOp>(op)) {
+    if (writeOp.getVectorType().getRank() < 2)
+      return std::nullopt;
     SmallVector<int64_t> nativeSize(writeOp.getVectorType().getRank() - 2, 1);
     nativeSize.append({m, n});
     return nativeSize;
