@@ -94,6 +94,13 @@ void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
   // Pull in tile configs from flags.
   AbstractGemmLikeStrategy::initDefaultValues(optUseMmaSync);
 
+  // Set the elemental bit widths.
+  int64_t inputWidth = captures.inputElementType.getIntOrFloatBitWidth();
+  int64_t filterWidth = captures.filterElementType.getIntOrFloatBitWidth();
+  lhsElementalBitWidth = filterLHS ? filterWidth : inputWidth;
+  rhsElementalBitWidth = filterLHS ? inputWidth : filterWidth;
+  resElementalBitWidth = captures.outputElementType.getIntOrFloatBitWidth();
+
   // Set the configuration for padding the gemm.
   paddingValueTypes = filterLHS ? SmallVector<Type>{captures.filterElementType,
                                                     captures.inputElementType}
@@ -112,9 +119,15 @@ void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
 }
 
 void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
-  while (blockTileSizes[0] > n()) blockTileSizes[0] /= 2;
-  while (blockTileSizes[1] > m()) blockTileSizes[1] /= 2;
-  while (reductionTileSize > k()) reductionTileSize /= 2;
+  // while (blockTileSizes[0] > n()) blockTileSizes[0] /= 2;
+  // while (blockTileSizes[1] > m()) blockTileSizes[1] /= 2;
+  // while (reductionTileSize > k()) reductionTileSize /= 2;
+
+  // This is forcing alignment on 16 (alignment precondition).
+  // TODO: Enable unaligned tile sizes.
+  while (n() % blockTileSizes[0] != 0) blockTileSizes[0] /= 2;
+  while (m() % blockTileSizes[1] != 0) blockTileSizes[1] /= 2;
+  while (k() % reductionTileSize != 0) reductionTileSize /= 2;
 
   while (blockTileSizes[0] < numThreads[0] && numWarps[0] > 1) {
     numThreads[0] /= 2;

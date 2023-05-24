@@ -67,9 +67,9 @@ struct AbstractGemmLikeStrategy {
   virtual int64_t blockTileN() const = 0;
   virtual int64_t blockTileK() const = 0;
 
-  bool alignedLhs() const { return m() % 64 == 0 && k() % 16 == 0; }
-  bool alignedRhs() const { return n() % 64 == 0 && k() % 16 == 0; }
-  bool alignedRes() const { return m() % 64 == 0 && n() % 64 == 0; }
+  bool alignedLhs() const { return m() % 16 == 0 && k() % 16 == 0; }
+  bool alignedRhs() const { return n() % 16 == 0 && k() % 16 == 0; }
+  bool alignedRes() const { return m() % 16 == 0 && n() % 16 == 0; }
 
   /// Common values based on derived quantities.
   int64_t totalNumThreads() const {
