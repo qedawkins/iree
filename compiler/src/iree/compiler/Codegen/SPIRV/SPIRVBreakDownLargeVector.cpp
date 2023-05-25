@@ -29,7 +29,7 @@ struct SPIRVBreakDownLargeVectorPass final
         });
     vector::populateBreakDownVectorBitCastOpPatterns(
         patterns, [](vector::BitCastOp op) {
-          return isa<vector::InsertOp>(op.getSource().getDefiningOp());
+          return op.getSourceVectorType().getNumElements() > 4;
         });
     vector::InsertOp::getCanonicalizationPatterns(patterns, context);
     vector::ExtractOp::getCanonicalizationPatterns(patterns, context);
