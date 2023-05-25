@@ -4,7 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/TransformDialectStrategies/GPU/ConvolutionImplicitGemmStrategy.h"
+#include "iree/compiler/Codegen/TransformDialectStrategies/GPU/MatmulImplicitGemmStrategy.h"
 
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.h"
 #include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensions.h"
@@ -42,8 +42,8 @@ using iree_compiler::gpu::buildHoistOutputPaddingOp;
 using iree_compiler::gpu::buildMatmulVectorization;
 using iree_compiler::gpu::buildMultiBuffering;
 using iree_compiler::gpu::buildPipelineSharedMemoryCopies;
-using iree_compiler::gpu::ImplicitGemmStrategy;
 using iree_compiler::gpu::kCudaWarpSize;
+using iree_compiler::gpu::MatmulImplicitGemmStrategy;
 using iree_compiler::gpu::scaleUpByBitWidth;
 using iree_compiler::IREE::transform_dialect::ApplyPatternsOp;
 using iree_compiler::IREE::transform_dialect::ApplyPatternsOpPatterns;
@@ -57,37 +57,25 @@ using transform_ext::RegisterMatchCallbacksOp;
 
 /// Options to set the default values of the matmul strategy.
 
-void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
-  assert(captures.convolutionDims.outputChannel.size() >= 1 &&
-         "requires at least one output channel dimension");
-  assert(captures.convolutionDims.inputChannel.size() >= 1 &&
-         "requires at least one input channel dimension");
-  assert(captures.convolutionDims.outputImage.size() >= 1 &&
-         "requires at least one output image dimension");
-  assert(captures.convolutionDims.filterLoop.size() >= 1 &&
-         "requires at least one filter loop dimension");
+void MatmulImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
+  assert(captures.convolutionDims.batch.size() == 1 &&
+         "requires two output channel dimensions");
+  assert(captures.convolutionDims.outputChannel.size() <= 2 &&
+         "requires two output channel dimensions");
+  assert(captures.convolutionDims.inputChannel.size() <= 2 &&
+         "requires two input channel dimensions");
+  assert(captures.convolutionDims.outputImage.size() == 0 &&
+         "requires no output image dimensions");
+  assert(captures.convolutionDims.filterLoop.size() == 0 &&
+         "requires no filter loop dimensions");
 
-  // It is an NCHW conv if the output channel precedes the output image
-  // dimensions.
-  // TODO: This should be inferred directly from the shape of the input (i.e.
-  // input indexing map) rather than overall iterator classes.
-  filterLHS = captures.convolutionDims.outputChannel.back() <
-              captures.convolutionDims.outputImage.back();
-
-  int64_t channelSize = 1;
+  derivedM = 1;
+  for (auto dim : captures.convolutionDims.batch)
+    derivedM *= captures.convolutionOpSizes[dim];
+  derivedN = 1;
   for (auto dim : captures.convolutionDims.outputChannel)
-    channelSize *= captures.convolutionOpSizes[dim];
-  int64_t imageSize = 1;
-  for (auto dim : captures.convolutionDims.outputImage)
-    imageSize *= captures.convolutionOpSizes[dim];
-
-  derivedN = channelSize;
-  derivedM = imageSize;
-  if (filterLHS) std::swap(derivedM, derivedN);
-
+    derivedN *= captures.convolutionOpSizes[dim];
   derivedK = 1;
-  for (auto dim : captures.convolutionDims.filterLoop)
-    derivedK *= captures.convolutionOpSizes[dim];
   for (auto dim : captures.convolutionDims.inputChannel)
     derivedK *= captures.convolutionOpSizes[dim];
 
@@ -95,30 +83,24 @@ void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
   AbstractGemmLikeStrategy::initDefaultValues(optUseMmaSync);
 
   // Set the elemental bit widths.
-  int64_t inputWidth = captures.inputElementType.getIntOrFloatBitWidth();
-  int64_t filterWidth = captures.filterElementType.getIntOrFloatBitWidth();
-  lhsElementalBitWidth = filterLHS ? filterWidth : inputWidth;
-  rhsElementalBitWidth = filterLHS ? inputWidth : filterWidth;
+  lhsElementalBitWidth = captures.inputElementType.getIntOrFloatBitWidth();
+  rhsElementalBitWidth = captures.filterElementType.getIntOrFloatBitWidth();
   resElementalBitWidth = captures.outputElementType.getIntOrFloatBitWidth();
 
   // Set the configuration for padding the gemm.
-  paddingValueTypes = filterLHS ? SmallVector<Type>{captures.filterElementType,
-                                                    captures.inputElementType}
-                                : SmallVector<Type>{captures.inputElementType,
-                                                    captures.filterElementType};
+  paddingValueTypes =
+      SmallVector<Type>{captures.inputElementType, captures.filterElementType};
   paddingValueTypes.push_back(captures.outputElementType);
-  int64_t batchCount = captures.convolutionDims.batch.size();
-  paddingDimensions = {0 + batchCount, 1 + batchCount, 2 + batchCount};
+  paddingDimensions = {0, 1, 2};
   // TODO: Re-enable once padding works with the img2col op.
-  packingDimensions =
-      filterLHS ? SmallVector<int64_t>{1, 0, 1} : SmallVector<int64_t>{0, 1, 1};
+  packingDimensions = SmallVector<int64_t>{1, 1, 1};
 
   // TODO: Enable async-copies and pipelining
   useAsyncCopies = false;
   pipelineDepth = 0;
 }
 
-void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
+void MatmulImplicitGemmStrategy::adjustBlockTileSizesForShape() {
   // while (blockTileSizes[0] > n()) blockTileSizes[0] /= 2;
   // while (blockTileSizes[1] > m()) blockTileSizes[1] /= 2;
   // while (reductionTileSize > k()) reductionTileSize /= 2;
@@ -133,31 +115,17 @@ void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
     numThreads[0] /= 2;
     numWarps[0] /= 2;
   }
-  while (blockTileSizes[1] < (numThreads[1] * numThreads[0]) && numWarps[1] > 1) {
+  while (blockTileSizes[1] < (numThreads[1] * numThreads[0]) &&
+         numWarps[1] > 1) {
     numThreads[1] /= 2;
     numWarps[1] /= 2;
   }
 
-  while (blockTileSizes[0] / numWarps[0] < 16 && numWarps[0] > 1) {
-    numWarps[0] /= 2;
-    numThreads[0] /= 2;
-  }
-
-  while (blockTileSizes[1] / numWarps[1] < 16 && numWarps[1] > 1) {
-    numWarps[1] /= 2;
-    numThreads[1] /= 2;
-  }
-
-  // Force distribution of leftover output channel along the y-axis.
+  // Force distribution of leftover output channel along the z-axis.
   if (captures.convolutionDims.outputChannel.size() == 2) {
     if (tiledBlockTileN() != 1) {
-      numWarps[1] = tiledBlockTileN();
-      numThreads[1] = tiledBlockTileN();
-    } else {
-      numWarps[0] *= numWarps[1];
-      numThreads[0] *= numThreads[1];
-      numWarps[1] = 1;
-      numThreads[1] = 1;
+      numWarps[2] = tiledBlockTileN();
+      numThreads[2] = tiledBlockTileN();
     }
   }
 
@@ -171,12 +139,12 @@ void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
   // }
 }
 
-LLVM_DUMP_METHOD void ImplicitGemmStrategy::dump() const {
+LLVM_DUMP_METHOD void MatmulImplicitGemmStrategy::dump() const {
   print(llvm::errs());
 }
 
-void ImplicitGemmStrategy::print(llvm::raw_ostream &os) const {
-  os << "\n--- Implicit GEMM strategy ---\n";
+void MatmulImplicitGemmStrategy::print(llvm::raw_ostream &os) const {
+  os << "\n--- Matmul Implicit GEMM strategy ---\n";
 
   AbstractGemmLikeStrategy::print(os);
 
@@ -199,45 +167,23 @@ void ImplicitGemmStrategy::print(llvm::raw_ostream &os) const {
   os << "\n";
   llvm::interleaveComma(captures.convolutionDims.depth, os << "Depth: ");
   os << "\n";
-
-  if (filterLHS)
-    os << "- filter is the LHS\n";
-  else
-    os << "- filter is the RHS\n";
 }
 
-static std::tuple<Value, Value, Value, Value, Value>
+static std::tuple<Value, Value, Value, Value>
 buildConvolutionStrategyBlockDistribution(
     ImplicitLocOpBuilder &b, Value variantH,
-    const ImplicitGemmStrategy &strategy) {
+    const MatmulImplicitGemmStrategy &strategy) {
   // Step 1. Call the matcher. Note that this is the same matcher as used to
   // trigger this compilation path, so it must always apply.
   b.create<RegisterMatchCallbacksOp>();
-  auto [fillH, convolutionH, maybeTrailingH] = unpackRegisteredMatchCallback<3>(
+  auto [fillH, matmulH, maybeTrailingH] = unpackRegisteredMatchCallback<3>(
       b, "convolution", transform::FailurePropagationMode::Propagate, variantH);
 
-  // Step 2. Do Img2Col on the convolution to get the GEMM + img2col op.
-  Type convType = convolutionH.getType();
-  auto conv2DToImg2Col = b.create<ConvertConv2DToImg2ColOp>(
-      TypeRange{convType, convType}, convolutionH);
-  Value img2colH = conv2DToImg2Col.getImg2colTensor();
-  Value transformedH = conv2DToImg2Col.getTransformed();
-
-  // The matmul is the producer of the transformed handle (expand back to
-  // convolution shape).
-  Value matmulH = b.create<transform::GetProducerOfOperand>(
-      transformedH.getType(), transformedH, 0);
-
-  // Bubble the expand_shape from img2col through the trailing elementwise
-  ApplyPatternsOpPatterns configuration;
-  configuration.bubbleCollapse = true;
-  Value funcH = b.create<MatchOp>(variantH, func::FuncOp::getOperationName());
-  b.create<ApplyPatternsOp>(funcH, configuration);
-
-  // Step 3. Create the block/mapping tiling level and fuse.
+  // Step 2. Create the block/mapping tiling level and fuse.
   auto [fusionTargetH, fusionGroupH] =
       buildSelectFirstNonEmpty(b, maybeTrailingH, matmulH);
-  ImplicitGemmStrategy::MappingInfo blockMapping = strategy.getBlockMapping();
+  MatmulImplicitGemmStrategy::MappingInfo blockMapping =
+      strategy.getBlockMapping();
   TileToForallAndFuseAndDistributeResult tileResult =
       buildTileFuseDistToForallWithTileSizes(
           /*builder=*/b,
@@ -259,33 +205,24 @@ buildConvolutionStrategyBlockDistribution(
   fillH =
       b.create<FuseIntoContainingOp>(newFillH, tileResult.forallH).getResult();
 
-  Value tiledImg2colH =
-      b.create<FuseIntoContainingOp>(img2colH, tileResult.forallH).getResult();
-
   auto [blockMatmulH, maybeBlockTrailingH] = buildSelectFirstNonEmpty(
       b, tileResult.resultingFusedOpsHandles.front(), tileResult.tiledOpH);
 
   // TODO: handle trailing op.
-  return std::make_tuple(fillH, tiledImg2colH, blockMatmulH,
-                         maybeBlockTrailingH, tileResult.forallH);
+  return std::make_tuple(fillH, blockMatmulH, maybeBlockTrailingH,
+                         tileResult.forallH);
 }
 
 // TODO: Merge with buildTileFuseToScfFor
 static mlir::iree_compiler::TileToScfForAndFuseResult
 buildTileFuseToSingleScfFor(ImplicitLocOpBuilder &b, Value isolatedParentOpH,
-                            Value rootH, Value opHToFuse,
-                            ArrayRef<int64_t> tileSizes) {
+                            Value rootH, ArrayRef<int64_t> tileSizes) {
   iree_compiler::TileToScfForAndFuseResult result;
   Type rootType = rootH.getType();
   auto tiletoScfForOp = b.create<TileToScfForOp>(
       TypeRange{rootType, rootType}, rootH, ValueRange{}, tileSizes);
   result.forLoops = tiletoScfForOp.getLoops();
   result.tiledOpH = tiletoScfForOp.getTiledLinalgOp();
-
-  assert(result.forLoops.size() == 1 && "More than one loop");
-
-  // TODO: Allow fusing more than one op.
-  b.create<FuseIntoContainingOp>(opHToFuse, result.forLoops[0]);
 
   // Avoid canonicalization for now to avoid prematurely folding away the pad
   // ops. ApplyPatternsOpPatterns configuration; isolatedParentOpH =
@@ -294,26 +231,26 @@ buildTileFuseToSingleScfFor(ImplicitLocOpBuilder &b, Value isolatedParentOpH,
   return result;
 }
 
-void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
+void iree_compiler::gpu::buildMatmulImplicitGemmStrategy(
     ImplicitLocOpBuilder &b, Value variantH,
-    const ImplicitGemmStrategy &strategy) {
+    const MatmulImplicitGemmStrategy &strategy) {
   assert(strategy.totalNumThreads() ==
              strategy.totalNumWarps() * kCudaWarpSize &&
          "Number of threads specified by warps must match total number of "
          "threads");
   // Step 1. Apply block-level part of the strategy, keeps everything fused.
-  auto [fillH, img2colH, matmulH, maybeTiledTrailingBlockH, forall] =
+  auto [fillH, matmulH, maybeTiledTrailingBlockH, forall] =
       buildConvolutionStrategyBlockDistribution(b, variantH, strategy);
   // Tile reduction loop.
-  SmallVector<int64_t> tileSizes(strategy.captures.convolutionDims.batch.size(),
-                                 0);
-  for (int i = 0,
-           e = strategy.captures.convolutionDims.outputChannel.size() - 1;
-       i < e; i++)
+  SmallVector<int64_t> tileSizes;
+  for (int i = 0, e = strategy.captures.convolutionDims.outputChannel.size() +
+                      strategy.captures.convolutionDims.batch.size();
+       i < e; i++) {
     tileSizes.push_back(0);
-  tileSizes.append({0, 0, strategy.tiledReductionTileSize()});
+  }
+  tileSizes.push_back(strategy.tiledReductionTileSize());
   auto tileReductionResult =
-      buildTileFuseToSingleScfFor(b, variantH, matmulH, img2colH, tileSizes);
+      buildTileFuseToSingleScfFor(b, variantH, matmulH, tileSizes);
 
   // Step 2. Pad the matmul op.
   auto paddedMatmulOpH =
@@ -363,7 +300,8 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
 
   // Step 5. Distribute to warps: SIMD programming model.
   // TODO: get the number of warps from strategy.
-  ImplicitGemmStrategy::MappingInfo computeMapping = strategy.computeMapping();
+  MatmulImplicitGemmStrategy::MappingInfo computeMapping =
+      strategy.computeMapping();
   buildTileFuseDistToForallWithNumThreads(
       b, variantH, paddedMatmulOpH, ValueRange(),
       getAsOpFoldResult(b.getI64ArrayAttr(computeMapping.numThreads)),

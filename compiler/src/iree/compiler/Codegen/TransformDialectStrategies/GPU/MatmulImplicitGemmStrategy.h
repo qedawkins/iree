@@ -4,8 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef IREE_COMPILER_CODEGEN_TRANSFORM_DIALECT_STRATEGIES_GPU_CONVOLUTION_IMPLICIT_GEMM_STRATEGY_H_
-#define IREE_COMPILER_CODEGEN_TRANSFORM_DIALECT_STRATEGIES_GPU_CONVOLUTION_IMPLICIT_GEMM_STRATEGY_H_
+#ifndef IREE_COMPILER_CODEGEN_TRANSFORM_DIALECT_STRATEGIES_GPU_MATMUL_IMPLICIT_GEMM_STRATEGY_H_
+#define IREE_COMPILER_CODEGEN_TRANSFORM_DIALECT_STRATEGIES_GPU_MATMUL_IMPLICIT_GEMM_STRATEGY_H_
 
 #include "iree-dialects/Transforms/TransformMatchers.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/Common/Common.h"
@@ -25,9 +25,9 @@ struct GPUModel;
 
 using iree_compiler::gpu::MMAShape;
 
-class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
+class MatmulImplicitGemmStrategy : public AbstractGemmLikeStrategy {
  public:
-  ImplicitGemmStrategy(
+  MatmulImplicitGemmStrategy(
       MLIRContext *context,
       const transform_ext::MatchedConvolutionCaptures &captures,
       bool optUseMmaSync, MMAShape targetWmmaShape)
@@ -36,11 +36,11 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
         captures(captures) {
     initDefaultValues(optUseMmaSync);
     adjustBlockTileSizesForShape();
-    dump();
   }
 
-  ImplicitGemmStrategy(const ImplicitGemmStrategy &) = default;
-  ImplicitGemmStrategy &operator=(const ImplicitGemmStrategy &) = default;
+  MatmulImplicitGemmStrategy(const MatmulImplicitGemmStrategy &) = default;
+  MatmulImplicitGemmStrategy &operator=(const MatmulImplicitGemmStrategy &) =
+      default;
 
   /// Constructor quantities.
   MLIRContext *ctx;
@@ -88,12 +88,12 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
 
   MappingInfo getBlockMapping() const override {
     assert(batchSize() <= 1 && "More than one batch dimension unsupported");
-    SmallVector<int64_t> tileSizes(batchSize(), blockTileSizes[2]);
+    SmallVector<int64_t> tileSizes;
     if (captures.convolutionDims.outputChannel.size() == 2)
       tileSizes.append({tiledBlockTileN(), tiledBlockTileM()});
     else
       tileSizes.append({tiledBlockTileM(), tiledBlockTileN()});
-    SmallVector<Attribute> threadMapping(batchSize(), blockZ(ctx));
+    SmallVector<Attribute> threadMapping;
     threadMapping.append({blockY(ctx), blockX(ctx)});
     return MappingInfo{/*numThreads=*/{},
                        /*tileSizes=*/tileSizes,
@@ -102,7 +102,7 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
 
   // LHS copy or img2col is of size mxk.
   MappingInfo lhsCopyMapping() const override {
-    if (captures.convolutionDims.inputChannel.size() == 2)
+    if (captures.convolutionDims.inputChannel.size() == 2 || true)
       return tiledLhsCopyMapping();
 
     assert(reductionTileSize % lhsCopyVectorSize() == 0 &&
@@ -117,9 +117,9 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
            "reductionTileSize must be divisible by numThreadsK");
 
     // Filter does not have the batch dimension so we check where the filter is.
-    SmallVector<int64_t> threadCounts((1 - filterLHS) * batchSize(), 0);
+    SmallVector<int64_t> threadCounts;
     threadCounts.append({numThreadsM, numThreadsK});
-    SmallVector<int64_t> tileSizes((1 - filterLHS) * batchSize(), 0);
+    SmallVector<int64_t> tileSizes;
     tileSizes.append(
         {blockTileM() / numThreadsM, reductionTileSize / numThreadsK});
     return MappingInfo{/*numThreads=*/threadCounts,
@@ -129,7 +129,7 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   // RHS copy or img2col is of size kxn.
   MappingInfo rhsCopyMapping() const override {
     if (captures.convolutionDims.outputChannel.size() == 2 ||
-        captures.convolutionDims.outputChannel.size() == 2)
+        captures.convolutionDims.outputChannel.size() == 2 || true)
       return tiledRhsCopyMapping();
 
     assert(blockTileN() % rhsCopyVectorSize() == 0 &&
@@ -144,9 +144,9 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
            "blockTileN must be divisible by numThreadsN");
 
     // Filter does not have the batch dimension so we check where the filter is.
-    SmallVector<int64_t> threadCounts(filterLHS * batchSize(), 0);
+    SmallVector<int64_t> threadCounts;
     threadCounts.append({numThreadsK, numThreadsN});
-    SmallVector<int64_t> tileSizes(filterLHS * batchSize(), 0);
+    SmallVector<int64_t> tileSizes;
     tileSizes.append(
         {reductionTileSize / numThreadsK, blockTileN() / numThreadsN});
     return MappingInfo{/*numThreads=*/threadCounts,
@@ -155,7 +155,7 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   }
   // RES copy is of size mxn.
   MappingInfo resCopyMapping() const override {
-    if (captures.convolutionDims.outputChannel.size() == 2)
+    if (captures.convolutionDims.outputChannel.size() == 2 || true)
       return tiledResCopyMapping();
 
     assert(blockTileN() % resCopyVectorSize() == 0 &&
@@ -169,9 +169,9 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
     assert(blockTileN() % numThreadsN == 0 &&
            "blockTileSizes[0] must be divisible by numThreadsN");
 
-    SmallVector<int64_t> threadCounts(batchSize(), 0);
+    SmallVector<int64_t> threadCounts;
     threadCounts.append({numThreadsM, numThreadsN});
-    SmallVector<int64_t> tileSizes(batchSize(), 1);
+    SmallVector<int64_t> tileSizes;
     tileSizes.append({blockTileM() / numThreadsM, blockTileN() / numThreadsN});
     return MappingInfo{/*numThreads=*/threadCounts,
                        /*tileSizes=*/tileSizes,
@@ -179,12 +179,12 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   }
   // COMPUTE is of size mxn.
   MappingInfo computeMapping() const override {
-    SmallVector<int64_t> warpCounts(batchSize(), 0);
+    SmallVector<int64_t> warpCounts;
     SmallVector<Attribute> threadMapping;
-    // if (captures.convolutionDims.outputChannel.size() == 2) {
-    //   warpCounts.push_back(numWarps[2]);
-    //   threadMapping.push_back(warpZ(ctx));
-    // }
+    if (captures.convolutionDims.outputChannel.size() == 2) {
+      warpCounts.push_back(numWarps[2]);
+      threadMapping.push_back(warpZ(ctx));
+    }
     warpCounts.append({numWarps[1], numWarps[0]});
     threadMapping.append({warpY(ctx), warpX(ctx)});
     return MappingInfo{/*numThreads=*/warpCounts,
@@ -248,8 +248,8 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
 
   MappingInfo tiledLhsCopyMapping() const {
     SmallVector<int64_t> lhsTileShape;
-    for (int i = 0, e = batchSize(); i < e; i++) lhsTileShape.push_back(1);
-    lhsTileShape.push_back(tiledReductionTileSize());
+    if (captures.convolutionDims.inputChannel.size() == 2)
+      lhsTileShape.push_back(tiledReductionTileSize());
     lhsTileShape.push_back(blockTileM());
     lhsTileShape.push_back(
         captures
@@ -259,23 +259,23 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
 
   MappingInfo tiledRhsCopyMapping() const {
     SmallVector<int64_t> rhsTileShape;
-    rhsTileShape.push_back(tiledBlockTileN());
-    rhsTileShape.push_back(tiledReductionTileSize());
-    if (captures.convolutionDims.inputChannel.size() == 2)
-      rhsTileShape.push_back(
-          captures.convolutionOpSizes[captures.convolutionDims.inputChannel
-                                          .back()]);
     if (captures.convolutionDims.outputChannel.size() == 2)
-      rhsTileShape.push_back(
-          captures.convolutionOpSizes[captures.convolutionDims.outputChannel
-                                          .back()]);
+      rhsTileShape.push_back(tiledBlockTileN());
+    if (captures.convolutionDims.inputChannel.size() == 2)
+      rhsTileShape.push_back(tiledReductionTileSize());
+    rhsTileShape.push_back(
+        captures
+            .convolutionOpSizes[captures.convolutionDims.inputChannel.back()]);
+    rhsTileShape.push_back(
+        captures
+            .convolutionOpSizes[captures.convolutionDims.outputChannel.back()]);
     return mapThreadsAlongShape(rhsTileShape);
   }
 
   MappingInfo tiledResCopyMapping() const {
     SmallVector<int64_t> resTileShape;
-    for (int i = 0, e = batchSize(); i < e; i++) resTileShape.push_back(1);
-    resTileShape.push_back(tiledBlockTileN());
+    if (captures.convolutionDims.outputChannel.size() == 2)
+      resTileShape.push_back(tiledBlockTileN());
     resTileShape.push_back(blockTileM());
     resTileShape.push_back(
         captures
@@ -291,12 +291,12 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
   int64_t derivedK = 0;
 };
 
-void buildConvolutionImplicitGemmStrategy(ImplicitLocOpBuilder &b,
-                                          Value variantH,
-                                          const ImplicitGemmStrategy &strategy);
+void buildMatmulImplicitGemmStrategy(
+    ImplicitLocOpBuilder &b, Value variantH,
+    const MatmulImplicitGemmStrategy &strategy);
 
 }  // namespace gpu
 }  // namespace iree_compiler
 }  // namespace mlir
 
-#endif  // IREE_COMPILER_CODEGEN_TRANSFORM_DIALECT_STRATEGIES_GPU_CONVOLUTION_IMPLICIT_GEMM_STRATEGY_H_
+#endif  // IREE_COMPILER_CODEGEN_TRANSFORM_DIALECT_STRATEGIES_GPU_MATMUL_IMPLICIT_GEMM_STRATEGY_H_

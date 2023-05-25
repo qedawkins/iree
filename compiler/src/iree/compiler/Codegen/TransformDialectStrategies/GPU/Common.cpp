@@ -11,6 +11,7 @@
 #include "iree/compiler/Codegen/LLVMGPU/TransformExtensions/LLVMGPUExtensions.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/Common/Common.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/ConvolutionImplicitGemmStrategy.h"
+#include "iree/compiler/Codegen/TransformDialectStrategies/GPU/MatmulImplicitGemmStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/MatmulTensorCoreStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/SmallReductionStrategy.h"
 #include "iree/compiler/Codegen/TransformDialectStrategies/GPU/StagedReductionStrategy.h"
@@ -978,29 +979,62 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     return failure();
   }
 
-  // Currently requires a 2d convolution.
-  if (captures.convolutionDims.outputChannel.size() < 1 ||
-      captures.convolutionDims.outputChannel.size() > 2) {
-    return failure();
-  }
-  if (captures.convolutionDims.inputChannel.size() < 1 ||
-      captures.convolutionDims.inputChannel.size() > 2) {
-    return failure();
-  }
-  if (captures.convolutionDims.outputImage.size() != 2) {
-    return failure();
-  }
-  if (captures.convolutionDims.filterLoop.size() != 2) {
-    return failure();
-  }
-  if (captures.convolutionDims.batch.size() > 1) {
-    return failure();
+  llvm::errs() << "- convolution dim types: \n";
+  llvm::interleaveComma(captures.convolutionDims.batch, llvm::errs()
+                                                            << "Batch: ");
+  llvm::errs() << "\n";
+  llvm::interleaveComma(captures.convolutionDims.outputImage,
+                        llvm::errs() << "OutputImage: ");
+  llvm::errs() << "\n";
+  llvm::interleaveComma(captures.convolutionDims.outputChannel,
+                        llvm::errs() << "OutputChannel: ");
+  llvm::errs() << "\n";
+  llvm::interleaveComma(captures.convolutionDims.filterLoop,
+                        llvm::errs() << "FilterLoop: ");
+  llvm::errs() << "\n";
+  llvm::interleaveComma(captures.convolutionDims.inputChannel,
+                        llvm::errs() << "InputChannel: ");
+  llvm::errs() << "\n";
+  llvm::interleaveComma(captures.convolutionDims.depth, llvm::errs()
+                                                            << "Depth: ");
+  llvm::errs() << "\n";
+
+  bool isMatmul = false;
+  if ((captures.convolutionDims.outputChannel.size() == 2 ||
+       captures.convolutionDims.outputChannel.size() == 1) &&
+      (captures.convolutionDims.inputChannel.size() == 2 ||
+       captures.convolutionDims.inputChannel.size() == 1) &&
+      captures.convolutionDims.outputImage.size() == 0 &&
+      captures.convolutionDims.filterLoop.size() == 0 &&
+      captures.convolutionDims.batch.size() == 1 &&
+      (captures.convolutionDims.outputChannel.size() != 1 ||
+       captures.convolutionDims.inputChannel.size() != 1)) {
+    isMatmul = true;
+  } else {
+    // Currently requires a 2d convolution.
+    if (captures.convolutionDims.outputChannel.size() < 1 ||
+        captures.convolutionDims.outputChannel.size() > 2) {
+      return failure();
+    }
+    if (captures.convolutionDims.inputChannel.size() < 1 ||
+        captures.convolutionDims.inputChannel.size() > 2) {
+      return failure();
+    }
+    if (captures.convolutionDims.outputImage.size() != 2) {
+      return failure();
+    }
+    if (captures.convolutionDims.filterLoop.size() != 2) {
+      return failure();
+    }
+    if (captures.convolutionDims.batch.size() > 1) {
+      return failure();
+    }
   }
 
   // TODO: This should be inferred directly from the shape of the input
   // (i.e. input indexing map) rather than iterator classes.
-  bool filterLHS = captures.convolutionDims.outputChannel[0] <
-                   captures.convolutionDims.outputImage[0];
+  bool filterLHS = isMatmul || captures.convolutionDims.outputChannel[0] <
+                                   captures.convolutionDims.outputImage[0];
 
   Type lhsElementType =
       filterLHS ? captures.filterElementType : captures.inputElementType;
@@ -1049,6 +1083,10 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
   int64_t imageSize = 1;
   for (auto dim : captures.convolutionDims.outputImage)
     imageSize *= captures.convolutionOpSizes[dim];
+  if (isMatmul) {
+    for (auto dim : captures.convolutionDims.batch)
+      imageSize *= captures.convolutionOpSizes[dim];
+  }
 
   int64_t derivedK = 1;
   for (auto dim : captures.convolutionDims.filterLoop)
@@ -1065,6 +1103,12 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
   // 2. Construct the configuration and the strategy builder.
   // TODO: Generalize along the HW axis.
   auto strategyBuilder = [&](ImplicitLocOpBuilder &b, Value variant) {
+    if (isMatmul) {
+      iree_compiler::gpu::MatmulImplicitGemmStrategy strategy(
+          op->getContext(), captures, clGPUTransformDialectUseMmaSync,
+          targetWmmaShape);
+      return buildMatmulImplicitGemmStrategy(b, variant, strategy);
+    }
     iree_compiler::gpu::ImplicitGemmStrategy strategy(
         op->getContext(), captures, clGPUTransformDialectUseMmaSync,
         targetWmmaShape);
