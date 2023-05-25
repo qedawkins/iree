@@ -60,11 +60,11 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
 
   int64_t blockTileM() const override {
     assert(blockTileSizes.size() >= 2 && "need at least 2 block tile sizes");
-    return blockTileSizes[0];
+    return blockTileSizes[1];
   }
   int64_t blockTileN() const override {
     assert(blockTileSizes.size() >= 2 && "need at least 2 block tile sizes");
-    return blockTileSizes[1];
+    return blockTileSizes[0];
   }
   int64_t blockTileK() const override { return reductionTileSize; }
 
@@ -96,7 +96,7 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
   }
   // RHS copy is of size kxn.
   MappingInfo rhsCopyMapping() const override {
-    assert(blockTileSizes[1] % rhsCopyVectorSize() == 0 &&
+    assert(blockTileN() % rhsCopyVectorSize() == 0 &&
            "vector size must divide blockTileSizes[1]");
     int64_t numThreadsN = blockTileN() / rhsCopyVectorSize();
     assert(totalNumThreads() % numThreadsN == 0 &&
@@ -104,7 +104,7 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
     int64_t numThreadsK = totalNumThreads() / numThreadsN;
     assert(reductionTileSize % numThreadsK == 0 &&
            "reductionTileSize must be divisible by numThreadsK");
-    assert(blockTileSizes[1] % numThreadsN == 0 &&
+    assert(blockTileN() % numThreadsN == 0 &&
            "blockTileSizes[1] must be divisible by numThreadsN");
     return MappingInfo{
         /*numThreads=*/{numThreadsK, numThreadsN},
@@ -131,7 +131,7 @@ class MatmulStrategy : public AbstractGemmLikeStrategy {
   }
   // COMPUTE is of size mxn.
   MappingInfo computeMapping() const override {
-    return MappingInfo{/*numThreads=*/{numWarps[0], numWarps[1]},
+    return MappingInfo{/*numThreads=*/{numWarps[1], numWarps[0]},
                        /*tileSizes=*/{},
                        /*threadMapping=*/{warpY(ctx), warpX(ctx)}};
   }
