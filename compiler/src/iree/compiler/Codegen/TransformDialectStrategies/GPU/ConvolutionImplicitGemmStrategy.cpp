@@ -71,8 +71,8 @@ void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
   // dimensions.
   // TODO: This should be inferred directly from the shape of the input (i.e.
   // input indexing map) rather than overall iterator classes.
-  filterLHS = captures.convolutionDims.outputChannel[0] <
-              captures.convolutionDims.outputImage[0];
+  filterLHS = captures.convolutionDims.outputChannel.back() <
+              captures.convolutionDims.outputImage.back();
 
   int64_t channelSize = 1;
   for (auto dim : captures.convolutionDims.outputChannel)
@@ -137,6 +137,23 @@ void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
     numThreads[1] /= 2;
     numWarps[1] /= 2;
   }
+
+  // Force distribution of leftover output channel along the z-axis.
+  if (captures.convolutionDims.outputChannel.size() == 2) {
+    if (tiledBlockTileN() != 1) {
+      numWarps[2] = tiledBlockTileN();
+      numThreads[2] = tiledBlockTileN();
+    }
+  }
+
+  //// Force distribution of leftover output channel along the x-axis.
+  // if (captures.convolutionDims.outputChannel.size() == 2) {
+  //   if (tiledBlockTileN() != 1) {
+  //     numWarps[0] *= tiledBlockTileN();
+  //     numThreads[0] *= tiledBlockTileN();
+  //     blockTileSizes[0] /= tiledBlockTileN();
+  //   }
+  // }
 }
 
 LLVM_DUMP_METHOD void ImplicitGemmStrategy::dump() const {
@@ -275,7 +292,11 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   // Tile reduction loop.
   SmallVector<int64_t> tileSizes(strategy.captures.convolutionDims.batch.size(),
                                  0);
-  tileSizes.append({0, 0, strategy.reductionTileSize});
+  for (int i = 0,
+           e = strategy.captures.convolutionDims.outputChannel.size() - 1;
+       i < e; i++)
+    tileSizes.push_back(0);
+  tileSizes.append({0, 0, strategy.tiledReductionTileSize()});
   auto tileReductionResult =
       buildTileFuseToSingleScfFor(b, variantH, matmulH, img2colH, tileSizes);
 

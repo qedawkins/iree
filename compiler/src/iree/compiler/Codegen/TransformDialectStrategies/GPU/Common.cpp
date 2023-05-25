@@ -979,10 +979,12 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
   }
 
   // Currently requires a 2d convolution.
-  if (captures.convolutionDims.outputChannel.size() != 1) {
+  if (captures.convolutionDims.outputChannel.size() < 1 ||
+      captures.convolutionDims.outputChannel.size() > 2) {
     return failure();
   }
-  if (captures.convolutionDims.inputChannel.size() != 1) {
+  if (captures.convolutionDims.inputChannel.size() < 1 ||
+      captures.convolutionDims.inputChannel.size() > 2) {
     return failure();
   }
   if (captures.convolutionDims.outputImage.size() != 2) {
