@@ -36,7 +36,6 @@ class ImplicitGemmStrategy : public AbstractGemmLikeStrategy {
         captures(captures) {
     initDefaultValues(optUseMmaSync);
     adjustBlockTileSizesForShape();
-    dump();
   }
 
   ImplicitGemmStrategy(const ImplicitGemmStrategy &) = default;

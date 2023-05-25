@@ -138,14 +138,14 @@ void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
     numWarps[1] /= 2;
   }
 
-  while (blockTileSizes[0] / numWarps[0] < 16 && numWarps[0] > 1) {
-    numWarps[0] /= 2;
-    numThreads[0] /= 2;
-  }
-
   while (blockTileSizes[1] / numWarps[1] < 16 && numWarps[1] > 1) {
     numWarps[1] /= 2;
     numThreads[1] /= 2;
+  }
+
+  while (blockTileSizes[0] / numWarps[0] < 16 && numWarps[0] > 1) {
+    numWarps[0] /= 2;
+    numThreads[0] /= 2;
   }
 
   // Force distribution of leftover output channel along the y-axis.
@@ -154,10 +154,14 @@ void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
       numWarps[1] = tiledBlockTileN();
       numThreads[1] = tiledBlockTileN();
     } else {
-      numWarps[0] *= numWarps[1];
-      numThreads[0] *= numThreads[1];
+      //numWarps[0] *= numWarps[1];
+      //numThreads[0] *= numThreads[1];
       numWarps[1] = 1;
       numThreads[1] = 1;
+    }
+    while (blockTileM() / numWarps[0] < 16 && numWarps[0] > 1) {
+      numWarps[0] /= 2;
+      numThreads[0] /= 2;
     }
   }
 

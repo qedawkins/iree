@@ -979,25 +979,25 @@ static LogicalResult matchAndSetConvolutionStrategy(func::FuncOp entryPoint,
     return failure();
   }
 
-  llvm::errs() << "- convolution dim types: \n";
-  llvm::interleaveComma(captures.convolutionDims.batch, llvm::errs()
-                                                            << "Batch: ");
-  llvm::errs() << "\n";
-  llvm::interleaveComma(captures.convolutionDims.outputImage,
-                        llvm::errs() << "OutputImage: ");
-  llvm::errs() << "\n";
-  llvm::interleaveComma(captures.convolutionDims.outputChannel,
-                        llvm::errs() << "OutputChannel: ");
-  llvm::errs() << "\n";
-  llvm::interleaveComma(captures.convolutionDims.filterLoop,
-                        llvm::errs() << "FilterLoop: ");
-  llvm::errs() << "\n";
-  llvm::interleaveComma(captures.convolutionDims.inputChannel,
-                        llvm::errs() << "InputChannel: ");
-  llvm::errs() << "\n";
-  llvm::interleaveComma(captures.convolutionDims.depth, llvm::errs()
-                                                            << "Depth: ");
-  llvm::errs() << "\n";
+  //llvm::errs() << "- convolution dim types: \n";
+  //llvm::interleaveComma(captures.convolutionDims.batch, llvm::errs()
+  //                                                          << "Batch: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.outputImage,
+  //                      llvm::errs() << "OutputImage: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.outputChannel,
+  //                      llvm::errs() << "OutputChannel: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.filterLoop,
+  //                      llvm::errs() << "FilterLoop: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.inputChannel,
+  //                      llvm::errs() << "InputChannel: ");
+  //llvm::errs() << "\n";
+  //llvm::interleaveComma(captures.convolutionDims.depth, llvm::errs()
+  //                                                          << "Depth: ");
+  //llvm::errs() << "\n";
 
   bool isMatmul = false;
   if ((captures.convolutionDims.outputChannel.size() == 2 ||
