@@ -95,9 +95,9 @@ void MatmulImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
   // TODO: Re-enable once padding works with the img2col op.
   packingDimensions = SmallVector<int64_t>{1, 1, 1};
 
-  // TODO: Enable async-copies and pipelining
+  // TODO: Enable async-copies.
   useAsyncCopies = false;
-  pipelineDepth = 0;
+  pipelineDepth = 2;
 }
 
 void MatmulImplicitGemmStrategy::adjustBlockTileSizesForShape() {
@@ -333,6 +333,15 @@ void iree_compiler::gpu::buildMatmulImplicitGemmStrategy(
   funcH = buildConvertToTensorCoreOp(b, funcH, strategy);
 
   // TODO: Enable async copies/multibuffering/pipelining.
+  if (strategy.pipelineDepth > 0) {
+    // Step 10. Multi-buffering.
+    buildMultiBuffering(b, funcH, strategy);
+
+    // TODO: Enable async copies.
+
+    // Step 11. Pipeline shared memory copies.
+    buildPipelineSharedMemoryCopies(b, funcH, strategy);
+  }
 
   // Step 13. Late lowerings and cleanups.
   // TODO: not a functional style op to avoid invalidating artificially.
