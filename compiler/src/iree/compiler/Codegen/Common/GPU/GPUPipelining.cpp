@@ -206,9 +206,17 @@ static bool setPipeliningMarkers(scf::ForOp forOp, bool pipelineStoreStage) {
       barriers.clear();
       continue;
     }
-    auto ld = dyn_cast<vector::TransferReadOp>(op);
-    if (!ld) continue;
-    auto ldSrcType = ld.getSource().getType().cast<MemRefType>();
+    Operation *ld;
+    MemRefType ldSrcType;
+    if (auto ldRead = dyn_cast<vector::TransferReadOp>(op)) {
+      ldSrcType = ldRead.getSource().getType().cast<MemRefType>();
+      ld = ldRead;
+    } else if (auto ldGather = dyn_cast<vector::GatherOp>(op)) {
+      ldSrcType = ldGather.getBase().getType().cast<MemRefType>();
+      ld = ldGather;
+    } else {
+      continue;
+    }
     if (!hasDefaultOrHALAddressSpace(ldSrcType) || !ld->hasOneUse()) continue;
     auto st = dyn_cast<vector::TransferWriteOp>(ld->use_begin()->getOwner());
     if (!st) continue;
