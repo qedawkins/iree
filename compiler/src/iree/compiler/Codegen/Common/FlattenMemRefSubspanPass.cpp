@@ -404,26 +404,6 @@ static Value linearizeIndices(Value sourceValue, ValueRange indices,
   return linearIndex;
 }
 
-/// Flattens memref cast ops with more than 1 dimensions to 1 dimension.
-struct FlattenCast final : public OpConversionPattern<memref::CastOp> {
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(
-      memref::CastOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
-    if (!isRankZeroOrOneMemRef(adaptor.getSource().getType())) {
-      return rewriter.notifyMatchFailure(
-          op, "expected converted memref of rank <= 1");
-    }
-    Type neededResultType =
-        getTypeConverter()->convertType(op.getDest().getType());
-    if (!neededResultType || !isRankZeroOrOneMemRef(neededResultType))
-      return failure();
-    rewriter.replaceOpWithNewOp<memref::CastOp>(op, neededResultType, adaptor.getSource());
-    return success();
-  }
-};
-
 /// Flattens memref subspan ops with more than 1 dimensions to 1 dimension.
 struct FlattenSubView final : public OpConversionPattern<memref::SubViewOp> {
   using OpConversionPattern::OpConversionPattern;
@@ -666,77 +646,6 @@ struct AdjustConversionCast final
 };
 
 //===----------------------------------------------------------------------===//
-// Loop Carried Patterns
-//===----------------------------------------------------------------------===//
-
-struct FlattenLoopCarriedMemRef final : public OpConversionPattern<scf::ForOp> {
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(scf::ForOp forOp, OpAdaptor adaptor,
-                                ConversionPatternRewriter& rewriter) const override {
-    SmallVector<unsigned, 8> ivIndices;
-    for (auto [index, iterArg] : llvm::enumerate(forOp.getRegionIterArgs())) {
-      if (isa<MemRefType>(iterArg.getType()) &&
-              !isRankZeroOrOneMemRef(iterArg.getType())) ivIndices.push_back(index);
-    }
-    if (ivIndices.empty()) return failure();
-
-    // Bit cast all init values from v8f16 to v4f32.
-    auto ivInitValues = llvm::to_vector<8>(forOp.getIterOperands());
-    auto adaptedInitValues = llvm::to_vector<8>(adaptor.getOperands());
-    for (unsigned index : ivIndices) {
-      ivInitValues[index] = adaptedInitValues[index + 3];
-    }
-
-    // Create a new loop with the casted init values. This also creates
-    // induction variables with proper type.
-    auto newLoop = rewriter.create<scf::ForOp>(
-        forOp.getLoc(), forOp.getLowerBound(), forOp.getUpperBound(),
-        forOp.getStep(), ivInitValues);
-
-    // Move all operations to the new for op. This also replaces block
-    // arguments. to the new block arguments.
-    rewriter.mergeBlocks(forOp.getBody(), newLoop.getBody(),
-                         newLoop.getBody()->getArguments());
-
-    SmallVector<Value, 8> forRetValues;
-    for (Value result : newLoop.getResults()) forRetValues.push_back(result);
-
-    // Cast return values to the old type to fix for op uses.
-    rewriter.setInsertionPointAfter(newLoop);
-    for (unsigned index : ivIndices) {
-      Value oldRet = forRetValues[index];
-      Type newRetType = this->getTypeConverter()->convertType(oldRet.getType());
-      forRetValues[index] = rewriter.create<memref::CastOp>(oldRet.getLoc(), newRetType,
-                                                  oldRet);
-    }
-
-    rewriter.replaceOp(forOp, forRetValues);
-    return success();
-  }
-};
-
-struct FlattenScfYield final : public OpConversionPattern<scf::YieldOp> {
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(scf::YieldOp yieldOp, OpAdaptor adaptor,
-                                ConversionPatternRewriter& rewriter) const override {
-    auto ivRetValues = llvm::to_vector<8>(yieldOp.getOperands());
-    SmallVector<unsigned, 8> ivIndices;
-    for (auto [index, iterArg] : llvm::enumerate(ivRetValues)) {
-      if (isa<MemRefType>(iterArg.getType()) &&
-              !isRankZeroOrOneMemRef(iterArg.getType())) ivIndices.push_back(index);
-    }
-    if (ivIndices.empty()) return failure();
-    llvm::errs() << "CREATING NEW SCF YIELD OP\n";
-
-    // Cast return values to the new type to fix yield.
-    rewriter.replaceOpWithNewOp<scf::YieldOp>(yieldOp, adaptor.getOperands());
-    return success();
-  }
-};
-
-//===----------------------------------------------------------------------===//
 // Folding Patterns
 //===----------------------------------------------------------------------===//
 
@@ -886,7 +795,6 @@ struct FlattenMemRefSubspanPass
         LinearizeLoadIndices, LinearizeMMALoadIndices, LinearizeStoreIndices,
         LinearizeMMAStoreIndices, LinearizeTransferReadIndices,
         LinearizeTransferWriteIndices, FlattenDealloc, AdjustConversionCast,
-        FlattenLoopCarriedMemRef, FlattenScfYield, FlattenCast,
         FlattenSubView, FoldMemRefReshape<memref::CollapseShapeOp>,
         FoldMemRefReshape<memref::ExpandShapeOp>>(internalTypeConverter,
                                                   context);
@@ -952,25 +860,6 @@ struct FlattenMemRefSubspanPass
         });
     target.addDynamicallyLegalOp<memref::SubViewOp>([](memref::SubViewOp op) {
       return isRankZeroOrOneMemRef(op.getType());
-    });
-    target.addDynamicallyLegalOp<memref::CastOp>([](memref::CastOp op) {
-      return isRankZeroOrOneMemRef(op.getSource().getType());
-    });
-    target.addDynamicallyLegalOp<scf::YieldOp>([](scf::YieldOp op) {
-      auto iterators = llvm::to_vector<8>(op.getResults());
-      bool res = llvm::all_of(iterators, [](Value arg) {
-            Type type = arg.getType();
-            return !isa<MemRefType>(type) || isRankZeroOrOneMemRef(type);
-        });
-      return res;
-    });
-    target.addDynamicallyLegalOp<scf::ForOp>([](scf::ForOp op) {
-      auto iterators = llvm::to_vector<8>(op.getIterOperands());
-      bool res = llvm::all_of(iterators, [](Value arg) {
-            Type type = arg.getType();
-            return !isa<MemRefType>(type) || isRankZeroOrOneMemRef(type);
-        });
-      return res;
     });
     target.addDynamicallyLegalOp<memref::DeallocOp>([](memref::DeallocOp op) {
       return isRankZeroOrOneMemRef(op.getMemref().getType());
