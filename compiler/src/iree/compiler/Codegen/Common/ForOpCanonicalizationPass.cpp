@@ -153,7 +153,7 @@ struct PackForOpInductionVarVector final : public OpRewritePattern<scf::ForOp> {
   LogicalResult matchAndRewrite(scf::ForOp forOp,
                                 PatternRewriter& rewriter) const override {
     VectorType v8f16Type = VectorType::get({8}, rewriter.getF16Type());
-    VectorType v4f32Type = VectorType::get({4}, rewriter.getF32Type());
+    VectorType v4i32Type = VectorType::get({4}, rewriter.getF32Type());
 
     SmallVector<unsigned, 8> ivIndices;
     for (auto [index, iterArg] : llvm::enumerate(forOp.getRegionIterArgs())) {
@@ -166,7 +166,7 @@ struct PackForOpInductionVarVector final : public OpRewritePattern<scf::ForOp> {
     for (unsigned index : ivIndices) {
       Value oldValue = ivInitValues[index];
       ivInitValues[index] = rewriter.create<vector::BitCastOp>(
-          oldValue.getLoc(), v4f32Type, oldValue);
+          oldValue.getLoc(), v4i32Type, oldValue);
     }
 
     // Create a new loop with the casted init values. This also creates
@@ -201,7 +201,7 @@ struct PackForOpInductionVarVector final : public OpRewritePattern<scf::ForOp> {
     for (unsigned index : ivIndices) {
       Value oldRet = ivRetValues[index];
       ivRetValues[index] = rewriter.create<vector::BitCastOp>(
-          oldRet.getLoc(), v4f32Type, oldRet);
+          oldRet.getLoc(), v4i32Type, oldRet);
     }
     yieldOp->setOperands(ivRetValues);
 
@@ -221,6 +221,87 @@ struct PackForOpInductionVarVector final : public OpRewritePattern<scf::ForOp> {
   }
 };
 
+/// An ad-hoc pattern to convert scf.for loop-carried values from
+/// `vector<16xf16>` to `vector<4xf32>` by inserting `vector.bitcast` around
+/// scf.for boundaries.
+///
+/// Those loop-carried values will be lowered into SPIR-V local variables. This
+/// pattern allows packing f16 values into f32 variables tightly so that we can
+/// generate shader conformant SPIR-V.
+struct PackForOpIntInductionVarVector final : public OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(scf::ForOp forOp,
+                                PatternRewriter& rewriter) const override {
+    VectorType v16i8Type = VectorType::get({16}, rewriter.getIntegerType(8));
+    VectorType v4f32Type = VectorType::get({4}, rewriter.getIntegerType(32));
+
+    SmallVector<unsigned, 8> ivIndices;
+    for (auto [index, iterArg] : llvm::enumerate(forOp.getRegionIterArgs())) {
+      if (iterArg.getType() == v16i8Type) ivIndices.push_back(index);
+    }
+    if (ivIndices.empty()) return failure();
+
+    // Bit cast all init values from v8f16 to v4f32.
+    auto ivInitValues = llvm::to_vector<8>(forOp.getIterOperands());
+    for (unsigned index : ivIndices) {
+      Value oldValue = ivInitValues[index];
+      ivInitValues[index] = rewriter.create<vector::BitCastOp>(
+          oldValue.getLoc(), v4f32Type, oldValue);
+    }
+
+    // Create a new loop with the casted init values. This also creates
+    // induction variables with proper type.
+    auto newLoop = rewriter.create<scf::ForOp>(
+        forOp.getLoc(), forOp.getLowerBound(), forOp.getUpperBound(),
+        forOp.getStep(), ivInitValues);
+
+    // Move all operations to the new for op. This also replaces block
+    // arguments. to the new block arguments.
+    rewriter.mergeBlocks(forOp.getBody(), newLoop.getBody(),
+                         newLoop.getBody()->getArguments());
+
+    // Bit cast induction variables back to the original type to fix uses.
+    rewriter.setInsertionPointToStart(newLoop.getBody());
+    for (unsigned index : ivIndices) {
+      Value newIv = newLoop.getRegionIterArgs()[index];
+      auto bitcastOp =
+          rewriter.create<vector::BitCastOp>(newIv.getLoc(), v16i8Type, newIv);
+      // Replace all uses of the new induction variable with a bitcast. We need
+      // to exclude the bitcast op itself given it also uses the induction
+      // variable.
+      SmallPtrSet<Operation*, 1> exceptions{bitcastOp};
+      newIv.replaceAllUsesExcept(bitcastOp, exceptions);
+    }
+
+    auto yieldOp = cast<scf::YieldOp>(newLoop.getBody()->getTerminator());
+    auto ivRetValues = llvm::to_vector<8>(yieldOp.getOperands());
+
+    // Bit cast return values to the new type to fix yield.
+    rewriter.setInsertionPoint(yieldOp);
+    for (unsigned index : ivIndices) {
+      Value oldRet = ivRetValues[index];
+      ivRetValues[index] = rewriter.create<vector::BitCastOp>(
+          oldRet.getLoc(), v4f32Type, oldRet);
+    }
+    yieldOp->setOperands(ivRetValues);
+
+    SmallVector<Value, 8> forRetValues;
+    for (Value result : newLoop.getResults()) forRetValues.push_back(result);
+
+    // Bit cast return values to the old type to fix for op uses.
+    rewriter.setInsertionPointAfter(newLoop);
+    for (unsigned index : ivIndices) {
+      Value oldRet = forRetValues[index];
+      forRetValues[index] = rewriter.create<vector::BitCastOp>(
+          oldRet.getLoc(), v16i8Type, oldRet);
+    }
+
+    rewriter.replaceOp(forOp, forRetValues);
+    return success();
+  }
+};
+
 struct ForOpCanonicalizationPass
     : public ForOpCanonicalizationBase<ForOpCanonicalizationPass> {
   void getDependentDialects(DialectRegistry& registry) const override {
@@ -231,7 +312,8 @@ struct ForOpCanonicalizationPass
     func::FuncOp fn = getOperation();
     RewritePatternSet patterns(&getContext());
     patterns.insert<CanonicalizeForOpInductionVarShape,
-                    PackForOpInductionVarVector>(fn.getContext());
+                    PackForOpInductionVarVector,
+                    PackForOpIntInductionVarVector>(fn.getContext());
     if (failed(applyPatternsAndFoldGreedily(fn, std::move(patterns)))) {
       return signalPassFailure();
     }
