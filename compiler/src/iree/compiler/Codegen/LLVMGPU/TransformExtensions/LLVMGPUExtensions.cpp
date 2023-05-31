@@ -764,7 +764,7 @@ transform_dialect::PipelineSharedMemoryCopiesOp::applyToOne(
   IRRewriter rewriter(getContext());
   int64_t depth(getDepth());
   FailureOr<scf::ForOp> pipelinedFor = iree_compiler::pipelineSharedMemoryCopy(
-      rewriter, forOp, PipeliningSchedulingStrategy::loadGlobalStage0,
+      rewriter, forOp, PipeliningSchedulingStrategy::loadStoreStage0,
       getPeelEpilogue(), depth);
   if (failed(pipelinedFor)) return emitDefaultSilenceableFailure(forOp);
   results.push_back(pipelinedFor.value());

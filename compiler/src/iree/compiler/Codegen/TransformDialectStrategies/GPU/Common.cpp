@@ -607,7 +607,7 @@ void mlir::iree_compiler::gpu::buildMultiBuffering(
   // TODO: Better builder instead of setting post-hoc.
   auto multiBufferOp = b.create<transform::MemRefMultiBufferOp>(
       pdl::OperationType::get(b.getContext()), allocH);
-  multiBufferOp.setFactor(strategy.pipelineDepth);
+  multiBufferOp.setFactor(strategy.pipelineDepth + 1);
   multiBufferOp.setSkipAnalysis(true);
 }
 
