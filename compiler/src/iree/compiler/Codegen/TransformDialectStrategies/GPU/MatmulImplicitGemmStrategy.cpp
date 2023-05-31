@@ -97,7 +97,7 @@ void MatmulImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
 
   // TODO: Enable async-copies.
   useAsyncCopies = false;
-  pipelineDepth = 2;
+  pipelineDepth = k() / reductionTileSize > 2 ? 1 : 0;
 }
 
 void MatmulImplicitGemmStrategy::adjustBlockTileSizesForShape() {
@@ -337,6 +337,10 @@ void iree_compiler::gpu::buildMatmulImplicitGemmStrategy(
     // Step 10. Multi-buffering.
     buildMultiBuffering(b, funcH, strategy);
 
+    ApplyPatternsOpPatterns patterns;
+    patterns.foldMemrefAliases = true;
+    b.create<ApplyPatternsOp>(funcH, patterns);
+
     // TODO: Enable async copies.
 
     // Step 11. Pipeline shared memory copies.
@@ -353,7 +357,8 @@ void iree_compiler::gpu::buildMatmulImplicitGemmStrategy(
     funcH = b.create<transform::MaterializeMasksOp>(
         pdl::OperationType::get(b.getContext()), funcH);
   }
-  {
+
+  if (strategy.pipelineDepth == 0) {
     ApplyPatternsOpPatterns config;
     config.foldMemrefAliases = true;
     iree_compiler::buildCanonicalizationAndEnablingTransforms(b, config, funcH);

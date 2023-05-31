@@ -115,7 +115,7 @@ void ImplicitGemmStrategy::initDefaultValues(bool optUseMmaSync) {
 
   // TODO: Enable async-copies and pipelining
   useAsyncCopies = false;
-  pipelineDepth = 0;
+  pipelineDepth = k() / reductionTileSize > 2 ? 1 : 0;
 }
 
 void ImplicitGemmStrategy::adjustBlockTileSizesForShape() {
@@ -399,6 +399,19 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
   funcH = buildConvertToTensorCoreOp(b, funcH, strategy);
 
   // TODO: Enable async copies/multibuffering/pipelining.
+  if (strategy.pipelineDepth > 0) {
+    // Step 10. Multi-buffering.
+    buildMultiBuffering(b, funcH, strategy);
+
+    ApplyPatternsOpPatterns patterns;
+    patterns.foldMemrefAliases = true;
+    b.create<ApplyPatternsOp>(funcH, patterns);
+
+    // TODO: Enable async copies.
+
+    // Step 11. Pipeline shared memory copies.
+    buildPipelineSharedMemoryCopies(b, funcH, strategy);
+  }
 
   // Step 13. Late lowerings and cleanups.
   // TODO: not a functional style op to avoid invalidating artificially.
