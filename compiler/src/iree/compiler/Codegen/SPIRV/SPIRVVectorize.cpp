@@ -244,6 +244,29 @@ std::optional<SmallVector<int64_t>> getNativeVectorShape(
       .Default([](Operation *) { return std::nullopt; });
 }
 
+namespace {
+/// This is an helper only to call vectorize via a pattern inside of
+/// VectorizeOp::applyToOne.
+struct VectorizationPattern : public RewritePattern {
+  explicit VectorizationPattern(MLIRContext *context,
+                                bool vectorizeExtract = false)
+      : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/1, context),
+        vectorizeNDExtract(vectorizeExtract) {}
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    linalg::LinalgOp linalgOp = dyn_cast<linalg::LinalgOp>(op);
+    if (!linalgOp) return rewriter.notifyMatchFailure(op, "expected Linalg Op");
+    return vectorize(rewriter, linalgOp, /*inputVectorSizes=*/{},
+                     vectorizeNDExtract);
+  }
+
+ private:
+  /// Controls whether to vectorize `tensor.extract` when the input tensor is
+  /// rank >= 2.
+  bool vectorizeNDExtract = false;
+};
+}  // namespace
+
 /// Add patterns to vectorize any supported Linalg ops.
 void populateVectorizationPatterns(RewritePatternSet &patterns) {
   IREE::LinalgExt::LinalgTransformationFilter f;
@@ -254,6 +277,11 @@ void populateVectorizationPatterns(RewritePatternSet &patterns) {
   patterns.add<LinalgVectorizationPattern>(
       patterns.getContext(), vectorizationOptions,
       f.addOpFilter<linalg::ContractionOpInterface>());
+  patterns.add<linalg::LinalgCopyVTRForwardingPattern,
+               linalg::LinalgCopyVTWForwardingPattern>(patterns.getContext(),
+                                                       /*benefit=*/2);
+  patterns.add<VectorizationPattern>(patterns.getContext(), true);
+  patterns.add<linalg::CopyVectorizationPattern>(patterns.getContext());
 }
 
 /// Adds patterns to unroll vector ops to SPIR-V native vector size.

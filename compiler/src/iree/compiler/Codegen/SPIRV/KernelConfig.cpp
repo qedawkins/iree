@@ -1429,6 +1429,16 @@ static LogicalResult setDefaultOpConfig(spirv::ResourceLimitsAttr limits,
   auto pipeline = vectorizable ? CodeGenPipeline::SPIRVBaseVectorize
                                : CodeGenPipeline::SPIRVBaseDistribute;
 
+  if (threadTileSizes.size() == 3 && !linalgOp.hasTensorSemantics()) {
+    workgroupTileSizes[0] = 8;
+    workgroupTileSizes[1] = 8;
+    workgroupTileSizes[2] = 16;
+    threadTileSizes[0] = 1;
+    threadTileSizes[1] = 1;
+    threadTileSizes[2] = 16;
+    pipeline = CodeGenPipeline::SPIRVHackedBaseVectorize;
+  }
+
   TileSizesListType tileSizes;
   tileSizes.push_back(workgroupTileSizes);
   tileSizes.push_back(threadTileSizes);

@@ -24,6 +24,8 @@ void addSPIRVBaseDistributePassPipeline(OpPassManager &pm);
 
 void addSPIRVBaseVectorizePassPipeline(OpPassManager &pm);
 
+void addSPIRVHackedBaseVectorizePassPipeline(OpPassManager &pm);
+
 void addSPIRVCooperativeMatrixVectorizePassPipeline(OpPassManager &pm,
                                                     unsigned pipelineDepth,
                                                     unsigned storeStage);

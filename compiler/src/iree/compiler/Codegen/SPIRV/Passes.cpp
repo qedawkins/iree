@@ -453,6 +453,29 @@ void addSPIRVBaseDistributePassPipeline(OpPassManager &pm) {
   // Tile and distribute to GPU invocations.
   nestedModulePM.addNestedPass<func::FuncOp>(
       createSPIRVTileAndDistributePass());
+
+  nestedModulePM.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createGPUDistributeSharedMemoryCopy());
+  nestedModulePM.addPass(createCanonicalizerPass());
+  nestedModulePM.addPass(createCSEPass());
+
+  addLoopMaterializationPasses(nestedModulePM);
+}
+
+void addSPIRVHackedBaseVectorizePassPipeline(OpPassManager &pm) {
+  addTileAndDistributeToWorkgroupsPasses(pm);
+
+  auto &nestedModulePM = pm.nest<ModuleOp>();
+
+  addBufferizePasses(nestedModulePM, gpuAllocateWorkgroupMemoryFn);
+
+  // Tile and distribute to GPU invocations.
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createSPIRVTileAndDistributePass());
+
+  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVVectorizePass());
+
   nestedModulePM.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
   nestedModulePM.addNestedPass<func::FuncOp>(
       createGPUDistributeSharedMemoryCopy());

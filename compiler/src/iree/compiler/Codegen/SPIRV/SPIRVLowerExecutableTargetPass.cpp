@@ -169,6 +169,9 @@ void SPIRVLowerExecutableTargetPass::runOnOperation() {
       case CodeGenPipeline::SPIRVBaseVectorize:
         addSPIRVBaseVectorizePassPipeline(pipeline);
         break;
+      case CodeGenPipeline::SPIRVHackedBaseVectorize:
+        addSPIRVHackedBaseVectorizePassPipeline(pipeline);
+        break;
       case CodeGenPipeline::SPIRVCooperativeMatrixVectorize:
         addSPIRVCooperativeMatrixVectorizePassPipeline(
             pipeline, translationInfo.value().getSoftwarePipelineDepth(),
