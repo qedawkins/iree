@@ -69,7 +69,10 @@ void DataTiledConvolutionStrategy::initDefaultValues(const GPUModel &gpuModel) {
     numWarps = SmallVector<int64_t>{1, 1, 1};
     blockTileSizes[0] = 64;
     blockTileSizes[1] = 1;
-    while (m() % blockTileSizes[0]) {
+    while (
+        captures
+            .convolutionOpSizes[captures.convolutionDims.outputImage.back()] %
+        blockTileSizes[0]) {
       blockTileSizes[0] /= 2;
     }
     useWmma = true;
@@ -183,6 +186,8 @@ static void buildCommonConvolutionLikeThreadSchedule(
   // Step 5. Tile the filter loop dimensions.
   SmallVector<int64_t> tileSizes(
       strategy.captures.convolutionDims.outputChannel.size(), 0);
+  tileSizes.append(strategy.captures.convolutionDims.inputChannel.size() - 1,
+                   0);
   tileSizes.append(strategy.captures.convolutionDims.outputImage.size(), 0);
   tileSizes.append(strategy.captures.convolutionDims.filterLoop.size(), 1);
 

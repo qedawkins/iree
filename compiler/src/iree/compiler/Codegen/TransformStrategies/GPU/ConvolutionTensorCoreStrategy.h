@@ -108,8 +108,9 @@ public:
   bool hasLhsCopy() const override { return true; }
   // Filter is not copied.
   bool hasRhsCopy() const override { return false; }
-  // Filter is not copied.
-  bool hasResCopy() const override { return false; }
+  bool hasResCopy() const override {
+    return captures.convolutionDims.inputChannel.size() == 2;
+  }
 
   MappingInfo getBlockMapping() const override {
     SmallVector<int64_t> tileSizes;
