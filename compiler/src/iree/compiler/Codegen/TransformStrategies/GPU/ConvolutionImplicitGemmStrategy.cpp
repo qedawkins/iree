@@ -101,7 +101,7 @@ void ImplicitGemmStrategy::initDefaultValues(const GPUModel &gpuModel) {
   // padding values.
   paddingValueTypes = {captures.inputElementType, captures.filterElementType,
                        captures.outputElementType};
-  paddingDimensions = {1, 2, 3};
+  paddingDimensions = {0, 1, 2, 3};
   // TODO: Re-enable once padding works with the img2col op.
   packingDimensions =
       filterLHS ? SmallVector<int64_t>{1, 0, 1} : SmallVector<int64_t>{0, 1, 1};
@@ -147,23 +147,31 @@ LogicalResult ImplicitGemmStrategy::validate(const GPUModel &gpuModel) const {
   if (failed(AbstractGemmLikeStrategy::validate(gpuModel)))
     return failure();
 
-  if (useFma)
-    return success();
-
-  Type lhsElementType = captures.inputElementType;
-  Type rhsElementType = captures.filterElementType;
-  Type resElementType = captures.outputElementType;
-  if (!lhsElementType.isF32() || !rhsElementType.isF32() ||
-      !resElementType.isF32()) {
-    LDBG("--Tensorcore implicit gemm strategy only supported for f32: "
-         << lhsElementType << ", " << rhsElementType << ", " << resElementType);
-    return failure();
+  if (batch() < blockTileBatch()) {
+    return emitError(UnknownLoc::get(ctx))
+           << "batch( " << batch() << ") <  blockTileBatch(" << blockTileBatch()
+           << ") this is at risk of not vectorizing and is NYI";
   }
-  if (lhsElementType != rhsElementType) {
-    LDBG("--Tensorcore implicit gemm strategy mixed input types unsupported\n");
+
+  if (blockTileSizes.size() < 3) {
+    LDBG("--Not enough block tile sizes\n");
     return failure();
   }
 
+  if (numWarps.size() < 3) {
+    LDBG("--Not enough num warps\n");
+    return failure();
+  }
+
+  if (numThreads.size() < 3) {
+    LDBG("--Not enough num threads\n");
+    return failure();
+  }
+
+  if (!useFma) {
+    LDBG("--Only FMA is supported for implicit gemm atm\n");
+    return failure();
+  }
   return success();
 }
 
@@ -308,7 +316,8 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
     b.create<transform::ApplyCastAwayVectorLeadingOneDimPatternsOp>(loc);
   });
   buildMatmulVectorization(b, variantH, lhsCopyOpH, rhsCopyOpH, copyBackOpH,
-                           strategy);
+                           strategy, /*vectorizePadding=*/false,
+                           /*vectorizeNdExtract=*/true);
 
   // Step 7. Bufferize and drop HAL descriptor from memref ops.
   variantH = buildBufferize(b, variantH);
@@ -328,6 +337,6 @@ void iree_compiler::gpu::buildConvolutionImplicitGemmStrategy(
 
   // TODO: Enable async copies/multibuffering/pipelining.
 
-  // Step 13. Late lowerings and cleanups.
+  // Step 10. Late lowerings and cleanups.
   buildLowerVectorMasksAndCleanup(b, funcH);
 }
