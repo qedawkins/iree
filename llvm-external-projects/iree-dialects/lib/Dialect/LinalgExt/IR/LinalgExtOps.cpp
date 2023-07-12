@@ -2643,6 +2643,53 @@ LogicalResult AttentionOp::reifyResultShapes(
       .reifyResultShapes(b, reifiedReturnShapes);
 }
 
+//===----------------------------------------------------------------------===//
+// QuantizedGemmOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult QuantizedGemmOp::verify() {
+  // NYI
+  return success();
+}
+
+SmallVector<Range> QuantizedGemmOp::getIterationDomain(OpBuilder &builder) {
+  // NYI
+  return {};
+}
+
+SmallVector<utils::IteratorType> QuantizedGemmOp::getLoopIteratorTypes() {
+  SmallVector<utils::IteratorType> iteratorTypes(
+      getIterationDomainRank(), utils::IteratorType::reduction);
+  AffineMap outputIndexingMap = getMatmulIndexingMapsArray().back();
+  // Infer the iterator types from the dimension present in the output.
+  for (AffineExpr dim : outputIndexingMap.getResults())
+    iteratorTypes[dim.cast<AffineDimExpr>().getPosition()] =
+        utils::IteratorType::parallel;
+  return iteratorTypes;
+}
+
+FailureOr<TilingResult>
+QuantizedGemmOp::getTiledImplementation(OpBuilder &builder,
+                                        ArrayRef<OpFoldResult> offsets,
+                                        ArrayRef<OpFoldResult> sizes) {
+  // NYI
+  return failure();
+}
+
+LogicalResult QuantizedGemmOp::getResultTilePosition(
+    OpBuilder &builder, unsigned resultNumber, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes, SmallVector<OpFoldResult> &resultOffsets,
+    SmallVector<OpFoldResult> &resultSizes) {
+  // NYI
+  return failure();
+}
+
+LogicalResult QuantizedGemmOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return cast<LinalgExtOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
 #define DEFINE_OP_GET_EFFECTS(OP_NAME)                                         \
   void OP_NAME::getEffects(                                                    \
       SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>      \
@@ -2665,6 +2712,7 @@ DEFINE_OP_GET_EFFECTS(WinogradInputTransformOp)
 DEFINE_OP_GET_EFFECTS(WinogradOutputTransformOp)
 DEFINE_OP_GET_EFFECTS(SoftmaxOp)
 DEFINE_OP_GET_EFFECTS(AttentionOp)
+DEFINE_OP_GET_EFFECTS(QuantizedGemmOp)
 
 //===----------------------------------------------------------------------===//
 // iree_linalg_ext.set_encoding

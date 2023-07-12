@@ -1265,6 +1265,167 @@ def IREELinalgExt_AttentionOp : IREELinalgExt_Op<"attention",
   }];
 }
 
+def IREELinalgExt_QuantizedGemmOp : IREELinalgExt_Op<"quantized_gemm",[
+  PredOpTrait<"lhs and dequantized rhs have same element type", TCopVTEtAreSameAt<[0, 2]>>,
+  DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface>,
+  DeclareOpInterfaceMethods<LinalgExtInterface>,
+  DeclareOpInterfaceMethods<TilingInterface,
+    ["generateScalarImplementation",
+     "getIterationDomain",
+     "getLoopIteratorTypes",
+     "getResultTilePosition",
+     "getTiledImplementation"]>
+]>{
+  let summary = "generalization of quantized matmuls";
+  let description = [{
+    This op is a generalization for weight-only quantized GEMMs. To avoid an
+    explosion of operations for the broad variety of quantization schemes, this
+    op separates the dequantization from the GEMM, allowing the dequantization
+    prescribed by the quantization scheme to be isolated within the op region.
+
+    ```mlir
+    #dequant_accesses = [
+      (n, k, g) -> (n, k, 0), # scales map
+      (n, k, g) -> (n, k, 0)  # zero points map
+    ]
+    #matmul_accesses = [
+      (m, n, k, g) -> (m, k, g), # lhs indexing map
+      (m, n, k, g) -> (n, k, g), # rhs indexing map
+      (m, n, k, g) -> (m, n)     # output indexing map
+    ]
+    %C = linalg_ext.quantized_gemm
+      {
+        dequant_indexing_maps = #dequant_accesses
+        matmul_indexing_maps = #matmul_accesses
+      }
+      rhs(%B : tensor<?x?x128xi8>)
+      dq_ins(%scales, %zps : tensor<?x?x1xf32>, tensor<?x?x1xi32>) {
+      ^bb0(%w: i8, %scale: f32, %zp: i32):
+        %0 = arith.extui %w : i8 to i32
+        %1 = arith.addi %0, %zp : i32
+        %2 = arith.sitofp %1 : i32 to f32
+        %3 = arith.mulf %2, %scale : f32
+        linalg_ext.yield %3
+      }
+      ins(%A, %B_dq : tensor<?x?x128xf32>, tensor<?x?x128xf32>)
+      outs(%C : tensor<?x?xf32>) -> (tensor<?x?xf32>)
+    ```
+
+    This has an implicit decomposition into two linalg ops: the dequantization
+    and the gemm. For example, the above quantized GEMM decomposes as follows.
+
+    ```
+    #dequant_accesses = [
+      (n, k, g) -> (n, k, g),
+      (n, k, g) -> (n, k, 0),
+      (n, k, g) -> (n, k, 0),
+      (n, k, g) -> (n, k, g)
+    ]
+    %B_dq_res = linalg.generic
+      {
+        indexing_maps = #dequant_accesses
+        iterator_types = ["parallel", "parallel", "parallel"]
+      }
+      ins(%B, %scales, %zps : tensor<?x?x128xi8>, tensor<?x?x1xf32>, tensor<?x?x1xi32>)
+      outs(%B_dq : tensor<?x?x128xf32) {
+      ^bb0(%w: i8, %scale: f32, %zp: i32, %out: f32):
+        %0 = arith.extui %w : i8 to i32
+        %1 = arith.addi %0, %zp : i32
+        %2 = arith.sitofp %1 : i32 to f32
+        %3 = arith.mulf %2, %scale : f32
+        linalg.yield %3 : f32
+      }
+
+    #matmul_accesses = [
+      (m, n, k, g) -> (m, k, g), # lhs indexing map
+      (m, n, k, g) -> (n, k, g), # rhs indexing map
+      (m, n, k, g) -> (m, n)     # output indexing map
+    ]
+    %C = linalg.generic
+      {
+        indexing_maps = #matmul_accesses
+        iterator_types = ["parallel", "parallel", "reduction", "reduction"]
+      }
+      ins(%A, %B_dq_res : tensor<?x?xf32>)
+      outs(%C : tensor<?x?xf32>) -> (tensor<?x?xf32>)
+      ^bb0(%lhs: f32, %rhs: f32, %out: f32):
+        %4 = arith.mulf %lhs, %rhs : i32
+        %5 = arith.addf %4, %out : f32
+        linalg.yield %5 : f32
+      }
+    ```
+    //let arguments = (ins AnyShaped:$lhs,
+    //                     AnyShaped:$rhs,
+    //                     AnyShaped:$dequant_rhs,
+    //                     Variadic<AnyShaped>:$dequant_inputs,
+    //                     AnyShaped:$output,
+    //                     AffineMapArrayAttr:$dequant_indexing_maps,
+    //                     AffineMapArrayAttr:$matmul_indexing_maps
+    //);
+  }];
+
+  let arguments = (ins Variadic<AnyShaped>:$dequant_inputs,
+                       Variadic<AnyShaped>:$inputs,
+                       Variadic<AnyShaped>:$outputs,
+                       AffineMapArrayAttr:$dequant_indexing_maps,
+                       AffineMapArrayAttr:$matmul_indexing_maps
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$result);
+  let regions = (region AnyRegion:$region);
+  let assemblyFormat = [{
+    attr-dict
+    `dq_ins` `(` $dequant_inputs `:` type($dequant_inputs) `)`
+    $region
+    `ins` `(` $inputs `)` `:` type($inputs) `)`
+    `outs` `(` $outputs `)` `:` type($outputs) `)`
+    (`->` type($result)^)?
+  }];
+
+  let extraClassDeclaration = extraLinalgExtOpClassDeclaration # [{
+    Value getLhs() {
+      return getInputOperand(0)->get();
+    }
+    Value getRhs() {
+      return getInputOperand(1)->get();
+    }
+    Value getRhsDequant() {
+      return getOutputOperand(0)->get();
+    }
+    Value getOutput() {
+      return getOutputOperand(1)->get();
+    }
+    int64_t getRhsRank() {
+      return getRhs().getType().cast<ShapedType>().getRank();
+    }
+    SmallVector<utils::IteratorType> getDequantLoopIteratorTypes() {
+      SmallVector<utils::IteratorType> iteratorTypes(getRhsRank(),
+            utils::IteratorType::parallel);
+      return iteratorTypes;
+    }
+    SmallVector<AffineMap> getMatmulIndexingMapsArray() {
+      auto range = getMatmulIndexingMaps().getAsValueRange<AffineMapAttr>();
+      return {range.begin(), range.end()};
+    }
+    SmallVector<AffineMap> getDequantIndexingMapsArray() {
+      auto range = getDequantIndexingMaps().getAsValueRange<AffineMapAttr>();
+      return {range.begin(), range.end()};
+    }
+    int64_t getIterationDomainRank() {
+      return getMatmulIndexingMapsArray().begin()->getNumDims();
+    }
+    // Method to implement for specifying output range for
+    // DestinationStyleOpInterface
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      std::pair<unsigned, unsigned> outputsIndexAndLength =
+        getODSOperandIndexAndLength(2);
+      return std::make_pair<int64_t, int64_t>(
+          outputsIndexAndLength.first,
+          outputsIndexAndLength.first + outputsIndexAndLength.second);
+    }
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // Pure ops
 //===----------------------------------------------------------------------===//
