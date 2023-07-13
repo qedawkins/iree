@@ -437,10 +437,15 @@ mlir::iree_compiler::gpu::buildDistributeMatmulCopies(
         b.create<RewriteInDestinationPassingStyleOp>(resH.getType(), resH);
   }
 
-  Value lhsH = b.create<transform::GetProducerOfOperand>(
-      paddedMatmulOpH.getType(), paddedMatmulOpH, b.getI64IntegerAttr(0));
-  Value rhsH = b.create<transform::GetProducerOfOperand>(
-      paddedMatmulOpH.getType(), paddedMatmulOpH, b.getI64IntegerAttr(1));
+  Value lhsH, rhsH;
+  if (strategy.hasLhsCopy()) {
+    lhsH = b.create<transform::GetProducerOfOperand>(
+        paddedMatmulOpH.getType(), paddedMatmulOpH, b.getI64IntegerAttr(0));
+  }
+  if (strategy.hasRhsCopy()) {
+    rhsH = b.create<transform::GetProducerOfOperand>(
+        paddedMatmulOpH.getType(), paddedMatmulOpH, b.getI64IntegerAttr(1));
+  }
 
   // Rewrite aligned pads as destination passing (linalg.copy)
   if (strategy.alignedLhs() && strategy.packingDimensions[0] &&
