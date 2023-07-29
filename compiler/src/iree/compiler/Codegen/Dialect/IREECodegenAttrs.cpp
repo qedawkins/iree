@@ -104,7 +104,8 @@ TranslationInfoAttr TranslationInfoAttr::get(
   auto pipelineAttr =
       DispatchLoweringPassPipelineAttr::get(context, passPipeline);
   return get(context, pipelineAttr, softwarePipelineDepth,
-             softwarePipelineStoreStage, codegenSpecFileName);
+             softwarePipelineStoreStage,
+             StringAttr::get(context, codegenSpecFileName));
 }
 
 DispatchLoweringPassPipeline
@@ -116,7 +117,7 @@ LogicalResult TranslationInfoAttr::verify(
     function_ref<InFlightDiagnostic()> emitError,
     IREE::Codegen::DispatchLoweringPassPipelineAttr passPipeline,
     unsigned softwarePipelineDepth, unsigned softwarePipelineStoreStage,
-    std::string getCodegenSpecFileName) {
+    StringAttr getCodegenSpecFileName) {
   if (!passPipeline) {
     return emitError() << "missing pass pipeline specification";
   }
