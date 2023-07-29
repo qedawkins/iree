@@ -275,6 +275,12 @@ void transform_dialect::ApplySwapTensorPadWithExtractSliceOp::populatePatterns(
       patterns.getContext(), [](tensor::ExtractSliceOp) { return false; });
 }
 
+void transform_dialect::ApplySwapTensorExpandShapeWithExtractSliceOp::populatePatterns(
+    RewritePatternSet &patterns) {
+  patterns.insert<linalg::ExtractSliceOfExpandTensorShapeSwapPattern>(
+      patterns.getContext(), [](tensor::ExtractSliceOp) { return true; });
+}
+
 //===---------------------------------------------------------------------===//
 // ApplyCommonSubexpressionEliminationOp
 //===---------------------------------------------------------------------===//

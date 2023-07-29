@@ -532,4 +532,17 @@ def ApplySwapTensorPadWithExtractSliceOp : Op<Transform_Dialect,
   let assemblyFormat = "attr-dict";
 }
 
+def ApplySwapTensorExpandShapeWithExtractSliceOp : Op<Transform_Dialect,
+    "apply_patterns.iree.swap_tensor_expand_shape",
+    [DeclareOpInterfaceMethods<PatternDescriptorOpInterface>,
+     ReportTrackingListenerFailuresOpTrait]> {
+  let description = [{
+    Populate patterns to swap tensor expand_shape with consumer tensor.extract_slice
+    operations.
+  }];
+
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+  let assemblyFormat = "attr-dict";
+}
+
 #endif // IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONS
