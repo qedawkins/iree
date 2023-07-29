@@ -126,7 +126,7 @@ def IREECodegen_TranslationInfoAttr :
         "The software pipeline depth to be used">:$softwarePipelineDepth,
     DefaultValuedParameter<"unsigned", "1",
         "The software pipeline stage to place stores">:$softwarePipelineStoreStage,
-    OptionalParameter<"std::string",
+    OptionalParameter<"StringAttr",
         "The path to the transform dialect codegen spec to be used">:$codegenSpecFileName
   );
   let builders = [
