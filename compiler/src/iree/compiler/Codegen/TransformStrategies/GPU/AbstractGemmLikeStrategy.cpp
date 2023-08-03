@@ -108,7 +108,7 @@ void AbstractGemmLikeStrategy::initDefaultValues(const GPUModel &gpuModel) {
   }
 
   /// Prefer smaller subgroup sizes for tensor core strategies.
-  if (!useFma)
+  if (!useFma && !targetSubgroupSize)
     targetSubgroupSize = gpuModel.minSubgroupSize;
 
   /// Default configuration based on hardware properties and problem bit widths.
@@ -321,6 +321,7 @@ void AbstractGemmLikeStrategy::print(llvm::raw_ostream &os) const {
   os << "- use wmma: " << useWmma << '\n';
   os << "- use mma sync: " << useMmaSync << '\n';
   os << "- pipeline depth: " << pipelineDepth << '\n';
+  os << "- subgroup size: " << getSubgroupSize() << '\n';
 
   os << "\n-- Derived quantities --\n";
   os << "- lhs copy:\n";

@@ -66,6 +66,9 @@ void DataTiledMatmulStrategy::initDefaultValues(const GPUModel &gpuModel) {
   paddingDimensions = {0, 1, 2};
   packingDimensions = {1, 1, 1};
 
+  if (gpuModel.minSubgroupSize)
+    targetSubgroupSize = *gpuModel.minSubgroupSize;
+
   // Pull in tile configs from flags.
   AbstractGemmLikeStrategy::initDefaultValues(gpuModel);
 
@@ -75,7 +78,7 @@ void DataTiledMatmulStrategy::initDefaultValues(const GPUModel &gpuModel) {
   numWarps[0] *= numWarps[1];
   numWarps[1] = 1;
   numThreads[0] *= numThreads[1];
-  numThreads[1] *= 1;
+  numThreads[1] = 1;
   // BlockTileN is effectively the inner tile.
   blockTileSizes[1] = captures.matmulOpSizes[captures.contractionDims.n.back()];
   // Adjust downwards to force alignment along M.
@@ -95,8 +98,6 @@ void DataTiledMatmulStrategy::initDefaultValues(const GPUModel &gpuModel) {
   // Disable pipelining.
   useAsyncCopies = false;
   pipelineDepth = 0;
-  if (gpuModel.minSubgroupSize)
-    targetSubgroupSize = *gpuModel.minSubgroupSize;
 }
 
 LLVM_DUMP_METHOD void DataTiledMatmulStrategy::dump() const {
