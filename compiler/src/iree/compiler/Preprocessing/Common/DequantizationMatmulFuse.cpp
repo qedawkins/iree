@@ -1,6 +1,5 @@
-
-
 #include "iree/compiler/Dialect/Flow/Transforms/RegionOpUtils.h"
+#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Preprocessing/Common/PassDetail.h"
 #include "iree/compiler/Preprocessing/Common/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -53,6 +52,13 @@ static LogicalResult isMatmulOnGroupedInput(linalg::GenericOp op) {
   auto rank = iteratorTypes.size();
   if (rank < 4)
     return failure();
+
+  if (!llvm::cast<ShapedType>(op.getInputs()[0].getType()).hasStaticShape() ||
+      !llvm::cast<ShapedType>(op.getInputs()[0].getType()).hasStaticShape() ||
+      !llvm::cast<ShapedType>(op.getInputs()[0].getType()).hasStaticShape()) {
+    // Codegen can't handle the dynamic case yet.
+    return failure();
+  }
 
   // Check that last two iterator types are reduction and the rest are parallel
   auto parallel = utils::IteratorType::parallel;
