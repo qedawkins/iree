@@ -258,10 +258,11 @@ raiseTensorExtractToInput(linalg::GenericOp linalgOp, RewriterBase &rewriter) {
 /// Given a linalg.generic operation, and input/output tensors with their
 /// indexing maps, tries to raise the operation to a tensor.extract_slice
 /// operation. The tensor.extract_slice produced can be rank reducing.
-static FailureOr<tensor::ExtractSliceOp>
-tryRaiseToExtractSlice(AffineMap inputIndexingMap, AffineMap outputIndexingMap,
-                       Value input, Value output, linalg::GenericOp linalgOp,
-                       RewriterBase &rewriter) {
+static FailureOr<Value> tryRaiseToExtractSlice(AffineMap inputIndexingMap,
+                                               AffineMap outputIndexingMap,
+                                               Value input, Value output,
+                                               linalg::GenericOp linalgOp,
+                                               RewriterBase &rewriter) {
   // Output rank cannot exceed input rank.
   if (outputIndexingMap.getNumResults() > inputIndexingMap.getNumResults()) {
     LDBG("    Not (rank reducing) slice -> FAIL");
@@ -295,6 +296,7 @@ tryRaiseToExtractSlice(AffineMap inputIndexingMap, AffineMap outputIndexingMap,
   IntegerAttr one = rewriter.getI64IntegerAttr(1);
   unsigned currOutDim = 0;
   unsigned leadOutDim = 0;
+  bool identitySlice = true;
   for (auto [idx, expr] : llvm::enumerate(inputIndexingMap.getResults())) {
     // Constant accesses can either be rank reducing or an access into a unit
     // dim. This is tracked by counting the number of unit output dimensions
@@ -306,6 +308,8 @@ tryRaiseToExtractSlice(AffineMap inputIndexingMap, AffineMap outputIndexingMap,
       sizes.push_back(one);
       if (outShape[leadOutDim] == 1) {
         ++leadOutDim;
+      } else {
+        identitySlice = false;
       }
       continue;
     }
@@ -315,8 +319,14 @@ tryRaiseToExtractSlice(AffineMap inputIndexingMap, AffineMap outputIndexingMap,
       if (dimPos >= currOutDim && dimPos <= leadOutDim) {
         offsets.push_back(zero);
         // Get the dim size from the output tensor.
-        sizes.push_back(
-            tensor::getMixedSize(rewriter, linalgOp.getLoc(), output, dimPos));
+        auto size =
+            tensor::getMixedSize(rewriter, linalgOp.getLoc(), output, dimPos);
+        sizes.push_back(size);
+        FailureOr<bool> dimsEqual =
+            ValueBoundsConstraintSet::areEqual(output, input, dimPos, idx);
+        if (failed(dimsEqual) || !*dimsEqual) {
+          identitySlice = false;
+        }
         currOutDim = dimPos + 1;
         leadOutDim = currOutDim;
         continue;
@@ -338,14 +348,19 @@ tryRaiseToExtractSlice(AffineMap inputIndexingMap, AffineMap outputIndexingMap,
   SmallVector<OpFoldResult> strides(inputIndexingMap.getNumResults(), one);
 
   LDBG("    Lowering to slice -> SUCCESS");
-  return rewriter.create<tensor::ExtractSliceOp>(
-      linalgOp.getLoc(), outType, input, offsets, sizes, strides);
+  if (identitySlice) {
+    return input;
+  }
+  return rewriter
+      .create<tensor::ExtractSliceOp>(linalgOp.getLoc(), outType, input,
+                                      offsets, sizes, strides)
+      .getResult();
 }
 
 /// Matches a linalg.generic operation with a single input and init output
 /// tensor, and tries to raise it to a view-like operation on the input tensor.
-static FailureOr<Operation *> tryRaiseToView(linalg::GenericOp linalgOp,
-                                             RewriterBase &rewriter) {
+static FailureOr<Value> tryRaiseToView(linalg::GenericOp linalgOp,
+                                       RewriterBase &rewriter) {
   if (!linalgOp.hasTensorSemantics()) {
     return failure();
   }
@@ -414,8 +429,7 @@ struct RaiseSpecialOpsPass : public RaiseSpecialOpsBase<RaiseSpecialOpsPass> {
       // Try raising to a view-like operation. Replace if the op raising was
       // successful.
       rewriter.setInsertionPoint(op);
-      FailureOr<Operation *> maybeRaisedView =
-          tryRaiseToView(linalgOp, rewriter);
+      FailureOr<Value> maybeRaisedView = tryRaiseToView(linalgOp, rewriter);
       if (succeeded(maybeRaisedView)) {
         rewriter.replaceOp(op, *maybeRaisedView);
       }

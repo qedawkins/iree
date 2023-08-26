@@ -48,7 +48,7 @@ struct GeneralizeBatchMatmulsPass
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(&getContext());
-    patterns.insert<GeneralizeTargetNamedOp<linalg::BatchMatmulOp>>(context);
+    patterns.insert<GeneralizeTargetNamedOp<linalg::FillOp>>(context);
     if (failed(applyPatternsAndFoldGreedily(getOperation(),
                                             std::move(patterns)))) {
       return signalPassFailure();
