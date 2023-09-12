@@ -113,6 +113,10 @@ verifyGPUMatmulPipeline(Operation *op,
                         IREE::Codegen::TranslationInfoAttr translationInfo,
                         ArrayRef<int64_t> workgroupSize);
 
+/// Converts vector/memref.load on global memory to amdgpu.raw_buffer_load.
+std::unique_ptr<OperationPass<func::FuncOp>>
+createLLVMGPUConvertLoadToAMDGPUBufferLoadPass();
+
 //----------------------------------------------------------------------------//
 // Register LLVMGPU Passes
 //----------------------------------------------------------------------------//

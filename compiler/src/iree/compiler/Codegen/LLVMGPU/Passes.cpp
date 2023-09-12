@@ -566,6 +566,8 @@ static void addLowerToLLVMGPUPasses(OpPassManager &pm, bool useROCM) {
   pm.addPass(createLLVMGPUCastAddressSpaceFunction());
   if (useROCM) {
     // convert to ROCDL.
+    pm.addNestedPass<func::FuncOp>(
+        createLLVMGPUConvertLoadToAMDGPUBufferLoadPass());
     pm.addPass(createConvertToROCDLPass());
   } else {
     // convert to NVVM.

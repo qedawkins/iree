@@ -13,6 +13,13 @@ include "mlir/Pass/PassBase.td"
 // LLVMGPU Passes (keep alphabetical)
 //------------------------------------------------------------------------------
 
+def LLVMGPUConvertLoadToAMDGPUBufferLoad
+    : Pass<"iree-llvmgpu-convert-load-to-amdgpu-buffer-load", "func::FuncOp"> {
+  let summary = "Converts vector/memref.load operations on global memory to amdgpu.buffer_load.";
+  let constructor =
+      "mlir::iree_compiler::createLLVMGPUConvertLoadToAMDGPUBufferLoadPass()";
+}
+
 // TODO: Bring the argument in line with the names used elsewhere.
 def ConvertToNVVM :
     Pass<"iree-convert-to-nvvm", "ModuleOp"> {

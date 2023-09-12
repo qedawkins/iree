@@ -162,7 +162,7 @@ std::string createHsaco(const std::string isa, StringRef name) {
 
   // Invoke lld. Expect a true return value from lld.
   // Searching for LLD
-  const SmallVector<std::string> &toolNames{"iree-lld"};
+  const SmallVector<std::string> &toolNames{"lld"};
   std::string lldProgram = findTool(toolNames);
   if (lldProgram.empty()) {
     llvm::WithColor::error(llvm::errs(), name)
@@ -177,7 +177,7 @@ std::string createHsaco(const std::string isa, StringRef name) {
 #if defined(_WIN32)
   llvm::StringRef lldName = "iree-lld.exe";
 #else
-  llvm::StringRef lldName = "iree-lld";
+  llvm::StringRef lldName = "lld";
 #endif // _WIN32
   std::vector<llvm::StringRef> lldArgs{
       lldName,   llvm::StringRef("-flavor"),

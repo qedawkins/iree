@@ -13,6 +13,7 @@
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "mlir/Dialect/AMDGPU/IR/AMDGPUDialect.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/NVGPU/IR/NVGPUDialect.h"
 #include "mlir/Dialect/PDL/IR/PDL.h"
@@ -50,6 +51,7 @@ public:
                 linalg::transform::LinalgTransformDialect,
                 gpu::GPUDialect,
                 nvgpu::NVGPUDialect,
+                amdgpu::AMDGPUDialect,
                 pdl::PDLDialect,
                 pdl_interp::PDLInterpDialect,
                 scf::SCFDialect,

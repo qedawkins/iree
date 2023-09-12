@@ -53,6 +53,7 @@ iree_cc_library(
     "ExtractAddressComputationGPUPass.cpp"
     "KernelConfig.cpp"
     "LLVMGPUCastAddressSpaceFunction.cpp"
+    "LLVMGPUConvertLoadToAMDGPUBufferLoadPass.cpp"
     "LLVMGPULowerExecutableTarget.cpp"
     "LLVMGPUPackSharedMemoryAlloc.cpp"
     "LLVMGPUTensorCoreVectorization.cpp"
@@ -73,6 +74,7 @@ iree_cc_library(
     LLVMSupport
     MLIRAffineDialect
     MLIRAffineToStandard
+    MLIRAMDGPUDialect
     MLIRAnalysis
     MLIRArithDialect
     MLIRArithToLLVM
