@@ -182,17 +182,6 @@ public:
                  << "invalid subgroup size " << subgroupSize;
         }
         setSubgroupSize = subgroupSize;
-        llvm::Type *i8Ty = llvm::Type::getInt8Ty(llvmModule->getContext());
-        llvm::GlobalVariable *controlVariable = new llvm::GlobalVariable(
-            *llvmModule, i8Ty, true,
-            llvm::GlobalValue::LinkageTypes::LinkOnceODRLinkage,
-            llvm::ConstantInt::get(i8Ty, subgroupSize == 64),
-            "__oclc_wavefrontsize64", nullptr,
-            llvm::GlobalValue::ThreadLocalMode::NotThreadLocal, 4);
-        controlVariable->setVisibility(
-            llvm::GlobalValue::VisibilityTypes::ProtectedVisibility);
-        controlVariable->setAlignment(llvm::MaybeAlign(1));
-        controlVariable->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Local);
       }
       workgroupSizes.push_back(workgroupSize);
       uint32_t workgroupLocalMemory = 0;
@@ -220,8 +209,13 @@ public:
       if (target == nullptr) {
         return variantOp.emitError() << "cannot initialize target triple";
       }
-      targetMachine.reset(
-          target->createTargetMachine(triple.str(), targetChip, {}, {}, {}));
+      if (setSubgroupSize && *setSubgroupSize == 64) {
+        targetMachine.reset(target->createTargetMachine(
+            triple.str(), targetChip, "+wavefrontsize64", {}, {}));
+      } else {
+        targetMachine.reset(
+            target->createTargetMachine(triple.str(), targetChip, {}, {}, {}));
+      }
       if (targetMachine == nullptr) {
         return variantOp.emitError() << "cannot initialize target machine";
       }
