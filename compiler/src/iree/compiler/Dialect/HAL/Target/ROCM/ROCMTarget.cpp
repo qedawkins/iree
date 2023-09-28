@@ -150,6 +150,7 @@ public:
     }
     std::vector<std::array<int32_t, 3>> workgroupSizes;
     SmallVector<uint32_t> workgroupLocalMemories;
+    std::optional<int32_t> setSubgroupSize;
     for (auto func : innerModuleOp.getOps<LLVM::LLVMFuncOp>()) {
       int32_t flatWgSize = 1;
       auto *llvmFunc = llvmModule->getFunction(func.getName());
@@ -165,6 +166,33 @@ public:
         }
       } else {
         workgroupSize = {1, 1, 1};
+      }
+      int32_t subgroupSize = 32;
+      if (auto maybeSubgroupSize = getSubgroupSize(exportOp)) {
+        subgroupSize = *maybeSubgroupSize;
+      }
+      if (setSubgroupSize) {
+        if (*setSubgroupSize != subgroupSize) {
+          return variantOp.emitError()
+                 << "subgroup size mismatch among rocdl funcs";
+        }
+      } else {
+        if (subgroupSize != 32 && subgroupSize != 64) {
+          return variantOp.emitError()
+                 << "invalid subgroup size " << subgroupSize;
+        }
+        setSubgroupSize = subgroupSize;
+        llvm::Type *i8Ty = llvm::Type::getInt8Ty(llvmModule->getContext());
+        llvm::GlobalVariable *controlVariable = new llvm::GlobalVariable(
+            *llvmModule, i8Ty, true,
+            llvm::GlobalValue::LinkageTypes::LinkOnceODRLinkage,
+            llvm::ConstantInt::get(i8Ty, subgroupSize == 64),
+            "__oclc_wavefrontsize64", nullptr,
+            llvm::GlobalValue::ThreadLocalMode::NotThreadLocal, 4);
+        controlVariable->setVisibility(
+            llvm::GlobalValue::VisibilityTypes::ProtectedVisibility);
+        controlVariable->setAlignment(llvm::MaybeAlign(1));
+        controlVariable->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Local);
       }
       workgroupSizes.push_back(workgroupSize);
       uint32_t workgroupLocalMemory = 0;

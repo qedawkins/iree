@@ -79,6 +79,8 @@ struct TargetInfo {
   bool hasTF32TensorCore = false;
   bool hasWarpShuffle = false;
   bool hasMmaSync = false;
+  int64_t minWarpSize = cudaWarpSize;
+  int64_t maxWarpSize = cudaWarpSize;
 };
 
 struct TileWorkgroupSizePair {
@@ -212,6 +214,8 @@ static TargetInfo getRocmTargetInfo(func::FuncOp entryPoint) {
   }
   // Assumes all gfx has warp shuffle.
   info.hasWarpShuffle = true;
+  info.minWarpSize = 32;
+  info.maxWarpSize = 64;
   // TODO: Check and enable for WMMA once pipeline is available.
   return info;
 }
@@ -322,7 +326,8 @@ static LogicalResult setContractConfig(func::FuncOp entryPoint,
       [&entryPoint, &op](int64_t tileX, int64_t tileY, int64_t tileK,
                          llvm::ArrayRef<int64_t> workgroupSize,
                          unsigned softwarePipelineDepth,
-                         IREE::Codegen::DispatchLoweringPassPipeline pipeline) {
+                         IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+                         int64_t warpSize) {
         TileSizesListType tileSizes;
         unsigned numParallelLoops = op.getNumParallelLoops();
         SmallVector<int64_t> workgroupTileSizes(numParallelLoops - 2, 1);
@@ -345,7 +350,7 @@ static LogicalResult setContractConfig(func::FuncOp entryPoint,
             std::move(workgroupTileSizes)); // Workgroup level.
         return setOpConfigAndEntryPointFnTranslation(
             entryPoint, op, tileSizes, pipeline, workgroupSize,
-            /*subgroupSize=*/std::nullopt, softwarePipelineDepth);
+            /*subgroupSize=*/warpSize, softwarePipelineDepth);
       };
   // Infer the MxN size of the matmul based on operands and indexing maps.
   auto lhsShape =
@@ -407,15 +412,16 @@ static LogicalResult setContractConfig(func::FuncOp entryPoint,
               config.tileSize[0], config.tileSize[1], config.tileSize[2],
               config.workgroupSize,
               sizeK == config.tileSize[2] ? 1 : config.pipelineDepth,
-              codegenPipeline);
+              codegenPipeline, targetInfo.minWarpSize);
         }
       }
     }
     // Special case for very small matrices.
-    if (sizeM * sizeN <= cudaWarpSize) {
+    if (sizeM * sizeN <= targetInfo.minWarpSize) {
       return setMatmulConfig(
           sizeN, sizeM, 4, {sizeM, sizeN, 1}, softwarePipelineDepthSimt,
-          IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUMatmulSimt);
+          IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUMatmulSimt,
+          targetInfo.minWarpSize);
     }
     // simt matmul case
     SmallVector<TileWorkgroupSizePair> tileSizeConfig;
@@ -429,7 +435,8 @@ static LogicalResult setContractConfig(func::FuncOp entryPoint,
         return setMatmulConfig(
             config.tileSize[0], config.tileSize[1], config.tileSize[2],
             config.workgroupSize, softwarePipelineDepthSimt,
-            IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUMatmulSimt);
+            IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUMatmulSimt,
+            targetInfo.minWarpSize);
       }
     }
   }
@@ -455,17 +462,19 @@ static LogicalResult setContractConfig(func::FuncOp entryPoint,
                                              config.workgroupSize[2]};
   return setMatmulConfig(
       tileX, tileY, tileK, workgroupSize, softwarePipelineDepthSimt,
-      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUMatmulSimt);
+      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUMatmulSimt,
+      targetInfo.minWarpSize);
 }
 
 static LogicalResult setFftConfig(func::FuncOp entryPoint,
-                                  IREE::LinalgExt::FftOp op) {
+                                  IREE::LinalgExt::FftOp op,
+                                  const TargetInfo &targetInfo) {
   auto interfaceOp = cast<PartitionableLoopsInterface>(*op);
   auto partitionedLoops =
       interfaceOp.getPartitionableLoops(kNumMaxParallelDims);
   unsigned loopDepth = partitionedLoops.back() + 1;
   SmallVector<int64_t> workgroupTileSize(loopDepth, 0);
-  SmallVector<int64_t, 3> workgroupSize = {cudaWarpSize, 1, 1};
+  SmallVector<int64_t, 3> workgroupSize = {targetInfo.maxWarpSize, 1, 1};
 
   // Tiling along partitioned loops with size 1.
   for (int64_t loopIndex : partitionedLoops) {
@@ -485,10 +494,11 @@ static LogicalResult setFftConfig(func::FuncOp entryPoint,
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, tileSizes,
       IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUDistribute,
-      workgroupSize);
+      workgroupSize, targetInfo.maxWarpSize);
 }
 
-static LogicalResult setSortConfig(func::FuncOp entryPoint, Operation *op) {
+static LogicalResult setSortConfig(func::FuncOp entryPoint, Operation *op,
+                                   const TargetInfo &targetInfo) {
   TileSizesListType tileSizes;
   auto interfaceOp = cast<PartitionableLoopsInterface>(*op);
   auto partitionedLoops =
@@ -502,7 +512,7 @@ static LogicalResult setSortConfig(func::FuncOp entryPoint, Operation *op) {
   }
   size_t numLoops = partitionedLoops.back() + 1;
   // To get peak occupancy we need a workgroup size of at least two warps
-  std::array<int64_t, 3> workgroupSize = {2 * cudaWarpSize, 1, 1};
+  std::array<int64_t, 3> workgroupSize = {2 * targetInfo.maxWarpSize, 1, 1};
   SmallVector<int64_t> workgroupTileSizes(numLoops, 1);
   // Set all non-parallel loops to zero tile size.
   llvm::DenseSet<unsigned> partitionedLoopsSet(partitionedLoops.begin(),
@@ -524,7 +534,7 @@ static LogicalResult setSortConfig(func::FuncOp entryPoint, Operation *op) {
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, tileSizes,
       IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUDistribute,
-      workgroupSize);
+      workgroupSize, targetInfo.maxWarpSize);
 }
 
 static SmallVector<int64_t>
@@ -546,9 +556,10 @@ getDefaultWorkgroupTileSizesForPackUnPack(TilingInterface op,
 }
 
 static LogicalResult setPackConfig(func::FuncOp entryPoint,
-                                   tensor::PackOp packOp) {
+                                   tensor::PackOp packOp,
+                                   const TargetInfo &targetInfo) {
   SmallVector<int64_t> tileSizes = getDefaultWorkgroupTileSizesForPackUnPack(
-      cast<TilingInterface>(packOp.getOperation()), cudaWarpSize);
+      cast<TilingInterface>(packOp.getOperation()), targetInfo.maxWarpSize);
 
   // The default function aims to returns the number of workload per workgroup,
   // but it does not know that it is working on packed domain. We need to take
@@ -563,16 +574,17 @@ static LogicalResult setPackConfig(func::FuncOp entryPoint,
   }
 
   TileSizesListType tileSizesList = {tileSizes};
-  std::array<int64_t, 3> workgroupSizes = {cudaWarpSize, 1, 1};
+  std::array<int64_t, 3> workgroupSizes = {targetInfo.maxWarpSize, 1, 1};
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, packOp, tileSizesList,
       IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUPackUnPack,
-      workgroupSizes);
+      workgroupSizes, targetInfo.maxWarpSize);
 }
 
 // Basic default properties for linalg ops that haven't been tuned.
 static LogicalResult setRootDefaultConfig(func::FuncOp entryPoint,
-                                          Operation *op) {
+                                          Operation *op,
+                                          const TargetInfo &targetInfo) {
   IREE::Codegen::DispatchLoweringPassPipeline passPipeline =
       IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUDistribute;
   TileSizesListType tileSizes;
@@ -581,12 +593,13 @@ static LogicalResult setRootDefaultConfig(func::FuncOp entryPoint,
   if (partitionedLoops.empty()) {
     tileSizes.push_back({});
     return setOpConfigAndEntryPointFnTranslation(entryPoint, op, tileSizes,
-                                                 passPipeline, {1, 1, 1});
+                                                 passPipeline, {1, 1, 1},
+                                                 targetInfo.minWarpSize);
   }
 
   size_t numLoops = partitionedLoops.back() + 1;
   // To get peak occupancy we need a workgroup size of at least two warps
-  std::array<int64_t, 3> workgroupSize = {2 * cudaWarpSize, 1, 1};
+  std::array<int64_t, 3> workgroupSize = {2 * targetInfo.maxWarpSize, 1, 1};
   unsigned vectorSize = 4;
   SmallVector<int64_t> workgroupTileSizes(numLoops, 1);
   // Set all non-parallel loops to zero tile size.
@@ -623,7 +636,7 @@ static LogicalResult setRootDefaultConfig(func::FuncOp entryPoint,
       int64_t problemSize = std::accumulate(
           shape.begin(), shape.end(), 1,
           [](const int64_t &a, const int64_t &b) { return a * b; });
-      if ((problemSize / (cudaWarpSize * vectorSize)) < 64) {
+      if ((problemSize / (targetInfo.maxWarpSize * vectorSize)) < 64) {
         vectorSize = 1;
         break;
       }
@@ -695,7 +708,8 @@ static LogicalResult setRootDefaultConfig(func::FuncOp entryPoint,
   }
   tileSizes.emplace_back(std::move(workgroupTileSizes)); // Workgroup level
   return setOpConfigAndEntryPointFnTranslation(entryPoint, op, tileSizes,
-                                               passPipeline, workgroupSize);
+                                               passPipeline, workgroupSize,
+                                               targetInfo.maxWarpSize);
 }
 
 /// Return the size of the given dimension in the linalg op.
@@ -846,7 +860,10 @@ static LogicalResult setWarpReductionConfig(func::FuncOp entryPoint,
   int64_t dimSize = 1;
   for (int64_t dim : reductionDims)
     dimSize *= bounds[dim];
-  if (dimSize % cudaWarpSize != 0)
+  int64_t subgroupSize = targetInfo.maxWarpSize;
+  if (dimSize % subgroupSize != 0)
+    subgroupSize = targetInfo.minWarpSize;
+  if (dimSize % subgroupSize != 0)
     return failure();
 
   const Type elementType =
@@ -862,7 +879,7 @@ static LogicalResult setWarpReductionConfig(func::FuncOp entryPoint,
 
   const unsigned largestLoadSizeInBits = 128;
   unsigned vectorSize = largestLoadSizeInBits / bitWidth;
-  while ((dimSize / vectorSize) % cudaWarpSize != 0)
+  while ((dimSize / vectorSize) % subgroupSize != 0)
     vectorSize /= 2;
 
   // TODO: Add reduction tiling to handle larger reductions.
@@ -900,7 +917,7 @@ static LogicalResult setWarpReductionConfig(func::FuncOp entryPoint,
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, tileSizes,
       IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUWarpReduction,
-      workgroupSize);
+      workgroupSize, subgroupSize);
   return success();
 }
 
@@ -1132,8 +1149,8 @@ static LogicalResult setConvolutionConfig(linalg::LinalgOp linalgOp,
   windowTileSizes[ohIndex] = 1;
   tileSizes.push_back(windowTileSizes);
   auto funcOp = linalgOp->getParentOfType<func::FuncOp>();
-  return setOpConfigAndEntryPointFnTranslation(funcOp, linalgOp, tileSizes,
-                                               pipeline, workgroupSize);
+  return setOpConfigAndEntryPointFnTranslation(
+      funcOp, linalgOp, tileSizes, pipeline, workgroupSize, subgroupSize);
 }
 
 static LogicalResult setRootConfig(func::FuncOp entryPointFn,
@@ -1157,7 +1174,7 @@ static LogicalResult setRootConfig(func::FuncOp entryPointFn,
     if (succeeded(setWarpReductionConfig(entryPointFn, linalgOp, targetInfo))) {
       return success();
     }
-    if (succeeded(setConvolutionConfig(linalgOp, 32, 16))) {
+    if (succeeded(setConvolutionConfig(linalgOp, targetInfo.maxWarpSize, 16))) {
       return success();
     }
     auto genericOp = dyn_cast<linalg::GenericOp>(computeOp);
@@ -1178,19 +1195,19 @@ static LogicalResult setRootConfig(func::FuncOp entryPointFn,
   }
 
   if (auto fftOp = dyn_cast<IREE::LinalgExt::FftOp>(computeOp)) {
-    return setFftConfig(entryPointFn, fftOp);
+    return setFftConfig(entryPointFn, fftOp, targetInfo);
   }
   if (auto sortOp = dyn_cast<IREE::LinalgExt::SortOp>(computeOp)) {
-    return setSortConfig(entryPointFn, sortOp);
+    return setSortConfig(entryPointFn, sortOp, targetInfo);
   }
   if (auto packOp = dyn_cast<tensor::PackOp>(computeOp)) {
-    return setPackConfig(entryPointFn, packOp);
+    return setPackConfig(entryPointFn, packOp, targetInfo);
   }
   if (auto ukernelOp = dyn_cast<IREE::Codegen::UKernelOpInterface>(computeOp)) {
     return setUKernelConfig(entryPointFn, ukernelOp);
   }
 
-  return setRootDefaultConfig(entryPointFn, computeOp);
+  return setRootDefaultConfig(entryPointFn, computeOp, targetInfo);
 }
 
 namespace mlir {

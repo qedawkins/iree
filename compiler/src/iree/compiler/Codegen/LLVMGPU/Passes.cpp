@@ -33,6 +33,8 @@
 
 #define DEBUG_TYPE "iree-llvm-gpu-lowering-pass-pipeline"
 
+static constexpr unsigned cudaWarpSize = 32;
+
 namespace mlir {
 namespace iree_compiler {
 
@@ -404,9 +406,18 @@ void addGPUWarpReductionPassPipeline(OpPassManager &pm) {
   nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
   nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
 
+  auto getWarpSize = [](func::FuncOp func) {
+    auto moduleOp = func->getParentOfType<ModuleOp>();
+    llvm::StringMap<IREE::HAL::ExecutableExportOp> exportOps =
+        getAllEntryPoints(moduleOp);
+    auto exportOp = exportOps.lookup(func.getName());
+    std::optional<int64_t> maybeSubgroupSize = getSubgroupSize(exportOp);
+    return maybeSubgroupSize ? *maybeSubgroupSize : cudaWarpSize;
+  };
+
   // vector -> simt gpu + vector
   nestedModulePM.addNestedPass<func::FuncOp>(
-      createConvertVectorReductionToGPUPass());
+      createConvertVectorReductionToGPUPass(getWarpSize));
   nestedModulePM.addPass(createCanonicalizerPass());
   nestedModulePM.addPass(createCSEPass());
 }
