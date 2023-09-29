@@ -32,11 +32,6 @@ static constexpr unsigned cudaWarpSize = 32;
 static constexpr StringLiteral kCudaTarget = "cuda";
 namespace mlir {
 namespace iree_compiler {
-llvm::cl::opt<std::string> clGPUCodegenTransformDialectFileName(
-    "iree-codegen-llvmgpu-use-transform-dialect",
-    llvm::cl::desc(
-        "MLIR file containing a transform dialect specification to apply"),
-    llvm::cl::init(""));
 
 llvm::cl::opt<bool> clGPUEnableTransformDialectJit(
     "iree-codegen-llvmgpu-enable-transform-dialect-jit",

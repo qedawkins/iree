@@ -338,62 +338,12 @@ LogicalResult setDispatchConfig(func::FuncOp entryPoint,
   return success();
 }
 
-static void createIncludeTransformStrategy(func::FuncOp entryPoint,
-                                           SymbolRefAttr strategySymbol) {
-  MLIRContext *ctx = entryPoint.getContext();
-  Location loc = entryPoint.getLoc();
-  OpBuilder b(ctx);
-  b.setInsertionPointAfter(entryPoint);
-  auto topLevelTransformModule = b.create<ModuleOp>(loc);
-  topLevelTransformModule->setAttr(
-      transform::TransformDialect::kWithNamedSequenceAttrName, b.getUnitAttr());
-  Region &topLevelTransformRegion = topLevelTransformModule.getBodyRegion();
-  b.setInsertionPointToStart(&topLevelTransformRegion.front());
-  auto anyOpType = transform::AnyOpType::get(b.getContext());
-
-  // Create the internal named sequence op to be linked against.
-  auto funcTypeAttr =
-      TypeAttr::get(FunctionType::get(ctx, anyOpType, TypeRange{}));
-  auto symVisibility = StringAttr::get(ctx, "public");
-  // Pessimistically assume the handle is consumed as we don't yet know the
-  // contents of the strategy.
-  auto consumedName =
-      StringAttr::get(ctx, transform::TransformDialect::kArgConsumedAttrName);
-  auto argAttrs =
-      ArrayAttr::get(ctx, ArrayRef<Attribute>{b.getDictionaryAttr(
-                              b.getNamedAttr(consumedName, b.getUnitAttr()))});
-  auto resAttrs = ArrayAttr::get(ctx, ArrayRef<Attribute>{});
-  auto namedSequence = b.create<transform::NamedSequenceOp>(
-      loc, TypeRange{}, strategySymbol.getRootReference(), funcTypeAttr,
-      symVisibility, argAttrs, resAttrs);
-  (void)namedSequence;
-
-  // Create the include for the named sequence with the expectation that the
-  // external definition will be linked in later.
-  auto propMode = transform::FailurePropagationMode::Propagate;
-  auto sequence = b.create<transform::SequenceOp>(
-      loc, TypeRange{}, transform::FailurePropagationMode::Propagate, anyOpType,
-      [&](OpBuilder &b, Location loc, Value variantH) {
-        b.create<transform::IncludeOp>(loc, TypeRange{}, strategySymbol,
-                                       propMode, variantH);
-        b.create<transform::YieldOp>(loc);
-      });
-  (void)sequence;
-}
-
 LogicalResult
 setTranslationInfo(func::FuncOp entryPoint,
                    IREE::Codegen::TranslationInfoAttr translationInfo) {
   FailureOr<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(entryPoint);
   if (failed(exportOp))
     return failure();
-  // If the codegen spec comes from a symbol reference, we construct the
-  // strategy here and assume the library containing the correct reference to
-  // the strategy is included with the interpreter pipeline.
-  if (translationInfo.getCodegenSpec() != SymbolRefAttr()) {
-    createIncludeTransformStrategy(entryPoint,
-                                   translationInfo.getCodegenSpec());
-  }
   exportOp.value()->setAttr(kTranslationInfoAttrName, translationInfo);
   return success();
 }
