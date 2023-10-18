@@ -43,6 +43,11 @@ void buildGlobalOptimizationPassPipeline(
     mainPassManager.addPass(IREE::Util::createDemoteI64ToI32Pass());
   }
 
+  if (!transformOptions.options.customDispatchPatternModuleFileName.empty()) {
+    mainPassManager.addPass(createMaterializeExternDispatchesPass(
+        transformOptions.options.customDispatchPatternModuleFileName));
+  }
+
   // Preprocessing passes to get the program into a canonical state.
   FunctionLikeNest(mainPassManager)
       .addPass(createRemoveZeroExtentTensorsPass)

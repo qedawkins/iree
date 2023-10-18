@@ -18,6 +18,7 @@ iree_compiler_cc_library(
     name = "Utils",
     srcs = [
         "ConversionUtils.cpp",
+        "CustomPatternApplicatorPassBase.cpp",
         "ElementPackingUtils.cpp",
         "FlatbufferUtils.cpp",
         "ModuleUtils.cpp",
@@ -29,6 +30,7 @@ iree_compiler_cc_library(
     ],
     hdrs = [
         "ConversionUtils.h",
+        "CustomPatternApplicatorPassBase.h",
         "ElementPackingUtils.h",
         "FlatbufferUtils.h",
         "IndexSet.h",

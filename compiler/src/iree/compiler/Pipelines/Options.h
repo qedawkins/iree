@@ -99,6 +99,9 @@ struct GlobalOptimizationOptions {
   // allow hoisting. The threshold is 1MB by default.
   int64_t constExprMaxSizeIncreaseThreshold = 1024 * 1024;
 
+  // File path to load custom dispatch rewrite patterns from.
+  std::string customDispatchPatternModuleFileName = "";
+
   void bindOptions(OptionsBinder &binder);
   using FromFlags = OptionsFromFlags<GlobalOptimizationOptions>;
 };

@@ -9,6 +9,7 @@
 
 include "mlir/Pass/PassBase.td"
 
+<<<<<<< HEAD
 def Convert1X1FilterConv2DToMatmul:
     Pass<"iree-global-opt-convert-1x1-filter-conv2d-to-matmul", ""> {
   let summary = "Convert linalg convolution ops with 1x1 kernels into linalg matrix multiplication ops.";
@@ -25,6 +26,18 @@ def EraseUnusedLinalgOperands :
     Pass<"iree-global-opt-erase-unused-linalg-operands", "mlir::ModuleOp"> {
   let summary = "Erase unused linalg operand and remove dead code.";
   let constructor = "mlir::iree_compiler::GlobalOptimization::createEraseUnusedLinalgOperands()";
+}
+
+def MaterializeExternDispatchesPass :
+    Pass<"iree-materialize-extern-dispatches", "mlir::ModuleOp"> {
+  let summary = "Pass to form custom external dispatches";
+  let constructor =
+    "mlir::iree_compiler::GlobalOptimization::createMaterializeExternDispatchesPass()";
+  let options = [
+    Option<"pdlModuleFileName", "pdl-module-file-name", "std::string",
+            /*default=*/"\"\"",
+            "Optional file name to load a pdl module from.">
+  ];
 }
 
 def MaterializeHomogeneousEncodings :

@@ -15,6 +15,9 @@ iree_cc_library(
     Utils
   HDRS
     "DeviceSwitchBuilder.h"
+    "ExternBuildingUtils.h"
+  SRCS
+    "ExternBuildingUtils.cpp"
   DEPS
     LLVMSupport
     MLIRFuncDialect
