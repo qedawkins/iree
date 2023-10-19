@@ -9,7 +9,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-<<<<<<< HEAD
 def Convert1X1FilterConv2DToMatmul:
     Pass<"iree-global-opt-convert-1x1-filter-conv2d-to-matmul", ""> {
   let summary = "Convert linalg convolution ops with 1x1 kernels into linalg matrix multiplication ops.";
