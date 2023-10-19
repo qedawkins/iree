@@ -42,9 +42,11 @@ iree_cc_library(
     MLIRArithDialect
     MLIRFuncDialect
     MLIRIR
+    MLIRPDLDialect
     MLIRParser
     MLIRPass
     MLIRSupport
+    MLIRTensorDialect
     MLIRTransformUtils
     MLIRTransforms
     iree::base
