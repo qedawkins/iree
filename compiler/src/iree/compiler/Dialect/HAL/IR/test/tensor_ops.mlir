@@ -86,9 +86,12 @@ func.func @dispatchExtern(%arg0: tensor<4xi32>, %arg1: tensor<8xi32>, %arg2: i32
       #hal.interface.binding<0, 1>
     ])
     // Can have object references for multiple targets or configurations.
-    objects(#hal.executable.objects<{
+    objects({
       #hal.executable.target<"llvm-cpu", "a"> = [#hal.executable.object<{path = "a.o"}>],
-      #hal.executable.target<"llvm-cpu", "b"> = [#hal.executable.object<{path = "b.o"}>]
-    }>)
+      #hal.executable.target<"llvm-cpu", "b"> if(%device: !hal.device) -> i1 {
+        %ok, %z_i32 = hal.device.query<%device : !hal.device> key("some" :: "feature") : i1, i32
+        hal.return %ok : i1
+      } = [#hal.executable.object<{path = "b.o"}>]
+    })
   return %0 : tensor<8xi32>
 }

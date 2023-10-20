@@ -516,6 +516,7 @@ void DispatchExternOp::build(OpBuilder &builder, OperationState &state,
                              ValueRange resultDims, ValueRange arguments,
                              ValueRange argumentDims,
                              ArrayRef<int64_t> tiedOperands,
+                             IREE::HAL::ExecutableObjectsAttr targetObjects,
                              ArrayRef<NamedAttribute> attributes) {
   state.addTypes(resultTypes);
   state.addOperands(workload);
@@ -526,6 +527,8 @@ void DispatchExternOp::build(OpBuilder &builder, OperationState &state,
   state.attributes.erase(IREE::Util::TiedOpInterface::getStorageAttrName());
   state.addAttribute(IREE::Util::TiedOpInterface::getStorageAttrName(),
                      builder.getIndexArrayAttr(tiedOperands));
+  state.addAttribute("targets", targetObjects.getTargets());
+  state.addAttribute("target_objects", targetObjects.getTargetObjects());
   state.attributes.erase(getOperandSegmentSizeAttr());
   state.addAttribute(getOperandSegmentSizeAttr(),
                      builder.getDenseI32ArrayAttr({
@@ -537,6 +540,10 @@ void DispatchExternOp::build(OpBuilder &builder, OperationState &state,
 
   // NOTE: workgroup count region is empty; callers are expected to populate it.
   state.addRegion();
+
+  // Add one empty region per target.
+  for (size_t i = 0; i < targetObjects.getTargets().size(); ++i)
+    state.addRegion();
 }
 
 // Verifies that |dynamicDims| contains the appropriate number of dims for all
@@ -616,6 +623,19 @@ LogicalResult DispatchExternOp::verify() {
   if (failed(
           verifyWorkgroupCountRegion(op, getWorkload(), getWorkgroupCount()))) {
     return failure();
+  }
+
+  if (getTargets().size() != getTargetObjects().size()) {
+    return op->emitOpError() << "target and objects arrays must match";
+  }
+  if (getTargets().size() != getTargetRegions().size()) {
+    return op->emitOpError()
+           << "target and condition regions must match (but they may be empty)";
+  }
+  for (auto &targetRegion : getTargetRegions()) {
+    if (failed(verifyTargetConditionRegion(op, targetRegion))) {
+      return failure();
+    }
   }
 
   return success();
