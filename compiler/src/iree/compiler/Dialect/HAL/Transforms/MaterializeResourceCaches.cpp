@@ -91,8 +91,7 @@ public:
     for (auto executableOp : executableOps) {
       for (auto variantOp :
            executableOp.getOps<IREE::HAL::ExecutableVariantOp>()) {
-        for (auto exportOp :
-             variantOp.getOps<IREE::HAL::ExecutableExportOp>()) {
+        for (auto exportOp : variantOp.getExportOps()) {
           definePipelineLayoutOp(exportOp.getLoc(), exportOp.getLayout());
         }
       }
@@ -239,8 +238,7 @@ private:
       // Gather each of the pipeline layouts needed for each entry point in
       // the executable.
       SmallVector<Value, 8> pipelineLayoutValues;
-      for (auto exportOp :
-           executableVariantOp.getOps<IREE::HAL::ExecutableExportOp>()) {
+      for (auto exportOp : executableVariantOp.getExportOps()) {
         auto pipelineLayoutGlobalOp =
             definePipelineLayoutOp(executableOp.getLoc(), exportOp.getLayout());
         pipelineLayoutValues.push_back(
@@ -254,8 +252,7 @@ private:
       // get deduplicated/hoisted if possible in future canonicalization passes.
       SmallVector<Value> constantValues;
       for (auto blockOp : llvm::make_early_inc_range(
-               executableVariantOp
-                   .getOps<IREE::HAL::ExecutableConstantBlockOp>())) {
+               executableVariantOp.getConstantBlockOps())) {
         constantValues.append(inlineConstantBlockOp(blockOp, moduleBuilder,
                                                     caseBuilder, deviceValue));
         blockOp.erase();

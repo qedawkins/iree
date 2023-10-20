@@ -394,10 +394,10 @@ def HAL_DispatchExternOp : HAL_PureOp<"dispatch.extern", [
                                type($arguments), $argument_dims,
                                type($results), $result_dims,
                                $tied_operands)
+    `count` `` custom<WorkgroupCountRegion>($workgroup_count)
     `layout` `(` $layout `)`
     (`bindings` `(` $bindings^ `)`)?
     `objects` `(` $objects `)`
-    `count` `` custom<WorkgroupCountRegion>($workgroup_count)
     attr-dict-with-keyword
   }];
 
@@ -1955,18 +1955,29 @@ def HAL_ExecutableSourceOp : HAL_Op<"executable.source", [
     OptionalAttr<HAL_ExecutableObjectsAttr>:$objects
   );
 
-  let regions = (region SizedRegion<1>:$body);
+  let regions = (region
+    SizedRegion<1>:$body
+  );
 
   let assemblyFormat = [{
     custom<SymbolVisibility>($sym_visibility)
     $sym_name
     attr-dict-with-keyword
     ``
-    regions
+    $body
   }];
 
   let extraClassDeclaration = [{
     Block& getBlock() { return getBody().front(); }
+
+    iterator_range<Region::op_iterator<IREE::HAL::ExecutableConstantBlockOp>>
+    getConstantBlockOps() {
+      return getBody().getOps<IREE::HAL::ExecutableConstantBlockOp>();
+    }
+    iterator_range<Region::op_iterator<IREE::HAL::ExecutableExportOp>>
+    getExportOps() {
+      return getBody().getOps<IREE::HAL::ExecutableExportOp>();
+    }
 
     bool isExternal() {
       return getBlock().getOps<::mlir::ModuleOp>().empty();
@@ -2106,14 +2117,18 @@ def HAL_ExecutableExportOp : HAL_Op<"executable.export", [
 def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
     IsolatedFromAbove,
     HasParent<"IREE::HAL::ExecutableOp">,
-    SingleBlockImplicitTerminator<"IREE::HAL::ExecutableVariantEndOp">,
     Symbol,
-    SymbolTable,
   ]> {
   let summary = [{target-specific variant of an executable op}];
   let description = [{
     The target IR for the executable. This can be preserved for debugging but
     is usually removed during transformation.
+
+    Variants are selected based on their target and an optional condition
+    region that returns true if the variant is valid for use on the provided
+    runtime `!hal.device`. If no variants within an executable are valid then
+    loading will fail at runtime. If multiple variants are valid the first valid
+    one found will be loaded and used for execution.
   }];
 
   let arguments = (ins
@@ -2123,15 +2138,19 @@ def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
     OptionalAttr<HAL_ExecutableObjectArrayAttr>:$objects
   );
 
-  let regions = (region SizedRegion<1>:$body);
+  let regions = (region
+    SizedRegion<1>:$body,
+    AnyRegion:$condition
+  );
 
   let assemblyFormat = [{
     custom<SymbolVisibility>($sym_visibility)
     $sym_name
     `target` `(` $target `)`
+    (`if` `` custom<TargetConditionRegion>($condition)^)?
     (`objects` `(` $objects^ `)` )?
     attr-dict-with-keyword
-    regions
+    custom<ExecutableVariantBody>($body)
   }];
 
   let skipDefaultBuilders = 1;
@@ -2141,6 +2160,15 @@ def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
 
   let extraClassDeclaration = [{
     Block& getBlock() { return getBody().front(); }
+
+    iterator_range<Region::op_iterator<IREE::HAL::ExecutableConstantBlockOp>>
+    getConstantBlockOps() {
+      return getBody().getOps<IREE::HAL::ExecutableConstantBlockOp>();
+    }
+    iterator_range<Region::op_iterator<IREE::HAL::ExecutableExportOp>>
+    getExportOps() {
+      return getBody().getOps<IREE::HAL::ExecutableExportOp>();
+    }
 
     bool isExternal() {
       return getBlock().getOps<::mlir::ModuleOp>().empty();
@@ -2158,6 +2186,7 @@ def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
   }];
 
   let hasCanonicalizer = 1;
+  let hasVerifier = 1;
 }
 
 def HAL_ExecutableVariantEndOp : HAL_Op<"executable.variant_end", [

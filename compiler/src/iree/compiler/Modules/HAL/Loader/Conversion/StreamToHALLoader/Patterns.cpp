@@ -79,7 +79,7 @@ struct CmdDispatchOpPattern
     // TODO(benvanik): a real switch op. For now we inline what the
     // hal.device.switch op does.
     for (auto variantOp : variantOps) {
-      auto exportOps = variantOp.getOps<IREE::HAL::ExecutableExportOp>();
+      auto exportOps = variantOp.getExportOps();
       auto exportIt =
           llvm::find_if(exportOps, [&](IREE::HAL::ExecutableExportOp op) {
             return op.getNameAttr() == entryPointAttr.getLeafReference();

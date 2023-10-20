@@ -114,6 +114,136 @@ static void printDescriptorSetBindings(OpAsmPrinter &p, Operation *op,
 }
 
 //===----------------------------------------------------------------------===//
+// custom<TargetConditionRegion>($body)
+//===----------------------------------------------------------------------===//
+
+static LogicalResult verifyTargetConditionRegion(Operation *op,
+                                                 Region &region) {
+  // Ignore if empty.
+  if (region.empty())
+    return success();
+
+  // Verify region takes a !hal.device.
+  if (region.getNumArguments() != 1 ||
+      !isa<IREE::HAL::DeviceType>(region.getArgumentTypes().front())) {
+    return op->emitOpError()
+           << "target condition region must take a !hal.device";
+  }
+
+  // Verify i1 return.
+  for (auto returnOp : region.getOps<IREE::HAL::ReturnOp>()) {
+    if (returnOp.getNumOperands() != 1) {
+      return returnOp.emitOpError()
+             << "target condition region must return a single i1 result";
+    }
+    for (auto returnType : returnOp.getOperandTypes()) {
+      if (!returnType.isInteger(1)) {
+        return returnOp.emitOpError()
+               << "target condition region must return a single i1 result";
+      }
+    }
+  }
+
+  return success();
+}
+
+static ParseResult parseTargetConditionRegion(OpAsmParser &parser,
+                                              Region &body) {
+  SmallVector<OpAsmParser::Argument> args;
+  if (failed(parser.parseArgumentList(args, AsmParser::Delimiter::Paren,
+                                      /*allowType=*/true,
+                                      /*allowAttrs=*/true))) {
+    return failure();
+  }
+
+  SmallVector<Type> returnTypes;
+  if (failed(parser.parseArrowTypeList(returnTypes))) {
+    return failure();
+  }
+  if (returnTypes.size() != 1 ||
+      !llvm::all_of(returnTypes, [](Type type) { return type.isInteger(1); })) {
+    return parser.emitError(parser.getCurrentLocation())
+           << "target condition region must return one i1";
+  }
+
+  return parser.parseRegion(body, args, /*enableNameShadowing=*/false);
+}
+
+static void printTargetConditionRegion(OpAsmPrinter &p, Operation *op,
+                                       Region &body) {
+  if (body.empty())
+    return;
+  p << "(";
+  llvm::interleaveComma(body.getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
+  p << ")";
+  p.printArrowTypeList(TypeRange{IntegerType::get(body.getContext(), 1)});
+  p << " ";
+  p.printRegion(body, /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+}
+
+//===----------------------------------------------------------------------===//
+// custom<ConditionalTargetRegions>($targets, $objects, $target_regions)
+//===----------------------------------------------------------------------===//
+
+static ParseResult parseConditionalTargetRegions(
+    OpAsmParser &parser, ArrayAttr &targetsAttr, ArrayAttr &objectsAttr,
+    SmallVectorImpl<std::unique_ptr<Region>> &targetRegions) {
+  auto builder = parser.getBuilder();
+  SmallVector<Attribute> targetAttrs;
+  SmallVector<Attribute> objectsAttrs;
+  do {
+    IREE::HAL::ExecutableTargetAttr targetAttr;
+    if (failed(parser.parseAttribute(targetAttr)))
+      return failure();
+    targetAttrs.push_back(targetAttr);
+    std::unique_ptr<Region> targetRegion = std::make_unique<Region>();
+    if (succeeded(parser.parseOptionalKeyword("if"))) {
+      if (failed(parseTargetConditionRegion(parser, *targetRegion)))
+        return failure();
+    }
+    targetRegions.emplace_back(std::move(targetRegion));
+    if (failed(parser.parseEqual()))
+      return failure();
+    ArrayAttr targetObjectsAttr;
+    if (failed(parser.parseAttribute(targetObjectsAttr)))
+      return failure();
+    objectsAttrs.push_back(targetObjectsAttr);
+  } while (succeeded(parser.parseOptionalComma()));
+  targetsAttr = builder.getArrayAttr(targetAttrs);
+  objectsAttr = builder.getArrayAttr(objectsAttrs);
+  return success();
+}
+
+static void
+printConditionalTargetRegions(OpAsmPrinter &p, Operation *op,
+                              ArrayAttr targetsAttr, ArrayAttr objectsAttr,
+                              MutableArrayRef<Region> targetRegions) {
+  p.increaseIndent();
+  p.printNewline();
+  llvm::interleave(
+      llvm::zip_equal(targetsAttr.getAsRange<IREE::HAL::ExecutableTargetAttr>(),
+                      objectsAttr.getAsRange<ArrayAttr>(), targetRegions),
+      [&](auto it) {
+        auto [targetAttr, targetObjectsAttr, targetRegion] = it;
+        p.printAttribute(targetAttr);
+        if (!targetRegion.empty()) {
+          p << " if";
+          printTargetConditionRegion(p, op, targetRegion);
+        }
+        p << " = ";
+        p.printAttribute(targetObjectsAttr);
+      },
+      [&]() {
+        p << ",";
+        p.printNewline();
+      });
+  p.decreaseIndent();
+  p.printNewline();
+}
+
+//===----------------------------------------------------------------------===//
 // custom<WorkgroupCountRegion>($body)
 //===----------------------------------------------------------------------===//
 
@@ -161,12 +291,8 @@ static void printWorkgroupCountRegion(OpAsmPrinter &p, Operation *op,
   if (body.empty())
     return;
   p << "(";
-  auto args = body.getArguments();
-  for (unsigned i = 0; i < args.size(); ++i) {
-    if (i > 0)
-      p << ", ";
-    p.printRegionArgument(args[i]);
-  }
+  llvm::interleaveComma(body.getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
   p << ")";
   Type indexType = IndexType::get(body.getContext());
   p.printArrowTypeList(TypeRange{indexType, indexType, indexType});
@@ -1093,18 +1219,57 @@ std::array<Value, 3> ExecutableExportOp::calculateWorkgroupSize(
 // hal.executable.variant
 //===----------------------------------------------------------------------===//
 
+static void ensureExecutableVariantBodyTerminator(Location loc, Region &body) {
+  mlir::impl::ensureRegionTerminator(
+      body, Builder(loc.getContext()), loc,
+      [](OpBuilder &builder, Location loc) {
+        OperationState state(
+            loc, IREE::HAL::ExecutableVariantEndOp::getOperationName());
+        IREE::HAL::ExecutableVariantEndOp::build(builder, state);
+        return Operation::create(state);
+      });
+}
+
+static ParseResult parseExecutableVariantBody(OpAsmParser &parser,
+                                              Region &body) {
+  if (failed(parser.parseRegion(body)))
+    return failure();
+  ensureExecutableVariantBodyTerminator(UnknownLoc::get(parser.getContext()),
+                                        body);
+  return success();
+}
+
+static void printExecutableVariantBody(OpAsmPrinter &p, Operation *op,
+                                       Region &body) {
+  p.printRegion(body, /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/false, /*printEmptyBlock=*/false);
+}
+
 void ExecutableVariantOp::build(OpBuilder &builder, OperationState &state,
                                 StringRef symName,
                                 IREE::HAL::ExecutableTargetAttr target) {
-  ensureTerminator(*state.addRegion(), builder, state.location);
+  ensureExecutableVariantBodyTerminator(state.location, *state.addRegion());
+  state.addRegion(); // empty condition
   state.addAttribute(mlir::SymbolTable::getSymbolAttrName(),
                      builder.getStringAttr(symName));
   state.addAttribute("target", target);
 }
 
+LogicalResult ExecutableVariantOp::verify() {
+  ExecutableVariantOp op = *this;
+  if (getBody().getBlocks().size() != 1) {
+    return op.emitOpError() << "must have a single block in the body region";
+  }
+  if (!isa<IREE::HAL::ExecutableVariantEndOp>(getBody().front().back())) {
+    return op.emitOpError()
+           << "body region must end with a hal.executable.variant.end op";
+  }
+  return verifyTargetConditionRegion(op, op.getCondition());
+}
+
 DenseMap<Attribute, int> ExecutableVariantOp::gatherConstantOrdinals() {
   DenseMap<Attribute, int> map;
-  for (auto blockOp : getOps<IREE::HAL::ExecutableConstantBlockOp>()) {
+  for (auto blockOp : getConstantBlockOps()) {
     int baseCount = map.size();
     for (auto [i, keyAttr] : llvm::enumerate(blockOp.getKeys())) {
       map.try_emplace(keyAttr, baseCount + i);

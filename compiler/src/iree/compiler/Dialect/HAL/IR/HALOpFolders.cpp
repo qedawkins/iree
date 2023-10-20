@@ -682,8 +682,7 @@ struct MergeExecutableConstantBlocks
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(ExecutableVariantOp variantOp,
                                 PatternRewriter &rewriter) const override {
-    auto blockOps =
-        llvm::to_vector(variantOp.getOps<ExecutableConstantBlockOp>());
+    auto blockOps = llvm::to_vector(variantOp.getConstantBlockOps());
     if (blockOps.size() <= 1) {
       return rewriter.notifyMatchFailure(variantOp,
                                          "not enough blocks to merge");
