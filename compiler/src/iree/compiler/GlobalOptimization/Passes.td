@@ -28,14 +28,14 @@ def EraseUnusedLinalgOperands :
 }
 
 def MaterializeExternDispatchesPass :
-    Pass<"iree-materialize-extern-dispatches", "mlir::ModuleOp"> {
+    Pass<"iree-materialize-extern-dispatches", ""> {
   let summary = "Pass to form custom external dispatches";
   let constructor =
     "mlir::iree_compiler::GlobalOptimization::createMaterializeExternDispatchesPass()";
   let options = [
-    Option<"pdlModuleFileName", "pdl-module-file-name", "std::string",
-            /*default=*/"\"\"",
-            "Optional file name to load a pdl module from.">
+    ListOption<"pdlModuleFileNames", "pdl-module-file-names", "std::string",
+            "Optional files to load a pdl module from.",
+            "llvm::cl::ZeroOrMore">
   ];
 }
 

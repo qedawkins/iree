@@ -65,12 +65,27 @@ module {
 
       // Create the extern dispatch op. The workgroup count region has not been constructed at
       // this point.
-      %extern = pdl.apply_native_rewrite "create_dispatch_extern"(
-                                        %workload, %res_type_range, %workload,
-                                        %arg_range, %arg_dims, %tied_operands,
-                                        %attrdict : !pdl.range<value>, !pdl.range<type>, !pdl.range<value>,
-                                                    !pdl.range<value>, !pdl.range<value>, !pdl.attribute,
-                                                    !pdl.attribute) : !pdl.operation
+      // %extern = pdl.apply_native_rewrite "create_dispatch_extern"(
+      //                                   %workload, %res_type_range, %workload,
+      //                                   %arg_range, %arg_dims, %tied_operands,
+      //                                   %attrdict : !pdl.range<value>, !pdl.range<type>, !pdl.range<value>,
+      //                                               !pdl.range<value>, !pdl.range<value>, !pdl.attribute,
+      //                                               !pdl.attribute) : !pdl.operation
+
+      %full_arg_range = pdl.range %workload, %workload, %arg_range, %arg_dims : !pdl.range<value>, !pdl.range<value>, !pdl.range<value>, !pdl.range<value>
+
+      %export = pdl.attribute = "main"
+      %layout = pdl.attribute = #layout
+      %bindings = pdl.attribute = #bindings
+      %objects = pdl.attribute = #objects
+      %extern = pdl.operation "hal.dispatch.extern"(%full_arg_range)
+                {
+                  "export" = %export
+                  "layout" = %export
+                  "bindings" = %export
+                  "objects" = %objects
+                } : !pdl.range<value>, !pdl.range<value>,
+                    !pdl.range<value>, !pdl.range<value>) : -> (%res_type_range : !pdl.range<type>)
 
       // Emplace the workgroup count region based on the workload, return handles to the new block
       // arguments, and set the insertion point to the new block.

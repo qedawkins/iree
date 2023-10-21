@@ -57,7 +57,7 @@ createEraseUnusedLinalgOperands();
 // Materializes logical encodings to physical encodings if there is a single
 // device target.
 std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createMaterializeExternDispatchesPass(std::string pdlModuleFileName = "");
+createMaterializeExternDispatchesPass(ArrayRef<std::string> pdlModuleFileName = {});
 
 // Materializes logical encodings to physical encodings if there is a single
 // device target.

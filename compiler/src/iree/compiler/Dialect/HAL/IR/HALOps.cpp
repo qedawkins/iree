@@ -385,6 +385,17 @@ SmallVector<int64_t> TensorBarrierOp::getTiedResultOperandIndices() {
 // hal.dispatch.extern
 //===----------------------------------------------------------------------===//
 
+
+// void DispatchExternOp::build(OpBuilder &builder, OperationState &state,
+//                              ValueRange workload, TypeRange resultTypes,
+//                              ValueRange resultDims, ValueRange arguments,
+//                              ValueRange argumentDims,
+//                              DenseI64ArrayAttr tiedOperands,
+//                              DictionaryAttr attributes) {
+//   build(builder, state, workload, resultTypes, resultDims, arguments,
+//           argumentDims, tiedOperands.asArrayRef()
+// }
+
 void DispatchExternOp::build(OpBuilder &builder, OperationState &state,
                              ValueRange workload, TypeRange resultTypes,
                              ValueRange resultDims, ValueRange arguments,

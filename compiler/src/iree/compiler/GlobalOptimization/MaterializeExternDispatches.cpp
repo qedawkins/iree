@@ -33,12 +33,17 @@ public:
                                    RewritePatternSet &tmpPatterns) {
     iree_compiler::IREE::HAL::registerExternDispatchRewriteFunction(
         tmpPatterns.getPDLPatterns());
-    return iree_compiler::detail::populatePDLModuleFromFileName(
-        context, tmpPatterns, this->pdlModuleFileName);
+    for (auto fileName : this->pdlModuleFileNames) {
+      if (failed(iree_compiler::detail::populatePDLModuleFromFileName(
+          context, tmpPatterns, fileName))) {
+        return failure();
+      }
+    }
+    return success();
   }
 
-  MaterializeExternDispatchesPass(StringRef pdlModuleFileName = StringRef()) {
-    this->pdlModuleFileName = pdlModuleFileName.str();
+  MaterializeExternDispatchesPass(ArrayRef<std::string> pdlModuleFileNames) {
+    this->pdlModuleFileNames = pdlModuleFileNames;
   }
   MaterializeExternDispatchesPass(const MaterializeExternDispatchesPass &pass) =
       default;
@@ -49,8 +54,8 @@ namespace mlir {
 namespace iree_compiler {
 namespace GlobalOptimization {
 std::unique_ptr<Pass>
-createMaterializeExternDispatchesPass(std::string pdlModuleFileName) {
-  return std::make_unique<MaterializeExternDispatchesPass>(pdlModuleFileName);
+createMaterializeExternDispatchesPass(ArrayRef<std::string> pdlModuleFileNames) {
+  return std::make_unique<MaterializeExternDispatchesPass>(pdlModuleFileNames);
 }
 } // namespace GlobalOptimization
 } // namespace iree_compiler

@@ -24,6 +24,7 @@
 namespace mlir {
 namespace iree_compiler {
 namespace detail {
+
 /// Helper to get a list of sizes from the given RankedTensorType value.
 static FailureOr<ValueRange> getValueRangeTensorSizes(PatternRewriter &rewriter,
                                                       ValueRange vals) {

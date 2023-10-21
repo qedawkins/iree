@@ -420,6 +420,8 @@ def HAL_DispatchExternOp : HAL_PureOp<"dispatch.extern", [
           getResultTypes());
     }
 
+    ValueRange emplaceWorkgroupCountRegion();
+
     /// Returns the index of the args() operand in the Operation operands list.
     unsigned mapArgOperandToOpOperand(unsigned i) { return i + getWorkload().size(); };
 

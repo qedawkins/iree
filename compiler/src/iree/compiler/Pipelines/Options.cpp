@@ -152,10 +152,11 @@ void GlobalOptimizationOptions::bindOptions(OptionsBinder &binder) {
                    llvm::cl::desc("Strips debug assertions after any useful "
                                   "information has been extracted."),
                    llvm::cl::cat(category));
-  binder.opt<std::string>(
+  binder.list<std::string>(
       "iree-opt-extern-dispatch-pattern-module",
-      customDispatchPatternModuleFileName,
-      llvm::cl::desc("File path to custom dispatch rewrite pattnern module."),
+      customDispatchPatternModuleFileNames,
+      llvm::cl::desc("File path to custom dispatch rewrite pattern module."),
+      llvm::cl::ZeroOrMore,
       llvm::cl::cat(category));
 }
 
