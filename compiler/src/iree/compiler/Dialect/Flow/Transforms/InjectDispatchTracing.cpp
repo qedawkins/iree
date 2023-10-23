@@ -37,10 +37,12 @@ public:
   void runOnOperation() override {
     auto funcOp = getOperation();
     for (auto dispatchOp : funcOp.getFunctionBody().getOps<DispatchOp>()) {
+      // TODO: Figure out a way to accurately trace which entry point
+      // gets executed.
+      SymbolRefAttr firstEntry = *dispatchOp.getEntryPointRefs().begin();
       std::string entryPointName =
-          dispatchOp.getEntryPoint().getRootReference().getValue().str();
-      for (FlatSymbolRefAttr nestedRef :
-           dispatchOp.getEntryPoint().getNestedReferences()) {
+          firstEntry.getRootReference().getValue().str();
+      for (FlatSymbolRefAttr nestedRef : firstEntry.getNestedReferences()) {
         entryPointName = (entryPointName + "::" + nestedRef.getValue()).str();
       }
 

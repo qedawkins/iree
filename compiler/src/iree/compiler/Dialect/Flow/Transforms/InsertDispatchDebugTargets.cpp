@@ -169,10 +169,12 @@ struct InsertDebugTargetAtOrdinalPass
       // Trace on a valid ordinal.
       if (localTraceOrdinal >= 0 && localTraceOrdinal < dispatchOps.size()) {
         auto traceTarget = dispatchOps[localTraceOrdinal];
+        // TODO: Figure out how to accurately trace the entry point that gets
+        // executed.
+        SymbolRefAttr firstEntry = *traceTarget.getEntryPointRefs().begin();
         std::string entryPointName =
-            traceTarget.getEntryPoint().getRootReference().getValue().str();
-        for (FlatSymbolRefAttr nestedRef :
-             traceTarget.getEntryPoint().getNestedReferences()) {
+            firstEntry.getRootReference().getValue().str();
+        for (FlatSymbolRefAttr nestedRef : firstEntry.getNestedReferences()) {
           entryPointName = (entryPointName + "::" + nestedRef.getValue()).str();
         }
         // Append the ordinal to the trace name.
@@ -226,17 +228,20 @@ struct InsertDebugTargetAtSymbolPass
       // dispatches.
       IREE::Flow::DispatchOp breakTarget;
       funcOp.walk([&](IREE::Flow::DispatchOp dispatchOp) {
-        std::string entryPointName =
-            dispatchOp.getEntryPoint().getRootReference().getValue().str();
-        for (FlatSymbolRefAttr nestedRef :
-             dispatchOp.getEntryPoint().getNestedReferences()) {
-          entryPointName = (entryPointName + "::" + nestedRef.getValue()).str();
-        }
-        if (traceMatcher.match(entryPointName))
-          traceOpWithName(dispatchOp, entryPointName);
+        for (auto entryPointRef : dispatchOp.getEntryPointRefs()) {
+          std::string entryPointName =
+              entryPointRef.getRootReference().getValue().str();
+          for (FlatSymbolRefAttr nestedRef :
+               entryPointRef.getNestedReferences()) {
+            entryPointName =
+                (entryPointName + "::" + nestedRef.getValue()).str();
+          }
+          if (traceMatcher.match(entryPointName))
+            traceOpWithName(dispatchOp, entryPointName);
 
-        if (!breakTarget && breakMatcher.match(entryPointName))
-          breakTarget = dispatchOp;
+          if (!breakTarget && breakMatcher.match(entryPointName))
+            breakTarget = dispatchOp;
+        }
       });
 
       // Break on the selected operation (dispatch). Currently this breaks on

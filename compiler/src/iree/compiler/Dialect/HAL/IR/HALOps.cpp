@@ -1240,9 +1240,9 @@ std::array<Value, 3> ExecutableExportOp::calculateWorkgroupSize(
 //===----------------------------------------------------------------------===//
 
 static void ensureExecutableVariantBodyTerminator(Location loc, Region &body) {
+  OpBuilder b(loc.getContext());
   mlir::impl::ensureRegionTerminator(
-      body, Builder(loc.getContext()), loc,
-      [](OpBuilder &builder, Location loc) {
+      body, b, loc, [](OpBuilder &builder, Location loc) {
         OperationState state(
             loc, IREE::HAL::ExecutableVariantEndOp::getOperationName());
         IREE::HAL::ExecutableVariantEndOp::build(builder, state);
