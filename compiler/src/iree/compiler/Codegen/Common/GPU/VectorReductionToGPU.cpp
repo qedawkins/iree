@@ -95,6 +95,8 @@ moveScalarAndBindingUniformCode(vector::WarpExecuteOnLane0Op warpOp) {
       return true;
     if (isUniformLoad(op))
       return true;
+    if (isa<memref::AllocOp>(op) || isa<memref::AllocaOp>(op))
+      return true;
 
     return false;
   };

@@ -592,6 +592,10 @@ void addSPIRVSubgroupReducePassPipeline(OpPassManager &pm) {
   // Handle vector reduction operations specifically.
   nestedModulePM.addNestedPass<func::FuncOp>(
       createConvertVectorReductionToGPUPass(getWarpSize));
+
+  // Distribute any scf.forall to GPU threads.
+  nestedPM.addNestedPass<func::FuncOp>(createGPUDistribute());
+
   // Perform normal vector unrolling and lowering transformations. This breaks
   // vectors down to native machine size.
   addSPIRVVectorLoweringPasses(nestedModulePM);
