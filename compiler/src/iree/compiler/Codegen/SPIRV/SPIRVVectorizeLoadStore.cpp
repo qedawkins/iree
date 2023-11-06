@@ -961,6 +961,38 @@ struct ScalarizeVectorTransferWrite final
   }
 };
 
+struct MaterializeExtractOfCreateMask final
+    : public OpRewritePattern<vector::ExtractOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::ExtractOp extractOp,
+                                PatternRewriter &rewriter) const override {
+    // Restrict to the degenerate case where we are extracting a single element.
+    if (extractOp.getResult().getType().isa<VectorType>()) {
+      return failure();
+    }
+    auto maskOp = extractOp.getVector().getDefiningOp<vector::CreateMaskOp>();
+    if (!maskOp) {
+      return failure();
+    }
+
+    Location loc = maskOp.getLoc();
+    Value maskBit = rewriter.create<arith::ConstantOp>(loc, rewriter.getIntegerAttr(rewriter.getI1Type(), 1));
+    for (auto [idx, size] : llvm::zip_equal(extractOp.getMixedPosition(), maskOp.getOperands())) {
+      Value idxVal;
+      if (idx.is<Attribute>()) {
+        idxVal = rewriter.create<arith::ConstantOp>(loc, rewriter.getI1Type(), idx.get<Attribute>().cast<IntegerAttr>());
+      } else {
+        idxVal = idx.get<Value>();
+      }
+      Value cmpIdx = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, idxVal, size);
+      maskBit = rewriter.create<arith::AndIOp>(loc, cmpIdx, maskBit);
+    }
+    rewriter.replaceOp(extractOp, maskBit);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
@@ -1045,6 +1077,7 @@ void SPIRVVectorizeLoadStorePass::runOnOperation() {
     RewritePatternSet rewritingPatterns(context);
     rewritingPatterns.add<ScalarizeVectorTransferRead, ScalarizeVectorLoad,
                           ScalarizeVectorTransferWrite>(context);
+    rewritingPatterns.add<MaterializeExtractOfCreateMask>(context);
 
     if (failed(
             applyPatternsAndFoldGreedily(func, std::move(rewritingPatterns)))) {
