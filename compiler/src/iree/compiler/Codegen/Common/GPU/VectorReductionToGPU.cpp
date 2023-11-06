@@ -148,6 +148,26 @@ public:
   }
 };
 
+/// Pattern to sink `gpu.barrier` ops out of a `warp_execute_on_lane_0` op.
+class WarpOpBarrier : public OpRewritePattern<vector::WarpExecuteOnLane0Op> {
+  using OpRewritePattern<vector::WarpExecuteOnLane0Op>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::WarpExecuteOnLane0Op warpOp,
+                                PatternRewriter &rewriter) const override {
+    auto yield = cast<vector::YieldOp>(
+      warpOp.getBodyRegion().getBlocks().begin()->getTerminator());
+    Operation *lastNode = yield->getPrevNode();
+    auto barrierOp = dyn_cast_or_null<gpu::BarrierOp>(lastNode);
+    if (!barrierOp)
+      return failure();
+
+    rewriter.setInsertionPointAfter(warpOp);
+    (void)rewriter.create<gpu::BarrierOp>(barrierOp.getLoc());
+    rewriter.eraseOp(barrierOp);
+    return success();
+  }
+};
+
 static Value simpleWarpShuffleFunction(Location loc, OpBuilder &builder,
                                        Value val, Value srcIdx,
                                        int64_t warpSz) {
@@ -253,6 +273,7 @@ public:
       vector::populateDistributeReduction(patterns, groupReductionFn);
       vector::populateDistributeTransferWriteOpPatterns(patterns,
                                                         distributionFn);
+      patterns.add<WarpOpBarrier>(patterns.getContext(), 3);
       (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
     }
 
