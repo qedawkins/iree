@@ -17,6 +17,7 @@
 #include "mlir/Interfaces/ValueBoundsOpInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Dialect/SCF/Transforms/Transforms.h"
 
 #define DEBUG_TYPE "iree-codegen-generic-vectorization"
 #define VEC_DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
@@ -133,7 +134,7 @@ getVectorSizes(linalg::LinalgOp linalgOp) {
   // Get vector sizes from the lowering config, if available in the op itself.
   IREE::Codegen::LoweringConfigAttr loweringConfig =
       getLoweringConfig(linalgOp);
-  if (loweringConfig) {
+  if (loweringConfig && false) {
     TilingConfig tilingConfig(loweringConfig);
     auto [vectorSizes, scalableFlags] = tilingConfig.getVectorTileSizes();
     // Replace zeros in canonical vector shape to turn it into a valid shape.
@@ -282,6 +283,17 @@ void GenericVectorizationPass::runOnOperation() {
     RewritePatternSet patterns(funcOp.getContext());
     linalg::populatePadOpVectorizationPatterns(patterns);
     (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+  }
+
+  // Peel any dynamic loops.
+  SmallVector<scf::ForOp> forOps;
+  funcOp.walk([&](scf::ForOp op) { forOps.push_back(op); });
+  for (scf::ForOp op : forOps) {
+    scf::ForOp result;
+    IRRewriter rewriter(op.getContext());
+    if (failed(scf::peelForLoopAndSimplifyBounds(rewriter, op, result))) {
+      return signalPassFailure();
+    }
   }
 }
 } // namespace
