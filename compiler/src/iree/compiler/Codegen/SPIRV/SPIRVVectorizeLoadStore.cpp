@@ -32,6 +32,8 @@
 
 #define DEBUG_TYPE "iree-spirv-vectorize-load-store"
 
+#define DO_NOTHING [](OpBuilder &b, Location loc) { return ValueRange{}; }
+
 constexpr int kMaxVectorNumBits = 128;
 constexpr int kMaxVectorNumElements = 4;
 
@@ -99,6 +101,9 @@ calculateMemRefVectorNumBits(SmallVectorImpl<Operation *> &uses) {
     }
     auto transferOp = dyn_cast<VectorTransferOpInterface>(op);
     if (!transferOp)
+      return 0;
+    // Masked transfers must be scalarized.
+    if (transferOp.getMask())
       return 0;
     std::optional<unsigned> transferSize =
         getBitWidth(transferOp.getVectorType());
@@ -739,6 +744,31 @@ public:
   }
 };
 
+static ValueRange predicateMaybeMaskedScalarTransfer(OpBuilder &b, Location loc, Value maybeMaskBit, TypeRange resultTypes, function_ref<ValueRange(OpBuilder&, Location)> thenConditionBuilder, function_ref<void(OpBuilder&, Location)> elseConditionBuilder, bool hasElse = false) {
+  OpBuilder::InsertionGuard guard(b);
+  if (maybeMaskBit) {
+    OpBuilder::InsertionGuard guard1(b);
+    scf::IfOp ifOp;
+    if (hasElse) {
+      ifOp = b.create<scf::IfOp>(loc, resultTypes, maybeMaskBit, /*else=*/true);
+    } else {
+      ifOp = b.create<scf::IfOp>(loc, maybeMaskBit, /*else=*/false);
+    }
+    b.setInsertionPointToStart(&ifOp.getThenRegion().front());
+    ValueRange thenRes = thenConditionBuilder(b, loc);
+    if (hasElse) {
+      // An if with results must have an else region.
+      b.create<scf::YieldOp>(loc, thenRes);
+
+      OpBuilder::InsertionGuard guard2(b);
+      b.setInsertionPointToStart(&ifOp.getElseRegion().front());
+      elseConditionBuilder(b, loc);
+    }
+    return ifOp->getResults();
+  }
+  return thenConditionBuilder(b, loc);
+}
+
 /// Scalarizes remaining vector transfer that couldn't be converted to
 /// vevtor load operations.
 
@@ -756,10 +786,24 @@ struct ScalarizeVectorTransferRead final
       return failure();
 
     Location loc = readOp.getLoc();
+    Value maybeMask = readOp.getMask();
     if (vectorType.getRank() == 0) {
-      Value scalar = rewriter.create<memref::LoadOp>(loc, readOp.getSource(),
-                                                     readOp.getIndices());
-      rewriter.replaceOpWithNewOp<vector::SplatOp>(readOp, vectorType, scalar);
+      Value maybeMaskBit;
+      if (maybeMask) {
+        Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+        maybeMaskBit = rewriter.create<vector::ExtractOp>(loc, maybeMask, zero);
+      }
+
+      auto thenCond = [&](OpBuilder &b, Location loc) {
+        return ValueRange{b.create<memref::LoadOp>(loc, readOp.getSource(),
+                                               readOp.getIndices()).getResult()};
+      };
+      auto elseCond = [&](OpBuilder &b, Location loc) {
+        b.create<scf::YieldOp>(loc, readOp.getPadding());
+      };
+
+      ValueRange scalar = predicateMaybeMaskedScalarTransfer(rewriter, loc, maybeMaskBit, TypeRange{vectorType.getElementType()}, thenCond, elseCond, /*hasElse=*/true);
+      rewriter.replaceOpWithNewOp<vector::SplatOp>(readOp, vectorType, scalar[0]);
       return success();
     }
 
@@ -778,11 +822,27 @@ struct ScalarizeVectorTransferRead final
         loc, vectorType, rewriter.getZeroAttr(vectorType));
     for (int i = 0; i < vectorType.getDimSize(0); ++i) {
       Value iVal = rewriter.create<arith::ConstantIndexOp>(loc, i);
-      indices[dimPos] = rewriter.create<affine::AffineApplyOp>(
-          loc, addMap, ValueRange{oldIndex, iVal});
-      Value scalar =
-          rewriter.create<memref::LoadOp>(loc, readOp.getSource(), indices);
-      newVector = rewriter.create<vector::InsertOp>(loc, scalar, newVector, i);
+
+      // Extract the mask bit for this value if present.
+      Value maybeMaskBit;
+      if (maybeMask) {
+        maybeMaskBit = rewriter.create<vector::ExtractOp>(loc, maybeMask, iVal);
+      }
+
+      auto thenCond = [&](OpBuilder &b, Location loc) {
+        SmallVector<Value> newIndices(indices);
+        newIndices[dimPos] = b.create<affine::AffineApplyOp>(
+            loc, addMap, ValueRange{oldIndex, iVal});
+        Value scalar =
+            b.create<memref::LoadOp>(loc, readOp.getSource(), newIndices);
+        return ValueRange{scalar};
+      };
+      auto elseCond = [&](OpBuilder &b, Location loc) {
+        b.create<scf::YieldOp>(loc, readOp.getPadding());
+      };
+
+      ValueRange scalar = predicateMaybeMaskedScalarTransfer(rewriter, loc, maybeMaskBit, TypeRange{vectorType.getElementType()}, thenCond, elseCond, /*hasElse=*/true);
+      newVector = rewriter.create<vector::InsertOp>(loc, scalar[0], newVector, i);
     }
     rewriter.replaceOp(readOp, newVector);
     return success();
@@ -844,11 +904,24 @@ struct ScalarizeVectorTransferWrite final
       return failure();
 
     Location loc = writeOp.getLoc();
+    Value maybeMask = writeOp.getMask();
     if (vectorType.getRank() == 0) {
-      Value scalar =
-          rewriter.create<vector::ExtractElementOp>(loc, writeOp.getVector());
-      rewriter.create<memref::StoreOp>(loc, scalar, writeOp.getSource(),
-                                       writeOp.getIndices());
+
+      Value maybeMaskBit;
+      if (maybeMask) {
+        Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+        maybeMaskBit = rewriter.create<vector::ExtractOp>(loc, maybeMask, zero);
+      }
+
+      auto thenCond = [&](OpBuilder &b, Location loc) {
+        Value scalar =
+            b.create<vector::ExtractElementOp>(loc, writeOp.getVector());
+        b.create<memref::StoreOp>(loc, scalar, writeOp.getSource(),
+                                         writeOp.getIndices());
+        return ValueRange{};
+      };
+
+      (void)predicateMaybeMaskedScalarTransfer(rewriter, loc, maybeMaskBit, TypeRange{}, thenCond, /*elseCond=*/DO_NOTHING, /*hasElse=*/false);
       rewriter.eraseOp(writeOp);
       return success();
     }
@@ -865,12 +938,23 @@ struct ScalarizeVectorTransferWrite final
     Value oldIndex = indices[dimPos];
     for (int i = 0; i < vectorType.getDimSize(0); ++i) {
       Value iVal = rewriter.create<arith::ConstantIndexOp>(loc, i);
-      indices[dimPos] = rewriter.create<affine::AffineApplyOp>(
-          loc, addMap, ValueRange{oldIndex, iVal});
-      Value scalar =
-          rewriter.create<vector::ExtractOp>(loc, writeOp.getVector(), i);
-      rewriter.create<memref::StoreOp>(loc, scalar, writeOp.getSource(),
-                                       indices);
+
+      Value maybeMaskBit;
+      if (maybeMask) {
+        maybeMaskBit = rewriter.create<vector::ExtractOp>(loc, maybeMask, iVal);
+      }
+
+      auto thenCond = [&](OpBuilder &b, Location loc) {
+        SmallVector<Value> newIndices(indices);
+        newIndices[dimPos] = b.create<affine::AffineApplyOp>(
+            loc, addMap, ValueRange{oldIndex, iVal});
+        Value scalar =
+            b.create<vector::ExtractOp>(loc, writeOp.getVector(), i);
+        b.create<memref::StoreOp>(loc, scalar, writeOp.getSource(),
+                                         newIndices);
+        return ValueRange{};
+      };
+      (void)predicateMaybeMaskedScalarTransfer(rewriter, loc, maybeMaskBit, TypeRange{}, thenCond, /*elseCond=*/DO_NOTHING, /*hasElse=*/false);
     }
     rewriter.eraseOp(writeOp);
     return success();
