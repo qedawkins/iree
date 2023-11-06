@@ -285,16 +285,16 @@ void GenericVectorizationPass::runOnOperation() {
     (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
   }
 
-  // Peel any dynamic loops.
-  SmallVector<scf::ForOp> forOps;
-  funcOp.walk([&](scf::ForOp op) { forOps.push_back(op); });
-  for (scf::ForOp op : forOps) {
-    scf::ForOp result;
-    IRRewriter rewriter(op.getContext());
-    if (failed(scf::peelForLoopAndSimplifyBounds(rewriter, op, result))) {
-      return signalPassFailure();
-    }
-  }
+  // // Peel any dynamic loops.
+  // SmallVector<scf::ForOp> forOps;
+  // funcOp.walk([&](scf::ForOp op) { forOps.push_back(op); });
+  // for (scf::ForOp op : forOps) {
+  //   scf::ForOp result;
+  //   IRRewriter rewriter(op.getContext());
+  //   if (failed(scf::peelForLoopAndSimplifyBounds(rewriter, op, result))) {
+  //     return signalPassFailure();
+  //   }
+  // }
 }
 } // namespace
 
