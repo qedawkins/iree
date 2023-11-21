@@ -1104,6 +1104,14 @@ IREE_VM_ABI_EXPORT(iree_hal_module_device_queue_flush,  //
   return iree_hal_device_queue_flush(device, queue_affinity);
 }
 
+IREE_VM_ABI_EXPORT(iree_hal_module_device_profiling_flush,  //
+                   iree_hal_module_state_t,                 //
+                   r, v) {
+  iree_hal_device_t* device = NULL;
+  IREE_RETURN_IF_ERROR(iree_hal_device_check_deref(args->r0, &device));
+  return iree_hal_device_profiling_flush(device);
+}
+
 //===--------------------------------------------------------------------===//
 // iree_hal_executable_t
 //===--------------------------------------------------------------------===//
