@@ -29,6 +29,8 @@ createConvertTMTensorToLinalgExtPass();
 std::unique_ptr<OperationPass<func::FuncOp>>
 createSetStrictSymbolicShapesPass();
 
+std::unique_ptr<OperationPass<func::FuncOp>> createConvertAtenCatToTensorPass();
+
 // Creates a pipeline that lowers from the torch backend contract to IREE.
 // This is based on the torch-backend-to-linalg-on-tensors-backend-pipeline
 // pipeline in torch-mlir but includes IREE specific lowerings.

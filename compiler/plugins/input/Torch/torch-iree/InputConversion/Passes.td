@@ -15,6 +15,11 @@ def BitCastQuantTensorPass :
   let constructor = "mlir::iree_compiler::TorchInput::createBitCastQuantTensorPass()";
 }
 
+def ConvertAtenCatToTensor : Pass<"convert-aten-cat-to-tensor", "func::FuncOp"> {
+  let summary = "Converts aten.concat to tensor.concat";
+  let constructor = "mlir::iree_compiler::TorchInput::createConvertAtenCatToTensorPass()";
+}
+
 def ConvertTMTensorToLinalgExt :
     Pass<"torch-iree-tm-tensor-to-linalg-ext", "func::FuncOp"> {
   let summary = "Convert from TMTensor ops to LinalgExt ops on tensors";
@@ -26,5 +31,6 @@ def SetStrictSymbolicShapesPass :
   let summary = "Adds the attribute indicating strict symbolic shapes in Torch IR";
   let constructor = "mlir::iree_compiler::TorchInput::createSetStrictSymbolicShapesPass()";
 }
+
 
 #endif // TORCH_IREE_INPUTCONVERSION_PASSES
