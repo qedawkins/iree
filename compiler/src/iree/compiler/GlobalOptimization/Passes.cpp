@@ -105,6 +105,15 @@ void buildGlobalOptimizationPassPipeline(
             clEnableQuantizedMatmulReassociation);
       })
       .addPass(mlir::createCanonicalizerPass)
+      .addPass(mlir::createCSEPass)
+      // Propagate transposes immediately before set encoding/data tiling
+      // because transpose propagation cannot take an opinion on the preferred
+      // layout of various operations. This simplifies local propagation
+      // decisions as SetEncoding is expected to pick the ideal layout for
+      // that operation anyway, and this way we only need to make such a
+      // decision once.
+      .addPass(createPropagateLinalgTransposePass)
+      .addPass(mlir::createCanonicalizerPass)
       .addPass(mlir::createCSEPass);
 
   // Enable data tiling after they are in a canonical form.
@@ -133,12 +142,6 @@ void buildGlobalOptimizationPassPipeline(
   pipeline.addPass(IREE::Util::createApplyPatternsPass());
   pipeline.addPass(IREE::Util::createFoldGlobalsPass());
   pipeline.addPass(IREE::Util::createIPOPass());
-  pipeline.addPass(createCanonicalizerPass());
-  pipeline.addPass(createCSEPass());
-
-  // Propagate transposes immediately before constant expression hoisting to
-  // increase the chance of propagating near a constant.
-  FunctionLikeNest(pipeline).addPass(createPropagateLinalgTransposePass);
   pipeline.addPass(createCanonicalizerPass());
   pipeline.addPass(createCSEPass());
 

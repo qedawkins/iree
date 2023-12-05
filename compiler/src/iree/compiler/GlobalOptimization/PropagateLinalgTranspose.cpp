@@ -39,6 +39,17 @@ static bool isIdentityPermutation(ArrayRef<int64_t> perm) {
   return true;
 }
 
+static bool arePermutationsEqual(ArrayRef<int64_t> first,
+                                 ArrayRef<int64_t> second) {
+  if (first.size() != second.size()) {
+    return false;
+  }
+  return llvm::all_of(llvm::zip_equal(first, second),
+                      [](std::tuple<int64_t, int64_t> p) {
+                        return std::get<0>(p) == std::get<1>(p);
+                      });
+}
+
 static Value createTranspose(OpBuilder &builder, Value source,
                              ArrayRef<int64_t> perm) {
   SmallVector<OpFoldResult> mixedSizes =
@@ -249,6 +260,76 @@ public:
 } // namespace
 
 //===----------------------------------------------------------------------===//
+// Linalg Named Op -> Named Op Conversions
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+class NamedMatmulConversions : public OpRewritePattern<linalg::MatmulOp> {
+public:
+  using OpRewritePattern<linalg::MatmulOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::MatmulOp matmulOp,
+                                PatternRewriter &rewriter) const override {
+    Value lhs = matmulOp.getInputs()[0];
+    Value rhs = matmulOp.getInputs()[1];
+    SmallVector<NamedAttribute> attrs = getPrunedAttributeList(matmulOp);
+    if (auto rhsTranspose = rhs.getDefiningOp<linalg::TransposeOp>()) {
+      // If the permutation map isn't an identity, it is necessarily [1, 0].
+      if (!isIdentityPermutation(rhsTranspose.getPermutation())) {
+        rewriter.replaceOpWithNewOp<linalg::MatmulTransposeBOp>(
+            matmulOp, ValueRange{lhs, rhsTranspose.getInput()},
+            matmulOp.getDpsInits(), attrs);
+        return success();
+      }
+    }
+
+    if (auto lhsTranspose = lhs.getDefiningOp<linalg::TransposeOp>()) {
+      // If the permutation map isn't an identity, it is necessarily [1, 0].
+      if (!isIdentityPermutation(lhsTranspose.getPermutation())) {
+        rewriter.replaceOpWithNewOp<linalg::MatmulTransposeAOp>(
+            matmulOp, ValueRange{lhsTranspose.getInput(), rhs},
+            matmulOp.getDpsInits(), attrs);
+        return success();
+      }
+    }
+    return failure();
+  }
+};
+
+class NamedBatchMatmulConversions
+    : public OpRewritePattern<linalg::BatchMatmulOp> {
+public:
+  using OpRewritePattern<linalg::BatchMatmulOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::BatchMatmulOp bmmOp,
+                                PatternRewriter &rewriter) const override {
+    Value lhs = bmmOp.getInputs()[0];
+    Value rhs = bmmOp.getInputs()[1];
+    SmallVector<NamedAttribute> attrs = getPrunedAttributeList(bmmOp);
+    if (auto rhsTranspose = rhs.getDefiningOp<linalg::TransposeOp>()) {
+      if (arePermutationsEqual(rhsTranspose.getPermutation(), {0, 2, 1})) {
+        rewriter.replaceOpWithNewOp<linalg::BatchMatmulTransposeBOp>(
+            bmmOp, ValueRange{lhs, rhsTranspose.getInput()},
+            bmmOp.getDpsInits(), attrs);
+        return success();
+      }
+    }
+
+    if (auto lhsTranspose = lhs.getDefiningOp<linalg::TransposeOp>()) {
+      if (arePermutationsEqual(lhsTranspose.getPermutation(), {0, 2, 1})) {
+        rewriter.replaceOpWithNewOp<linalg::BatchMatmulTransposeAOp>(
+            bmmOp, ValueRange{lhsTranspose.getInput(), rhs},
+            bmmOp.getDpsInits(), attrs);
+        return success();
+      }
+    }
+    return failure();
+  }
+};
+} // namespace
+
+//===----------------------------------------------------------------------===//
 // Pass definition
 //===----------------------------------------------------------------------===//
 
@@ -290,34 +371,44 @@ void PropagateLinalgTransposePass::runOnOperation() {
   });
 
   {
-    RewritePatternSet bubblingPatterns(context);
-    bubblingPatterns.insert<ComposeTransposes>(context);
-    if (failed(applyPatternsAndFoldGreedily(funcOp,
-                                            std::move(bubblingPatterns)))) {
-      return signalPassFailure();
-    }
-
-    LLVM_DEBUG({
-      llvm::dbgs() << "\n--- After bubbling transpose ops up ---\n";
-      funcOp->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-      llvm::dbgs() << "\n\n";
-    });
-
     RewritePatternSet sinkingPatterns(context);
-    bubblingPatterns.insert<ComposeTransposes>(context);
+    sinkingPatterns.insert<NamedMatmulConversions>(context);
+    sinkingPatterns.insert<NamedBatchMatmulConversions>(context);
     sinkingPatterns.insert<SinkTransposeThroughExtractSlice>(context);
     sinkingPatterns.insert<SinkTransposeThroughExpandShape>(context);
     if (failed(
             applyPatternsAndFoldGreedily(funcOp, std::move(sinkingPatterns)))) {
       return signalPassFailure();
     }
-
-    LLVM_DEBUG({
-      llvm::dbgs() << "\n--- After sinking transpose ops down ---\n";
-      funcOp->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-      llvm::dbgs() << "\n\n";
-    });
   }
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "\n--- After sinking transpose ops down ---\n";
+    funcOp->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    llvm::dbgs() << "\n\n";
+  });
+
+  // Currently this only runs after all propagation has finished. There are
+  // cases where combining transposes can allow further propagation, but
+  // similarly there are cases where combining adjacent transposes limits later
+  // propagation patterns. For now this keeps it simple as once propagation has
+  // finished, it should in all cases be better to fuse.
+  // TODO: Run this to some kind of fixed point with propagation. This is tricky
+  // because propagation can make trivial modifications to the IR (e.g. through
+  // reshapes).
+  {
+    RewritePatternSet patterns(context);
+    patterns.insert<ComposeTransposes>(context);
+    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+      return signalPassFailure();
+    }
+  }
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "\n--- After combining transpose ops ---\n";
+    funcOp->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    llvm::dbgs() << "\n\n";
+  });
 
   // Re-generalize any remaining transposes. Later pipelines expect it.
   {
