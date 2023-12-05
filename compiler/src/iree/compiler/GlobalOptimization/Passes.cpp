@@ -136,6 +136,12 @@ void buildGlobalOptimizationPassPipeline(
   pipeline.addPass(createCanonicalizerPass());
   pipeline.addPass(createCSEPass());
 
+  // Propagate transposes immediately before constant expression hoisting to
+  // increase the chance of propagating near a constant.
+  FunctionLikeNest(pipeline).addPass(createPropagateLinalgTransposePass);
+  pipeline.addPass(createCanonicalizerPass());
+  pipeline.addPass(createCSEPass());
+
   if (transformOptions.options.constExprHoisting) {
     buildGlobalOptExprHoistingPassPipeline(pipeline, transformOptions);
   }

@@ -95,6 +95,12 @@ def OptimizeNumerics :
   let constructor = "mlir::iree_compiler::GlobalOptimization::createOptimizeNumericsPass()";
 }
 
+def PropagateLinalgTranspose :
+    InterfacePass<"iree-global-opt-propagate-linalg-transpose", "mlir::FunctionOpInterface"> {
+  let summary = "Propagates linalg.transpose through a restricted set of ops";
+  let constructor = "mlir::iree_compiler::GlobalOptimization::createPropagateLinalgTransposePass()";
+}
+
 def RemoveZeroExtentTensors :
     InterfacePass<"iree-global-opt-remove-zero-extent-tensors", "mlir::FunctionOpInterface"> {
   let summary = "Remove tensors that have 0-extents";
