@@ -101,6 +101,36 @@ static void specializeGenericTransposeOp(RewriterBase &rewriter,
 
 namespace {
 
+// Combines two transposes into one. This shouldn't be strictly necessary as
+// fusion should cancel inverse transposes, but doing this here can open up
+// new propagation opportunities and eases the analysis in fusion.
+class ComposeTransposes : public OpRewritePattern<linalg::TransposeOp> {
+public:
+  using OpRewritePattern<linalg::TransposeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::TransposeOp consumer,
+                                PatternRewriter &rewriter) const override {
+    Value input = consumer.getInput();
+    auto producer = input.getDefiningOp<linalg::TransposeOp>();
+    if (!producer) {
+      return failure();
+    }
+
+    ArrayRef<int64_t> producerPerm = producer.getPermutation();
+    ArrayRef<int64_t> consumerPerm = consumer.getPermutation();
+    SmallVector<int64_t> composedPerm =
+        applyPermutation(producerPerm, consumerPerm);
+
+    Value transposedSource = producer.getInput();
+    if (!isIdentityPermutation(composedPerm)) {
+      transposedSource =
+          createTranspose(rewriter, transposedSource, composedPerm);
+    }
+    rewriter.replaceOp(consumer, transposedSource);
+    return success();
+  }
+};
+
 // Sinks a transpose through a tensor.extract_slice iff the transpose turns
 // the extracted slice into a contiguous slice.
 class SinkTransposeThroughExtractSlice
@@ -260,17 +290,25 @@ void PropagateLinalgTransposePass::runOnOperation() {
   });
 
   {
+    RewritePatternSet bubblingPatterns(context);
+    bubblingPatterns.insert<ComposeTransposes>(context);
+    if (failed(applyPatternsAndFoldGreedily(funcOp,
+                                            std::move(bubblingPatterns)))) {
+      return signalPassFailure();
+    }
 
-    // LLVM_DEBUG({
-    //   llvm::dbgs() << "\n--- After bubbling transpose ops up ---\n";
-    //   funcOp->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-    //   llvm::dbgs() << "\n\n";
-    // });
+    LLVM_DEBUG({
+      llvm::dbgs() << "\n--- After bubbling transpose ops up ---\n";
+      funcOp->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+      llvm::dbgs() << "\n\n";
+    });
 
-    RewritePatternSet patterns(context);
-    patterns.insert<SinkTransposeThroughExtractSlice>(context);
-    patterns.insert<SinkTransposeThroughExpandShape>(context);
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    RewritePatternSet sinkingPatterns(context);
+    bubblingPatterns.insert<ComposeTransposes>(context);
+    sinkingPatterns.insert<SinkTransposeThroughExtractSlice>(context);
+    sinkingPatterns.insert<SinkTransposeThroughExpandShape>(context);
+    if (failed(
+            applyPatternsAndFoldGreedily(funcOp, std::move(sinkingPatterns)))) {
       return signalPassFailure();
     }
 
