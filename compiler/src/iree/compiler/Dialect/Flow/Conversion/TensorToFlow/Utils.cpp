@@ -64,26 +64,22 @@ static bool isOffsetSizeAndStrideMappableToFlow(ArrayRef<OpFoldResult> offsets,
 
   bool fullSlices = true;
   for (size_t dim = offsets.size(); dim > 0; dim--) {
-    int64_t staticOffset = getVal(offsets[dim - 1], ShapedType::kDynamic);
-    int64_t staticSize = getVal(sizes[dim - 1], ShapedType::kDynamic);
-    int64_t staticStride = getVal(strides[dim - 1], ShapedType::kDynamic);
+    OpFoldResult offset = offsets[dim - 1];
+    OpFoldResult size = sizes[dim - 1];
+    OpFoldResult stride = strides[dim - 1];
+    int64_t staticOffset = getVal(offset, ShapedType::kDynamic);
+    int64_t staticSize = getVal(size, ShapedType::kDynamic);
+    int64_t staticStride = getVal(stride, ShapedType::kDynamic);
 
     if (staticStride != 1)
-      return false;
-    // The offsets and sizes dont have to be static for all dimensions. When
-    // `fullSlices` is true, the offset and sizes can be dynamic. But many
-    // cases, the dynamic offset/size value is obtained by computing from
-    // another tensor which lives on the device. To avoid host-round tripping
-    // enforce that offset/size is also static.
-    if (staticSize == ShapedType::kDynamic)
-      return false;
-    if (staticOffset == ShapedType::kDynamic)
       return false;
 
     if (fullSlices == false) {
       if (staticSize != 1)
         return false;
     } else {
+      // TODO: Use ValueBoundsAnalysis to check whether two dynamic values
+      // are equal.
       if (!(staticOffset == 0 && staticSize != ShapedType::kDynamic &&
             baseShape[dim - 1] != ShapedType::kDynamic &&
             staticSize == baseShape[dim - 1])) {
