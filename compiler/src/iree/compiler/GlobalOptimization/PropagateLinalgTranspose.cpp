@@ -257,6 +257,86 @@ public:
   }
 };
 
+// Sinks a transpose through a tensor.expand_shape.
+class FuseTransposedGenericInput : public OpRewritePattern<linalg::GenericOp> {
+public:
+  using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
+                                PatternRewriter &rewriter) const override {
+    OpOperand *transposeOperand = nullptr;
+    linalg::TransposeOp transposeOp;
+    for (int64_t i = 0, e = genericOp.getInputs().size(); i < e; ++i) {
+      OpOperand *inputOperand = &genericOp->getOpOperand(i);
+      Value input = inputOperand->get();
+      transposeOp = input.getDefiningOp<linalg::TransposeOp>();
+      if (transposeOp) {
+        transposeOperand = inputOperand;
+        break;
+      }
+    }
+    if (!transposeOperand) {
+      return failure();
+    }
+
+    int64_t inputIndex = transposeOperand->getOperandNumber();
+    ArrayRef<int64_t> perm = transposeOp.getPermutation();
+    auto invPerm = invertPermutationVector(perm);
+
+    rewriter.startRootUpdate(genericOp);
+
+    SmallVector<AffineMap> newIndexingMaps = genericOp.getIndexingMapsArray();
+    AffineMap inputMap = genericOp.getMatchingIndexingMap(transposeOperand);
+    SmallVector<AffineExpr> newExprs =
+        applyPermutation(inputMap.getResults(), invPerm);
+    AffineMap transposedMap =
+        AffineMap::get(inputMap.getNumDims(), inputMap.getNumSymbols(),
+                       newExprs, rewriter.getContext());
+    newIndexingMaps[inputIndex] = transposedMap;
+    genericOp.setIndexingMapsAttr(
+        rewriter.getAffineMapArrayAttr(newIndexingMaps));
+
+    genericOp.setOperand(inputIndex, transposeOp.getInput());
+    rewriter.finalizeRootUpdate(genericOp);
+    return success();
+  }
+};
+
+// Sinks a transpose to the input of a linalg named op. The conditions for the
+// rewrite are
+//   1) One of the input producers to the named op is a linalg.transpose
+//   2) The named op is generalizable
+// The easiest way to get the rewrite we want then is to just try to generalize
+// all transposed named ops and let the generic pattern handle the actual
+// rewrite.
+class GeneralizeInputTransposedNamedOp
+    : public OpInterfaceRewritePattern<linalg::LinalgOp> {
+public:
+  using OpInterfaceRewritePattern<linalg::LinalgOp>::OpInterfaceRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::LinalgOp linalgOp,
+                                PatternRewriter &rewriter) const override {
+    // Don't generalize transposes.
+    if (isa<linalg::TransposeOp>(linalgOp)) {
+      return failure();
+    }
+    bool hasTranspose = false;
+    for (Value input : linalgOp.getDpsInputs()) {
+      if (input.getDefiningOp<linalg::TransposeOp>()) {
+        hasTranspose = true;
+        break;
+      }
+    }
+    if (!hasTranspose) {
+      return failure();
+    }
+    if (failed(linalg::generalizeNamedOp(rewriter, linalgOp))) {
+      return failure();
+    }
+    return success();
+  }
+};
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -339,6 +419,11 @@ struct PropagateLinalgTransposePass
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<linalg::LinalgDialect, tensor::TensorDialect>();
   }
+  PropagateLinalgTransposePass(bool enableAggressivePropagation) {
+    this->enableAggressivePropagation = enableAggressivePropagation;
+  }
+  PropagateLinalgTransposePass(const PropagateLinalgTransposePass &pass)
+      : PropagateLinalgTransposePass(pass.enableAggressivePropagation) {}
 
   void runOnOperation() override;
 };
@@ -376,6 +461,7 @@ void PropagateLinalgTransposePass::runOnOperation() {
     sinkingPatterns.insert<NamedBatchMatmulConversions>(context);
     sinkingPatterns.insert<SinkTransposeThroughExtractSlice>(context);
     sinkingPatterns.insert<SinkTransposeThroughExpandShape>(context);
+    sinkingPatterns.insert<FuseTransposedGenericInput>(context);
     if (failed(
             applyPatternsAndFoldGreedily(funcOp, std::move(sinkingPatterns)))) {
       return signalPassFailure();
@@ -399,6 +485,9 @@ void PropagateLinalgTransposePass::runOnOperation() {
   {
     RewritePatternSet patterns(context);
     patterns.insert<ComposeTransposes>(context);
+    if (enableAggressivePropagation) {
+      patterns.insert<GeneralizeInputTransposedNamedOp>(context);
+    }
     if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
       return signalPassFailure();
     }
@@ -441,8 +530,9 @@ void PropagateLinalgTransposePass::runOnOperation() {
 }
 
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
-createPropagateLinalgTransposePass() {
-  return std::make_unique<PropagateLinalgTransposePass>();
+createPropagateLinalgTransposePass(bool enableAggressivePropagation) {
+  return std::make_unique<PropagateLinalgTransposePass>(
+      enableAggressivePropagation);
 }
 
 } // namespace GlobalOptimization

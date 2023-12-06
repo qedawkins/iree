@@ -112,13 +112,16 @@ void buildGlobalOptimizationPassPipeline(
       // decisions as SetEncoding is expected to pick the ideal layout for
       // that operation anyway, and this way we only need to make such a
       // decision once.
-      .addPass(createPropagateLinalgTransposePass)
+      .addPass([&]() {
+        return createPropagateLinalgTransposePass(
+            transformOptions.options.aggressiveTransposePropagation);
+      })
       .addPass(mlir::createCanonicalizerPass)
       .addPass(mlir::createCSEPass);
 
   // Enable data tiling after they are in a canonical form.
   if (transformOptions.options.dataTiling) {
-    mainPassManager.addPass(createLiftGenericToTransposeBatchMatmulPass());
+    // mainPassManager.addPass(createLiftGenericToTransposeBatchMatmulPass());
     // Expand all vectors in vecmat/matvec ops into matrices for tiling.
     if (clEnableExpandVectors) {
       mainPassManager.addPass(createExpandVectorsPass());

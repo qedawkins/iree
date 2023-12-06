@@ -71,6 +71,10 @@ struct GlobalOptimizationOptions {
   // Enables transposing all concatenations to the outer most dimension.
   bool outerDimConcat = false;
 
+  // Enables aggressive propagation of transposes to the inputs of named ops,
+  // rewriting named ops as fused generics.
+  bool aggressiveTransposePropagation = false;
+
   // Enables data tiling.
   bool dataTiling = true;
 

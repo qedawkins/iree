@@ -95,7 +95,7 @@ std::unique_ptr<Pass> createOptimizeNumericsPass();
 // Create a pass that propagates linalg.transpose ops to a restricted set of
 // operations.
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
-createPropagateLinalgTransposePass();
+createPropagateLinalgTransposePass(bool enableAggressivePropagation = false);
 
 // Removes tensors that have 0-extents.
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>

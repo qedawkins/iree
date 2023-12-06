@@ -104,6 +104,12 @@ void GlobalOptimizationOptions::bindOptions(OptionsBinder &binder) {
                    llvm::cl::desc("Enables transposing all concatenations to "
                                   "the outer most dimension."),
                    llvm::cl::cat(category));
+  binder.opt<bool>(
+      "iree-opt-enable-aggressive-transpose-propagation",
+      aggressiveTransposePropagation,
+      llvm::cl::desc(
+          "Enables aggressive propagation of transposes to named ops"),
+      llvm::cl::cat(category));
 
   binder.opt<bool>("iree-opt-data-tiling", dataTiling,
                    llvm::cl::desc("Enables data tiling path."),
