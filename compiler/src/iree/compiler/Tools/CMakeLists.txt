@@ -68,6 +68,7 @@ iree_cc_library(
     iree::compiler::Modules::HAL::Loader::Transforms
     iree::compiler::Modules::IO::Parameters::IR::IOParametersDialect
     iree::compiler::Modules::IO::Parameters::Transforms
+    iree::compiler::Modules::IO::Stream::IR::IOStreamDialect
     iree::compiler::Pipelines
     iree::compiler::Preprocessing::Passes
     iree::compiler::Preprocessing::TransformExtensions::PreprocessingExtensions

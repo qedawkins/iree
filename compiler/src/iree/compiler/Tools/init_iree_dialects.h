@@ -31,6 +31,7 @@
 #include "iree/compiler/Modules/HAL/Inline/IR/HALInlineDialect.h"
 #include "iree/compiler/Modules/HAL/Loader/IR/HALLoaderDialect.h"
 #include "iree/compiler/Modules/IO/Parameters/IR/IOParametersDialect.h"
+#include "iree/compiler/Modules/IO/Stream/IR/IOStreamDialect.h"
 #include "iree/compiler/Preprocessing/TransformExtensions/PreprocessingExtensions.h"
 #include "mlir/IR/Dialect.h"
 
@@ -45,6 +46,7 @@ inline void registerIreeDialects(DialectRegistry &registry) {
                   IREE::HAL::Inline::HALInlineDialect,
                   IREE::HAL::Loader::HALLoaderDialect,
                   IREE::IO::Parameters::IOParametersDialect,
+                  IREE::IO::Stream::IOStreamDialect,
                   IREE::Input::IREEInputDialect,
                   IREE::LinalgExt::IREELinalgExtDialect,
                   IREE::Stream::StreamDialect,
