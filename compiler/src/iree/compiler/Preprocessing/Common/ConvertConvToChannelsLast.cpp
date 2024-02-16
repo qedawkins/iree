@@ -21,7 +21,9 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-#define DEBUG_TYPE "iree-global-opt-convert-conv-to-channels-last"
+#define DEBUG_TYPE "iree-preprocessing-convert-conv-to-channels-last"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
+#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
 namespace mlir::iree_compiler::Preprocessing {
 
@@ -698,6 +700,8 @@ public:
       }
     }
 
+    LDBG("after converting convolutions to channels last\n" << op);
+
     // Propagate packs introduced by the conversion patterns through adjacent
     // pads. Note that packs introduced by the above patterns will never include
     // padding.
@@ -710,6 +714,8 @@ public:
       }
     }
 
+    LDBG("after propagating packs/unpacks\n" << op);
+
     // Run pack/unpack canonicalization to try to cancel any packs.
     {
       RewritePatternSet patterns(context);
@@ -719,6 +725,8 @@ public:
         return signalPassFailure();
       }
     }
+
+    LDBG("after canonicalizing packs/unpacks\n" << op);
 
     // Patterns to convert packs/unpacks that are just transposes on the outer
     // dims to linalg.transpose.
@@ -736,6 +744,8 @@ public:
       }
     }
 
+    LDBG("after generalizing outer dims only packs/unpacks\n" << op);
+
     // Generalize leftover packs and unpacks to allow for transpose propagation
     // and unit dim folding to handle them more effectively.
     {
@@ -746,6 +756,8 @@ public:
         return signalPassFailure();
       }
     }
+
+    LDBG("after generalizing all remaining packs/unpacks\n" << op);
   }
 
 private:
