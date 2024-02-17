@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
+#include "mlir/Transforms/Passes.h"
 
 #define DEBUG_TYPE "iree-preprocessing-pass-pipeline"
 
@@ -92,7 +93,10 @@ buildTransposeConvolutionPassPipeline(OpPassManager &passManager,
       .addPass(GlobalOptimization::createDetachElementwiseFromNamedOpsPass)
       .addPass(mlir::createLinalgNamedOpConversionPass)
       .addPass(GlobalOptimization::createConvert1X1FilterConv2DToMatmulPass)
+      .addPass(createConvertConvToChannelsLastPass)
       .addPass(IREE::Flow::createFoldUnitExtentDimsPass);
+  passManager.addPass(createCanonicalizerPass());
+  passManager.addPass(createCSEPass());
 }
 
 void registerPreprocessingPasses() {
