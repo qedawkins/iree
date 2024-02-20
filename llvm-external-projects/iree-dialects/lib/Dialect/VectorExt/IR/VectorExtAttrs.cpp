@@ -292,9 +292,8 @@ LogicalResult NestedLayoutAttr::verify(
 SmallVector<Value>
 NestedLayoutAttr::computeThreadIds(Value threadId,
                                    RewriterBase &rewriter) const {
-  auto basisSizes = llvm::concat<const int64_t>(
-      applyPermutation(getSubgroupBasis(), getSubgroupOrder()),
-      applyPermutation(getThreadBasis(), getThreadOrder()));
+  auto basisSizes =
+      llvm::concat<const int64_t>(getSubgroupBasis(), getThreadBasis());
 
   SmallVector<OpFoldResult> basisIndexAttr;
   for (int64_t basisIndex : basisSizes) {
