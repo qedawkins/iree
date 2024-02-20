@@ -9,8 +9,10 @@
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.h"
 #include "iree-dialects/Transforms/TransformMatchers.h"
+#include "iree/compiler/Dialect/Flow/Transforms/RegionOpUtils.h"
 #include "iree/compiler/GlobalOptimization/PassDetail.h"
 #include "iree/compiler/GlobalOptimization/Passes.h"
+#include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -677,6 +679,60 @@ static Value rewriteCatNegateAndSlice(RewriterBase &rewriter,
 }
 
 //===----------------------------------------------------------------------===//
+// Named GEMM-like extensions
+//===----------------------------------------------------------------------===//
+
+template <typename OpTy>
+class NamedMatmulOrBatchMatmulOpConversion : public OpRewritePattern<OpTy> {
+public:
+  using OpRewritePattern<OpTy>::OpRewritePattern;
+  NamedMatmulOrBatchMatmulOpConversion(MLIRContext *ctx, PatternBenefit b = 1)
+      : OpRewritePattern<OpTy>(ctx, b) {}
+
+  LogicalResult matchAndRewrite(OpTy namedOp,
+                                PatternRewriter &rewriter) const override {
+    if (!IREE::Flow::isNonNullAndOutsideDispatch(namedOp)) {
+      return failure();
+    }
+
+    bool didChangeOperand = false;
+    auto replaceOperandWithTypeCast = [&](OpOperand &operand) {
+      auto producer = operand.get().getDefiningOp<linalg::GenericOp>();
+      if (!producer) {
+        return;
+      }
+      if (!linalg::isElementwise(producer) || producer.getNumDpsInputs() != 1 ||
+          producer.getNumDpsInits() != 1) {
+        return;
+      }
+
+      if (!llvm::hasSingleElement(producer.getBlock()->without_terminator())) {
+        return;
+      }
+      if (!llvm::isa<arith::ExtFOp, arith::ExtSIOp>(
+              *producer.getBlock()->without_terminator().begin())) {
+        return;
+      }
+      namedOp.setOperand(operand.getOperandNumber(), producer->getOperand(0));
+      didChangeOperand = true;
+    };
+
+    replaceOperandWithTypeCast(namedOp->getOpOperand(0));
+    replaceOperandWithTypeCast(namedOp->getOpOperand(1));
+    if (didChangeOperand) {
+      return success();
+    }
+    return failure();
+  }
+
+private:
+  // Non-type literal array template parameters are a C++20 feature, so instead
+  // all the named op patterns pass their permutation explicitly as a
+  // SmallVector.
+  SmallVector<int64_t> permutation;
+};
+
+//===----------------------------------------------------------------------===//
 // Pass Implementation
 //===----------------------------------------------------------------------===//
 
@@ -686,6 +742,23 @@ struct RaiseSpecialOpsPass : public RaiseSpecialOpsBase<RaiseSpecialOpsPass> {
   }
 
   void runOnOperation() override {
+
+    // First fuse named gemm-like ops with adjacent elementwise conversions.
+    {
+      RewritePatternSet patterns(&getContext());
+      patterns.insert<
+          NamedMatmulOrBatchMatmulOpConversion<linalg::MatmulOp>,
+          NamedMatmulOrBatchMatmulOpConversion<linalg::BatchMatmulOp>,
+          NamedMatmulOrBatchMatmulOpConversion<linalg::MatmulTransposeBOp>,
+          NamedMatmulOrBatchMatmulOpConversion<linalg::MatmulTransposeAOp>,
+          NamedMatmulOrBatchMatmulOpConversion<
+              linalg::BatchMatmulTransposeAOp>>(&getContext());
+      if (failed(applyPatternsAndFoldGreedily(getOperation(),
+                                              std::move(patterns)))) {
+        return signalPassFailure();
+      }
+    }
+
     IRRewriter rewriter(&getContext());
 
     getOperation()->walk([&](linalg::GenericOp op) {
