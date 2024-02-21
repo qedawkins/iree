@@ -4,6 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include <mlir/IR/AffineMap.h>
 #include <numeric>
 
 #include "iree-dialects/Dialect/VectorExt/IR/VectorExtDialect.h"
@@ -13,6 +14,8 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
@@ -216,9 +219,100 @@ bool LayoutAttr::hasLaneConflictWith(const LayoutAttr &other) {
   return false;
 }
 
+// Project the nested layout. This take a mask on the dimensions of the vector
+// associated with this layout and projects out those dimensions. This reduces
+// the rank of the layout in the process.
 VectorLayoutInterface
 NestedLayoutAttr::project(ArrayRef<bool> projectedDims) const {
-  llvm_unreachable("Not yet implemented");
+  assert(projectedDims.size() == getBatchesPerSubgroup().size() &&
+         "projectedDims size must match layout rank");
+
+  // Projection for this layout simply means the sizes along the projected
+  // are dropped.
+  SmallVector<int64_t> subgroupCount;
+  SmallVector<int64_t> batchCount;
+  SmallVector<int64_t> outerCount;
+  SmallVector<int64_t> threadCount;
+  SmallVector<int64_t> elementCount;
+  int64_t count = 0;
+  // Map to track pre-projection -> post-projection indices. Used to update
+  // the dimension orders.
+  llvm::DenseMap<int64_t, int64_t> indexToRankReducedIndexMap;
+  for (auto [idx, isProjected] : llvm::enumerate(projectedDims)) {
+    if (!isProjected) {
+      subgroupCount.push_back(getSubgroupsPerWorkgroup()[idx]);
+      batchCount.push_back(getBatchesPerSubgroup()[idx]);
+      outerCount.push_back(getOutersPerBatch()[idx]);
+      threadCount.push_back(getThreadsPerOuter()[idx]);
+      elementCount.push_back(getElementsPerThread()[idx]);
+      indexToRankReducedIndexMap[idx] = count++;
+    }
+  }
+  // This layout is invalid for rank-0 vectors.
+  assert(count >= 0 && "unimplemented rank-0 vector");
+
+  auto getRankReducedPermutation =
+      [&](ArrayRef<int64_t> perm) -> SmallVector<int64_t> {
+    SmallVector<int64_t> newPerm;
+    for (auto i : perm) {
+      if (indexToRankReducedIndexMap.contains(i)) {
+        newPerm.push_back(indexToRankReducedIndexMap[i]);
+      }
+    }
+    return newPerm;
+  };
+
+  SmallVector<int64_t> subgroupOrder =
+      getRankReducedPermutation(getSubgroupOrder());
+  SmallVector<int64_t> batchOrder = getRankReducedPermutation(getBatchOrder());
+  SmallVector<int64_t> outerOrder = getRankReducedPermutation(getOuterOrder());
+  SmallVector<int64_t> threadOrder =
+      getRankReducedPermutation(getThreadOrder());
+  SmallVector<int64_t> elementOrder =
+      getRankReducedPermutation(getElementOrder());
+
+  // Basis vectors need to have the subgroup/thread counts along the projected
+  // dimensions collapsed in to adjacent un-projected basis dimensions. Note
+  // that thread ids of un-projected dimensions must remain the same after
+  // projection. As a result, the total number of threads represented by basis
+  // elements smaller than an un-projected dim must remain invariant. For
+  // example:
+  //
+  // projectedDims = [0, 1, 0]
+  // basis = [2, 4, 2]
+  //
+  // projected_basis = [2, 8]
+  //                    ^ same number of threads succeeding this dim.
+  auto getCollapsedBasis = [&](ArrayRef<int64_t> basis,
+                               ArrayRef<int64_t> order) {
+    SmallVector<int64_t> newBasis;
+    // The projection mask is in the order of vector dimensions. Apply the
+    // permutation for this basis to get the mask of which basis dimensions
+    // are projected.
+    auto nativeOrderProjectedDims = applyPermutation(projectedDims, order);
+    int64_t acc = 1;
+    for (auto [basisSize, isProjected] :
+         llvm::zip_equal(basis, nativeOrderProjectedDims)) {
+      acc *= basisSize;
+      if (!isProjected) {
+        newBasis.push_back(acc);
+        acc = 1;
+      }
+    }
+    if (nativeOrderProjectedDims.back()) {
+      newBasis.back() *= acc;
+    }
+    return newBasis;
+  };
+  SmallVector<int64_t> subgroupBasis =
+      getCollapsedBasis(getSubgroupBasis(), getSubgroupOrder());
+  SmallVector<int64_t> threadBasis =
+      getCollapsedBasis(getThreadBasis(), getThreadOrder());
+
+  return NestedLayoutAttr::get(getContext(), subgroupCount, subgroupOrder,
+                               batchCount, batchOrder, outerCount, outerOrder,
+                               threadCount, threadOrder, elementCount,
+                               elementOrder, subgroupBasis, threadBasis);
 }
 
 VectorLayoutInterface
