@@ -20,6 +20,7 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Rewrite/PatternApplicator.h"
@@ -318,6 +319,81 @@ struct DistributeTransferWriteNestedLayoutAttr final
   Value threadId;
 };
 
+struct DistributeBroadcastNestedLayoutAttr final
+    : OpDistributionPattern<vector::BroadcastOp> {
+  using OpDistributionPattern::OpDistributionPattern;
+
+  LogicalResult matchAndRewrite(vector::BroadcastOp broadcastOp,
+                                DistributionSignature &signature,
+                                PatternRewriter &rewriter) const override {
+
+    VectorValue source = dyn_cast<VectorValue>(broadcastOp.getSource());
+    if (!source) {
+      // TODO: Add support for scalar broadcasting.
+      return failure();
+    }
+    NestedLayoutAttr sourceLayout =
+        dyn_cast<NestedLayoutAttr>(signature[source]);
+    if (!sourceLayout) {
+      return failure();
+    }
+
+    VectorValue vector = broadcastOp.getVector();
+    NestedLayoutAttr vectorLayout =
+        dyn_cast<NestedLayoutAttr>(signature[vector]);
+    if (!vectorLayout) {
+      return failure();
+    }
+
+    SmallVector<int64_t> distShape = vectorLayout.getDistributedShape();
+    Type elementType =
+        llvm::cast<ShapedType>(vector.getType()).getElementType();
+    auto vectorType = VectorType::get(distShape, elementType);
+    Location loc = broadcastOp.getLoc();
+    Value accumulator = rewriter.create<arith::ConstantOp>(
+        loc, vectorType, rewriter.getZeroAttr(vectorType));
+
+    int64_t rank = vectorLayout.getBatchOrder().size();
+    int64_t sourceRank = sourceLayout.getBatchOrder().size();
+    // We unroll along the outer dimensions as well for a similar reason to the
+    // transfer ops. `vector.broadcast` can only broadcast along outer dims, so
+    // mixing broadcasted and un-broadcasted element/outer dims can't be
+    // represented with a broadcast.
+    SmallVector<int64_t> tileShape = getElementVectorTileShape(vectorLayout);
+    SmallVector<int64_t> loopOrder = getLoopOrder(vectorLayout);
+
+    Value distributedSource = getDistributed(rewriter, source, sourceLayout);
+
+    VectorType tileType =
+        VectorType::get(applyPermutation(vectorLayout.getElementsPerThread(),
+                                         vectorLayout.getElementOrder()),
+                        elementType);
+    for (SmallVector<int64_t> offsets :
+         StaticTileOffsetRange(distShape, tileShape, loopOrder)) {
+      ArrayRef<int64_t> offsetsRef(offsets);
+      SmallVector<int64_t> sourceOffsets;
+      ArrayRef<int64_t> batchSourceOffsets =
+          offsetsRef.slice(rank - sourceRank, sourceRank);
+      ArrayRef<int64_t> outerSourceOffsets =
+          offsetsRef.slice(2 * rank - sourceRank, sourceRank);
+      sourceOffsets.append(batchSourceOffsets.begin(),
+                           batchSourceOffsets.end());
+      sourceOffsets.append(outerSourceOffsets.begin(),
+                           outerSourceOffsets.end());
+
+      Value slice = rewriter.create<vector::ExtractOp>(loc, distributedSource,
+                                                       sourceOffsets);
+      Value broadcastedSlice =
+          rewriter.create<vector::BroadcastOp>(loc, tileType, slice);
+      accumulator = rewriter.create<vector::InsertOp>(
+          loc, broadcastedSlice, accumulator, offsetsRef.take_front(rank * 2));
+    }
+
+    replaceOpWithDistributedValues(rewriter, broadcastOp, accumulator);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateGPUDistributeNestedLayoutAttrPatterns(
@@ -325,6 +401,7 @@ void populateGPUDistributeNestedLayoutAttrPatterns(
   patterns.add<DistributeTransferReadNestedLayoutAttr,
                DistributeTransferWriteNestedLayoutAttr>(patterns.getContext(),
                                                         threadId);
+  patterns.add<DistributeBroadcastNestedLayoutAttr>(patterns.getContext());
 }
 
 }; // namespace mlir::iree_compiler
