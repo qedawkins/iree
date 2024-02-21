@@ -15,6 +15,7 @@
 #include "iree/compiler/Codegen/LLVMGPU/PassDetail.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -30,6 +31,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/Support/LLVM.h"
 
 #define DEBUG_TYPE "iree-llvmgpu-vector-distribute"
 
@@ -157,11 +159,20 @@ private:
     // the layout of the contraction op. This is common for cases where the
     // initial values of the accumulator in a linalg.matmul is read from memory
     // instead of just being a zerofill.
-    SetVector<Operation *> forwardSlice;
-    ForwardSliceOptions options;
-    getForwardSlice(transfer.getResult(), &forwardSlice, options);
+    ForwardSliceOptions forwardOptions;
+    forwardOptions.filter = [&](Operation *op) -> bool {
+      return llvm::any_of(op->getResultTypes(),
+                          [](Type t) { return isa<VectorType>(t); });
+    };
+    BackwardSliceOptions backwardOptions;
+    backwardOptions.filter = [&](Operation *op) -> bool {
+      return llvm::any_of(op->getOperandTypes(),
+                          [](Type t) { return isa<VectorType>(t); });
+    };
+    SetVector<Operation *> slice =
+        getSlice(transfer, backwardOptions, forwardOptions);
 
-    if (llvm::any_of(forwardSlice, [](Operation *op) {
+    if (llvm::any_of(slice, [](Operation *op) {
           return llvm::isa<vector::ContractionOp>(op);
         })) {
       return;
