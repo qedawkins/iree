@@ -617,8 +617,6 @@ struct DistributeTranspose final : OpDistributionPattern<vector::TransposeOp> {
     VectorLayoutInterface layout =
         dyn_cast<VectorLayoutInterface>(signature[value]);
     if (!layout) {
-      llvm::errs() << "Failed to get transpose layout\n";
-      transposeOp.dump();
       return failure();
     }
 

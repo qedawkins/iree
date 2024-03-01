@@ -174,11 +174,29 @@ public:
         /*bodyBuild=*/nullptr, linalg::getPrunedAttributeList(genericOp));
     rewriter.cloneRegionBefore(genericOp.getRegion(), newGenericOp.getRegion(),
                                newGenericOp.getRegion().begin());
+    SmallVector<unsigned int> interchange;
+    int64_t permIdx = 0;
+    for (int i = 0, e = transposedMap.getNumDims(); i < e; ++i) {
+      if (transposedMap.isFunctionOfDim(i)) {
+        interchange.push_back(
+            llvm::cast<AffineDimExpr>(transposedMap.getResult(permIdx))
+                .getPosition());
+        permIdx++;
+        continue;
+      }
+      interchange.push_back(i);
+    }
+    auto interchangedGenericOp =
+        linalg::interchangeGenericOp(rewriter, newGenericOp, interchange);
+    if (failed(interchangedGenericOp)) {
+      return failure();
+    }
 
     // Replace the result of the transpose with the transposed init.
-    rewriter.replaceOp(transposeOp, newGenericOp.getResult(resultIndex));
-    for (auto [oldRes, newRes] :
-         llvm::zip_equal(genericOp.getResults(), newGenericOp.getResults())) {
+    rewriter.replaceOp(transposeOp,
+                       interchangedGenericOp->getResult(resultIndex));
+    for (auto [oldRes, newRes] : llvm::zip_equal(
+             genericOp.getResults(), interchangedGenericOp->getResults())) {
       if (oldRes.getResultNumber() == resultIndex)
         continue;
       rewriter.replaceAllUsesWith(oldRes, newRes);
