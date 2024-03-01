@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
@@ -395,10 +396,19 @@ struct FusionOfTensorOpsPass
               return false;
             }
 
-            // Do not fuse producer generic op if it has more than one user.
+            // Do not fuse producer generic op if it has more than one user
+            // or any reduction iterators.
             if (auto producerGenericOp =
                     dyn_cast<linalg::GenericOp>(producer)) {
-              return producerGenericOp->hasOneUse();
+              return producerGenericOp->hasOneUse() &&
+                     llvm::all_of(producerGenericOp.getIteratorTypesArray(),
+                                  linalg::isParallelIterator);
+            }
+
+            if (auto consumerGenericOp =
+                    dyn_cast<linalg::GenericOp>(producer)) {
+              return llvm::all_of(consumerGenericOp.getIteratorTypesArray(),
+                                  linalg::isParallelIterator);
             }
             // Fuse in all other cases.
             return true;
