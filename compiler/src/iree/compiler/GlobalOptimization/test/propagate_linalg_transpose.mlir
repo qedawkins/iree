@@ -290,3 +290,19 @@ util.func public @propagate_transpose_through_unary_elementwise(%arg0 : tensor<2
 //  SINK-SAME:                    outs({{.*}} : tensor<3x4x2xf32>)
 //  SINK-SAME:                    permutation = [1, 2, 0]
 //       SINK:   util.return %[[RES]] : tensor<3x4x2xf32>
+
+// -----
+
+util.func public @bubble_through_matmul(%lhs: tensor<16x16xf32>,
+                                        %rhs: tensor<16x16xf32>) -> tensor<16x16xf32> {
+  %empty = tensor.empty(): tensor<16x16xf32>
+  %mm = linalg.matmul ins(%lhs, %rhs : tensor<16x16xf32>, tensor<16x16xf32>)
+                            outs(%empty : tensor<16x16xf32>) -> tensor<16x16xf32>
+  %transpose = linalg.transpose ins(%mm : tensor<16x16xf32>)
+      outs(%empty : tensor<16x16xf32>) permutation = [1, 0]
+  util.return %transpose : tensor<16x16xf32>
+}
+// CHECK-LABEL: util.func public @propagate_to_matmul_ops
+//       CHECK:   linalg.matmul_transpose_b
+//       CHECK:   %[[SECOND_MM:.+]] = linalg.matmul_transpose_a
+//       CHECK:   util.return %[[SECOND_MM]]

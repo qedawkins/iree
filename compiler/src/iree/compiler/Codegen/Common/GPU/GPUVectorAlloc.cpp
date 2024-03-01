@@ -9,6 +9,7 @@
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/LinalgOpInfo.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Dialect/Affine/ViewLikeInterfaceUtils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -16,11 +17,72 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 
 #define DEBUG_TYPE "iree-codegen-gpu-vector-alloc"
 
 namespace mlir::iree_compiler {
+
+namespace {
+/// Merge insert_slice operation with store/transferWriteOp operation.
+class InsertSliceOfTransferWriteOpFolder final
+    : public OpRewritePattern<tensor::InsertSliceOp> {
+public:
+  using OpRewritePattern<tensor::InsertSliceOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::InsertSliceOp insertSliceOp,
+                                PatternRewriter &rewriter) const override;
+};
+
+template <typename XferOp, typename ExtractOrInsertOp>
+static LogicalResult preconditionsFoldExtractOrInsertWithTransferOp(
+    RewriterBase &rewriter, XferOp xferOp,
+    ExtractOrInsertOp extractOrInsertSliceOp) {
+  if (xferOp.hasOutOfBoundsDim())
+    return rewriter.notifyMatchFailure(xferOp, "out of bounds transfer dim");
+  if (xferOp.getMask())
+    return rewriter.notifyMatchFailure(xferOp, "masked transfer");
+  if (!extractOrInsertSliceOp.hasUnitStride()) {
+    return rewriter.notifyMatchFailure(
+        xferOp, "non-1 stride insert/extract, requires keeping track of "
+                "strides, this may result in needing to insert "
+                "vector.insert_strided_slice/extract_strided_slice ops");
+  }
+  return success();
+}
+
+LogicalResult InsertSliceOfTransferWriteOpFolder::matchAndRewrite(
+    tensor::InsertSliceOp insertSliceOp, PatternRewriter &rewriter) const {
+  auto writeOp = insertSliceOp.getSource()
+                     .template getDefiningOp<vector::TransferWriteOp>();
+  if (!writeOp)
+    return rewriter.notifyMatchFailure(insertSliceOp, "not a transfer_write");
+
+  LogicalResult preconditionResult =
+      preconditionsFoldExtractOrInsertWithTransferOp(rewriter, writeOp,
+                                                     insertSliceOp);
+  if (failed(preconditionResult))
+    return preconditionResult;
+
+  SmallVector<Value> indices(writeOp.getIndices().begin(),
+                             writeOp.getIndices().end());
+  SmallVector<Value> sourceIndices;
+  affine::resolveIndicesIntoOpWithOffsetsAndStrides(
+      rewriter, writeOp.getLoc(), insertSliceOp.getMixedOffsets(),
+      insertSliceOp.getMixedStrides(), insertSliceOp.getDroppedDims(), indices,
+      sourceIndices);
+
+  rewriter.replaceOpWithNewOp<vector::TransferWriteOp>(
+      insertSliceOp, writeOp.getValue(), insertSliceOp.getDest(), sourceIndices,
+      AffineMapAttr::get(expandDimsToRank(writeOp.getPermutationMap(),
+                                          insertSliceOp.getDestType().getRank(),
+                                          insertSliceOp.getDroppedDims())),
+      writeOp.getInBoundsAttr());
+
+  return success();
+}
+} // namespace
 
 // For optimal performance we always want to copy 128 bits.
 static constexpr int copyVectorNumBits = 128;
@@ -148,6 +210,12 @@ public:
       lhs.set(lhsVec);
       rhs.set(rhsVec);
     }
+
+    // RewritePatternSet patterns(&getContext());
+    // patterns.insert<InsertSliceOfTransferWriteOpFolder>(&getContext());
+    // if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    //   return signalPassFailure();
+    // }
   }
 };
 } // namespace
