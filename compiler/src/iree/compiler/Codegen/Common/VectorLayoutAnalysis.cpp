@@ -9,6 +9,7 @@
 #include <cassert>
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -16,6 +17,8 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Location.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/AffineMap.h"
 
 #define DEBUG_TYPE "iree-vector-layout-analysis"
 
@@ -689,6 +692,56 @@ static void enforceLayoutToContractionOp(
   update(value, changed);
 }
 
+static void enforceLayoutToTransferReadOp(
+    vector::TransferReadOp read, ArrayRef<DistributionLayout *> operandLattices,
+    ArrayRef<const DistributionLayout *> resultLattices,
+    std::function<void(DistributionLayout *, ChangeResult)> update) {
+  // Non-masked reads only have a layout on the result.
+  if (!read.getMask()) {
+    return;
+  }
+
+  // Transfer read has only one vector result.
+  const DistributionLayout *result = resultLattices[0];
+  // Masked transfer read has only one vector operand.
+  DistributionLayout *value = operandLattices[0];
+
+  // Cannot enforce layout if result is uninitialized.
+  if (result->isUninitialized()) {
+    return;
+  }
+
+  AffineMap compressedTransferMap =
+      compressUnusedDims(read.getPermutationMap());
+  SmallVector<bool> droppedDimsMask(compressedTransferMap.getNumResults(),
+                                    false);
+  SmallVector<AffineExpr> newExprs;
+  for (auto [i, expr] : llvm::enumerate(compressedTransferMap.getResults())) {
+    if (isa<AffineDimExpr>(expr)) {
+      newExprs.push_back(expr);
+      continue;
+    }
+    assert(cast<AffineConstantExpr>(expr).getValue() == 0 &&
+           "invalid non-broadcast transfer read expr");
+    droppedDimsMask[i] = true;
+  }
+  AffineMap transposeMap = compressUnusedDims(AffineMap::get(
+      compressedTransferMap.getNumDims(), 0, newExprs, read.getContext()));
+  SmallVector<int64_t> permutation = llvm::to_vector(
+      llvm::seq(static_cast<int64_t>(0),
+                static_cast<int64_t>(transposeMap.getNumDims())));
+  permutation = transposeMap.compose(permutation);
+
+  VectorLayoutInterface projectedLayout =
+      result->getLayout().project(droppedDimsMask);
+  VectorLayoutInterface permutedLayout = projectedLayout.permute(permutation);
+
+  // Try to resolve with the transposed layout.
+  ChangeResult changed =
+      value->resolveWithPossibleConflict(permutedLayout, getOpOperand(read, 0));
+  update(value, changed);
+}
+
 void enforcementTransferFunction(
     Operation *op, ArrayRef<DistributionLayout *> operandLattices,
     ArrayRef<const DistributionLayout *> resultLattices,
@@ -700,29 +753,27 @@ void enforcementTransferFunction(
     return;
   }
 
-  if (auto multiReduce = dyn_cast<vector::MultiDimReductionOp>(op)) {
-    enforceLayoutToMultiReductionOp(multiReduce, operandLattices,
-                                    resultLattices, update);
-    return;
-  }
-
-  if (auto transpose = dyn_cast<vector::TransposeOp>(op)) {
-    enforceLayoutToTransposeOp(transpose, operandLattices, resultLattices,
-                               update);
-    return;
-  }
-
-  if (auto broadcast = dyn_cast<vector::BroadcastOp>(op)) {
-    enforceLayoutToBroadcastOp(broadcast, operandLattices, resultLattices,
-                               update);
-    return;
-  }
-
-  if (auto contraction = dyn_cast<vector::ContractionOp>(op)) {
-    enforceLayoutToContractionOp(contraction, operandLattices, resultLattices,
-                                 update);
-    return;
-  }
+  llvm::TypeSwitch<Operation *, void>(op)
+      .Case([&](vector::MultiDimReductionOp multiReduce) {
+        enforceLayoutToMultiReductionOp(multiReduce, operandLattices,
+                                        resultLattices, update);
+      })
+      .Case([&](vector::TransposeOp transpose) {
+        enforceLayoutToTransposeOp(transpose, operandLattices, resultLattices,
+                                   update);
+      })
+      .Case([&](vector::BroadcastOp broadcast) {
+        enforceLayoutToBroadcastOp(broadcast, operandLattices, resultLattices,
+                                   update);
+      })
+      .Case([&](vector::ContractionOp contraction) {
+        enforceLayoutToContractionOp(contraction, operandLattices,
+                                     resultLattices, update);
+      })
+      .Case([&](vector::TransferReadOp read) {
+        enforceLayoutToTransferReadOp(read, operandLattices, resultLattices,
+                                      update);
+      });
 }
 
 /// ==========================================================================

@@ -187,10 +187,6 @@ private:
       return;
     }
 
-    // TODO: Support masking.
-    if (transfer.getMask()) {
-      return;
-    }
     // Shared memory loads are expected to take the layout of the contraction.
     auto sourceMemRefType =
         dyn_cast<MemRefType>(transfer.getSource().getType());
