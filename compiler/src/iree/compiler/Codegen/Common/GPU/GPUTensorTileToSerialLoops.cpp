@@ -6,11 +6,49 @@
 
 #include "iree/compiler/Codegen/Common/GPU/PassDetail.h"
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 
+#define DEBUG_TYPE "iree-gpu-tile-to-serial-loops"
+
 namespace mlir::iree_compiler {
+
+/// Fuses `tensor.pad` ops into the the materalized loop nests containing
+/// their consumer ops.
+static void fusePadIntoConsumer(mlir::FunctionOpInterface funcOp) {
+  MLIRContext *context = funcOp.getContext();
+  RewritePatternSet patterns(context);
+  patterns.insert<linalg::ExtractSliceOfPadTensorSwapPattern>(
+      context, [](tensor::ExtractSliceOp) { return false; });
+  (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "--- After fusing padding into consumers ---\n";
+    funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    llvm::dbgs() << "\n\n";
+  });
+};
+
+/// Concretizes `tensor.pad` ops' result shapes.
+static void concretizePadShape(mlir::FunctionOpInterface funcOp) {
+  MLIRContext *context = funcOp.getContext();
+  RewritePatternSet patterns(context);
+  SmallVector<int64_t> numWorkgroups = getStaticNumWorkgroups(funcOp);
+  populateConcretizePadResultShapePatterns(patterns, numWorkgroups);
+  populateFoldAffineMinInDistributedLoopsPatterns(patterns, numWorkgroups);
+  (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "--- After concretizing pad result shape ---\n";
+    funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    llvm::dbgs() << "\n\n";
+  });
+}
 
 namespace {
 struct GPUTensorTensorTileToSerialLoopsPass final
@@ -21,11 +59,46 @@ public:
     registry.insert<scf::SCFDialect>();
   }
   void runOnOperation() override {
+    FunctionOpInterface funcOp = getOperation();
+
+    funcOp->walk([](tensor::PadOp padOp) {
+      if (padOp->hasAttr("lowering_config")) {
+        padOp->removeAttr("lowering_config");
+      }
+    });
+
+    // Fuse the pad with the workgroup level slice.
+    fusePadIntoConsumer(funcOp);
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "--- After fusing pad once ---\n";
+      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+      llvm::dbgs() << "\n\n";
+    });
+
+    concretizePadShape(funcOp);
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "--- After concretizing pad shape ---\n";
+      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+      llvm::dbgs() << "\n\n";
+    });
+
     // Tile reductions based on the annotated tiling configuration.
-    if (failed(tileReductionToSerialLoops(getOperation(),
+    if (failed(tileReductionToSerialLoops(funcOp,
                                           /*fuseInputProducer=*/true))) {
       return signalPassFailure();
     }
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "--- After tiling to loops ---\n";
+      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+      llvm::dbgs() << "\n\n";
+    });
+
+    // Fuse pad with the slices in the tiled loops.
+    fusePadIntoConsumer(funcOp);
+    concretizePadShape(funcOp);
   }
 };
 } // namespace

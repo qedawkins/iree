@@ -158,13 +158,15 @@ static void tileAndBufferize(OpPassManager &pm) {
   addBufferizePasses(nestedModulePM);
 }
 
-static void addGPUVectorizationPasses(OpPassManager &pm) {
+static void addGPUVectorizationPasses(OpPassManager &pm,
+                                      bool enableMasking = false) {
   pm.addNestedPass<func::FuncOp>(createDecomposeConvolutionToLowerDimOpsPass());
   GenericVectorizationPassOptions options;
   options.vectorizePadding = true;
   options.vectorizeGatherAccesses = true;
   options.enableCleanup = false;
   options.foldCastIntoContract = true;
+  options.enableVectorMasking = enableMasking;
   pm.addNestedPass<func::FuncOp>(createGenericVectorizationPass(options));
   pm.addNestedPass<func::FuncOp>(createOptimizeTensorInsertExtractSlicesPass());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
@@ -527,6 +529,8 @@ void addGPUVectorDistributePassPipeline(OpPassManager &pm) {
   nestedModulePM.addNestedPass<func::FuncOp>(
       createGPUTensorTileToSerialLoops());
 
+  // nestedModulePM.addNestedPass<func::FuncOp>(createGPUCreateFastSlowPathPass());
+
   // Generalize all named ops so that we can fold away unit extent dims. By this
   // point, all tiling is finished so the tiling configurations on those ops can
   // be safely dropped. This additionally allows vectorization of convolution to
@@ -545,7 +549,9 @@ void addGPUVectorDistributePassPipeline(OpPassManager &pm) {
       createOptimizeTensorInsertExtractSlicesPass());
 
   // Linalg -> Vector
-  addGPUVectorizationPasses(nestedModulePM);
+  addGPUVectorizationPasses(nestedModulePM, /*enableMasking=*/true);
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createOptimizeVectorTransferPass());
 
   // Allocate tensors for copies to shared memory.
   nestedModulePM.addNestedPass<func::FuncOp>(createGPUVectorAlloc());
