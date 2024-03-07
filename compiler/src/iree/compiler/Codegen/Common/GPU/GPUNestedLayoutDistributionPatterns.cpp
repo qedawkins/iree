@@ -484,12 +484,99 @@ struct DistributeBroadcast final : OpDistributionPattern<vector::BroadcastOp> {
   }
 };
 
+/// Pattern to distribute `vector.transfer_read` ops with nested layouts.
+struct DistributeCreateMask final
+    : OpDistributionPattern<vector::CreateMaskOp> {
+  using OpDistributionPattern::OpDistributionPattern;
+
+  DistributeCreateMask(MLIRContext *context, Value threadId)
+      : OpDistributionPattern(context), threadId(threadId) {}
+
+  LogicalResult matchAndRewrite(vector::CreateMaskOp maskOp,
+                                DistributionSignature &signature,
+                                PatternRewriter &rewriter) const override {
+    NestedLayoutAttr vectorLayout =
+        dyn_cast<NestedLayoutAttr>(signature[maskOp.getResult()]);
+    if (!vectorLayout) {
+      return rewriter.notifyMatchFailure(maskOp,
+                                         "non-nested create_mask layout");
+    }
+
+    SmallVector<int64_t> distShape = vectorLayout.getDistributedShape();
+    SmallVector<int64_t> tileShape = getElementVectorTileShape(vectorLayout);
+    SmallVector<int64_t> loopOrder = getLoopOrder(vectorLayout);
+    int64_t rank = vectorLayout.getBatchOrder().size();
+
+    Type elementType = rewriter.getI1Type();
+    auto vectorType = VectorType::get(distShape, elementType);
+    // The shape of the distributed mask is pre-permutation. The permutation is
+    // a transpose on the resulting mask.
+    auto innerVectorType =
+        VectorType::get(vectorLayout.getElementsPerThread(), elementType);
+
+    // Initialize the full distributed vector for unrolling the batch/outer
+    // vector dimensions.
+    Value zero = rewriter.create<arith::ConstantOp>(
+        maskOp.getLoc(), vectorType, rewriter.getZeroAttr(vectorType));
+    VectorValue acc = cast<VectorValue>(zero);
+
+    SmallVector<Value> warpIndices, threadIndices;
+    populateWarpAndThreadIndices(rewriter, threadId, vectorLayout, warpIndices,
+                                 threadIndices);
+
+    SmallVector<int64_t> strides(rank, 1);
+    AffineExpr s0, s1;
+    bindSymbols(rewriter.getContext(), s0, s1);
+    Value zeroIdx = rewriter.create<arith::ConstantIndexOp>(maskOp.getLoc(), 0);
+    SmallVector<Value> indices(rank, zeroIdx);
+    for (SmallVector<int64_t> offsets :
+         StaticTileOffsetRange(distShape, tileShape, loopOrder)) {
+      SmallVector<Value> slicedMaskOffsetIndices =
+          getTransferIndicesFromNestedLayout(
+              rewriter, indices, offsets, vectorLayout,
+              AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext()),
+              warpIndices, threadIndices);
+
+      SmallVector<Value> newOperands;
+      for (int i = 0, e = vectorLayout.getElementsPerThread().size(); i < e;
+           ++i) {
+        // Get `mask_dim_range_upper_limit[i] - offset[i] * element_size[i]` to
+        // find the distance from the largest mask index owned by this thread to
+        // the original mask size. `vector.create_mask` implicitly clamps mask
+        // operands to the range [0, mask_vector_size[i]], or in other words,
+        // the mask sizes are always in the range [0, mask_vector_size[i]).
+        Value maskDimIdx = affine::makeComposedAffineApply(
+            rewriter, maskOp.getLoc(), s1 - s0 * distShape[i],
+            {slicedMaskOffsetIndices[i], maskOp.getOperand(i)});
+        newOperands.push_back(maskDimIdx);
+      }
+
+      Value newMask = rewriter.create<vector::CreateMaskOp>(
+          maskOp.getLoc(), innerVectorType, newOperands);
+      // Transpose to the native dimension order.
+      if (!isIdentityPermutation(vectorLayout.getElementOrder())) {
+        newMask = rewriter.create<vector::TransposeOp>(
+            newMask.getLoc(), newMask,
+            invertPermutationVector(vectorLayout.getElementOrder()));
+      }
+
+      acc = rewriter.create<vector::InsertStridedSliceOp>(
+          newMask.getLoc(), newMask, acc, offsets, strides);
+    }
+
+    replaceOpWithDistributedValues(rewriter, maskOp, acc);
+    return success();
+  }
+
+  Value threadId;
+};
+
 } // namespace
 
 void populateGPUDistributeNestedLayoutAttrPatterns(
     Value threadId, RewritePatternSet &patterns) {
-  patterns.add<DistributeTransferRead, DistributeTransferWrite>(
-      patterns.getContext(), threadId);
+  patterns.add<DistributeTransferRead, DistributeTransferWrite,
+               DistributeCreateMask>(patterns.getContext(), threadId);
   patterns.add<DistributeBroadcast>(patterns.getContext());
 }
 
