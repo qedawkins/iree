@@ -485,15 +485,32 @@ private:
 // map = [[0], [1, 2], [3], [4, 5]]
 template <typename SetTy>
 static SmallVector<ReassociationIndices>
-getTilingReassociationMap(int64_t rank, SetTy innerDims) {
+getTilingReassociationMap(int64_t srcRank, SetTy innerDims) {
+  int64_t rank = srcRank + innerDims.size();
   SmallVector<ReassociationIndices> map;
-  int64_t nTiled = 0;
-  for (int64_t i = 0, e = rank; i < e; i++) {
-    if (innerDims.contains(i)) {
-      map.push_back({i + nTiled++, i + nTiled});
-      continue;
+  ReassociationIndices group;
+  int64_t i = 0;
+  for (; i < rank; i++) {
+    if (!innerDims.contains(i)) {
+      break;
     }
-    map.push_back({i + nTiled});
+    group.push_back(i);
+  }
+  for (; i < rank;) {
+    assert(!innerDims.contains(i));
+    group.push_back(i);
+    map.push_back(group);
+    i++;
+    group.clear();
+    for (; i < rank; i++) {
+      if (!innerDims.contains(i)) {
+        break;
+      }
+      group.push_back(i);
+    }
+  }
+  if (!group.empty()) {
+    map.push_back(group);
   }
   return map;
 }
