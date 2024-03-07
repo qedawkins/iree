@@ -9,6 +9,7 @@
 #include <cassert>
 
 #include "llvm/ADT/STLExtras.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -711,26 +712,7 @@ static void enforceLayoutToTransferReadOp(
     return;
   }
 
-  AffineMap compressedTransferMap =
-      compressUnusedDims(read.getPermutationMap());
-  SmallVector<bool> droppedDimsMask(compressedTransferMap.getNumResults(),
-                                    false);
-  SmallVector<AffineExpr> newExprs;
-  for (auto [i, expr] : llvm::enumerate(compressedTransferMap.getResults())) {
-    if (isa<AffineDimExpr>(expr)) {
-      newExprs.push_back(expr);
-      continue;
-    }
-    assert(cast<AffineConstantExpr>(expr).getValue() == 0 &&
-           "invalid non-broadcast transfer read expr");
-    droppedDimsMask[i] = true;
-  }
-  AffineMap transposeMap = compressUnusedDims(AffineMap::get(
-      compressedTransferMap.getNumDims(), 0, newExprs, read.getContext()));
-  SmallVector<int64_t> permutation = llvm::to_vector(
-      llvm::seq(static_cast<int64_t>(0),
-                static_cast<int64_t>(transposeMap.getNumDims())));
-  permutation = transposeMap.compose(permutation);
+  auto [droppedDimsMask, permutation] = getDroppedDimsAndPerm(read);
 
   VectorLayoutInterface projectedLayout =
       result->getLayout().project(droppedDimsMask);

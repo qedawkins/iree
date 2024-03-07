@@ -237,6 +237,34 @@ void sinkOpsInCFG(const SmallVector<Operation *> &allocs,
 // the inputs.
 bool hasFusedLeadingOp(linalg::LinalgOp rootOp);
 
+// Helper to get the broadcasted dim mask and permutation from a
+// vector.transfer_* op.
+template <typename TransferOpTy>
+std::pair<SmallVector<bool>, SmallVector<int64_t>>
+getDroppedDimsAndPerm(TransferOpTy transfer) {
+  AffineMap compressedTransferMap =
+      compressUnusedDims(transfer.getPermutationMap());
+  SmallVector<bool> droppedDimsMask(compressedTransferMap.getNumResults(),
+                                    false);
+  SmallVector<AffineExpr> newExprs;
+  for (auto [i, expr] : llvm::enumerate(compressedTransferMap.getResults())) {
+    if (isa<AffineDimExpr>(expr)) {
+      newExprs.push_back(expr);
+      continue;
+    }
+    assert(cast<AffineConstantExpr>(expr).getValue() == 0 &&
+           "invalid non-broadcast transfer expr");
+    droppedDimsMask[i] = true;
+  }
+  AffineMap transposeMap = compressUnusedDims(AffineMap::get(
+      compressedTransferMap.getNumDims(), 0, newExprs, transfer.getContext()));
+  SmallVector<int64_t> permutation = llvm::to_vector(
+      llvm::seq(static_cast<int64_t>(0),
+                static_cast<int64_t>(transposeMap.getNumDims())));
+  permutation = transposeMap.compose(permutation);
+  return std::make_pair(droppedDimsMask, permutation);
+}
+
 } // namespace mlir::iree_compiler
 
 #endif // IREE_COMPILER_CODEGEN_UTILS_UTILS_H_

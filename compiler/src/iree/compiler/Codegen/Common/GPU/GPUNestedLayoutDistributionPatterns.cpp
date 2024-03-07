@@ -11,7 +11,9 @@
 #include "iree/compiler/Codegen/Common/GPU/GPUVectorDistribution.h"
 #include "iree/compiler/Codegen/Common/VectorLayoutAnalysis.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/Utils.h"
@@ -20,9 +22,11 @@
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpDefinition.h"
+#include "mlir/IR/Value.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Rewrite/PatternApplicator.h"
 
@@ -183,10 +187,6 @@ struct DistributeTransferRead final
   LogicalResult matchAndRewrite(vector::TransferReadOp readOp,
                                 DistributionSignature &signature,
                                 PatternRewriter &rewriter) const override {
-    // TODO: Support masking.
-    if (readOp.getMask()) {
-      return rewriter.notifyMatchFailure(readOp, "unimplemented: masked read");
-    }
     NestedLayoutAttr vectorLayout =
         dyn_cast<NestedLayoutAttr>(signature[readOp.getResult()]);
     if (!vectorLayout) {
@@ -223,6 +223,34 @@ struct DistributeTransferRead final
     populateWarpAndThreadIndices(rewriter, threadId, vectorLayout, warpIndices,
                                  threadIndices);
 
+    Value distributedMask = readOp.getMask();
+    NestedLayoutAttr maskLayout = NestedLayoutAttr();
+    SmallVector<bool> offsetMask;
+    SmallVector<int64_t> offsetPerm;
+    if (distributedMask) {
+      auto [droppedDimsMask, permutation] = getDroppedDimsAndPerm(readOp);
+      for (int i = 0; i < 3; ++i) {
+        for (auto j : permutation) {
+          offsetPerm.push_back(j + i * permutation.size());
+        }
+      }
+      offsetMask.append(droppedDimsMask);
+      offsetMask.append(droppedDimsMask);
+      offsetMask.append(droppedDimsMask);
+      SmallVector<int64_t> batchAndOffsetPerm(vectorLayout.getBatchOrder());
+      for (int64_t p : vectorLayout.getOuterOrder()) {
+        batchAndOffsetPerm.push_back(p + rank);
+      }
+      for (int64_t p : vectorLayout.getElementOrder()) {
+        batchAndOffsetPerm.push_back(p + 2 * rank);
+      }
+      applyPermutationToVector(offsetMask,
+                               invertPermutationVector(batchAndOffsetPerm));
+      auto maskVector = llvm::cast<TypedValue<VectorType>>(distributedMask);
+      maskLayout = dyn_cast<NestedLayoutAttr>(signature[maskVector]);
+      distributedMask = getDistributed(rewriter, maskVector, maskLayout);
+    }
+
     ValueRange indices = readOp.getIndices();
     SmallVector<int64_t> strides(rank, 1);
     for (SmallVector<int64_t> offsets :
@@ -231,9 +259,35 @@ struct DistributeTransferRead final
           rewriter, indices, offsets, vectorLayout, readOp.getPermutationMap(),
           warpIndices, threadIndices);
 
+      Value slicedMask = distributedMask;
+      if (slicedMask) {
+        SmallVector<int64_t> maskOffsets;
+        for (auto [offset, isBroadcasted] :
+             llvm::zip_equal(offsets, offsetMask)) {
+          if (!isBroadcasted) {
+            maskOffsets.push_back(offset);
+          }
+        }
+        applyPermutationToVector(maskOffsets, offsetPerm);
+
+        // Extract the "element vector" from the inner most dimensions. All
+        // outer dimensions are either unrolled or distributed such that this is
+        // a contiguous slice.
+        ArrayRef<int64_t> offsetArray(offsets);
+        slicedMask = rewriter.create<vector::ExtractOp>(
+            readOp.getLoc(), distributedMask,
+            ArrayRef<int64_t>{maskOffsets}.take_front(
+                maskLayout.getBatchesPerSubgroup().size() * 2));
+
+        if (!isIdentityPermutation(maskLayout.getElementOrder())) {
+          slicedMask = rewriter.create<vector::TransposeOp>(
+              slicedMask.getLoc(), slicedMask, maskLayout.getElementOrder());
+        }
+      }
+
       Value slicedRead = rewriter.create<vector::TransferReadOp>(
           readOp.getLoc(), innerVectorType, readOp.getSource(), slicedIndices,
-          readOp.getPermutationMapAttr(), readOp.getPadding(), readOp.getMask(),
+          readOp.getPermutationMapAttr(), readOp.getPadding(), slicedMask,
           readOp.getInBoundsAttr());
       // Transpose to the element order.
       if (!isIdentityPermutation(vectorLayout.getElementOrder())) {
