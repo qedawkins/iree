@@ -43,6 +43,11 @@ struct LLVMCPULinkExecutablesPass
     // Gather all unique executable targets - we may have multiple.
     auto executableTargetAttrs = gatherExecutableTargets(sourceExecutableOps);
     for (auto [index, attr] : llvm::enumerate(executableTargetAttrs)) {
+      // Filter by unique llvm-cpu target. Linking for other targets is handled
+      // the respective backends.
+      if (attr.getBackend() != "llvm-cpu") {
+        continue;
+      }
       // Add our hal.executable.variant with an empty module.
       std::string linkedVariantName =
           executableTargetAttrs.size() == 1
