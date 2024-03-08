@@ -107,7 +107,10 @@ static void applyFastSlowPathConversion(mlir::FunctionOpInterface funcOp) {
     for (Operation *op : cloneOps) {
       if (op == padOp.getOperation()) {
         // We can elide the tensor.pad op. Just use its source.
-        bvm.map(padOp.getResult(), bvm.lookupOrDefault(padOp.getSource()));
+        Value source = builder.create<tensor::CastOp>(
+            padOp.getLoc(), padOp.getResultType(),
+            bvm.lookupOrDefault(padOp.getSource()));
+        bvm.map(padOp.getResult(), source);
       } else {
         builder.clone(*op, bvm);
       }

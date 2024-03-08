@@ -533,6 +533,8 @@ void addGPUVectorDistributePassPipeline(OpPassManager &pm) {
   nestedModulePM.addPass(createCSEPass());
 
   nestedModulePM.addNestedPass<func::FuncOp>(createGPUCreateFastSlowPathPass());
+  nestedModulePM.addPass(createCanonicalizerPass());
+  nestedModulePM.addPass(createCSEPass());
 
   // Problem specific (reduction) tiling.
   nestedModulePM.addNestedPass<func::FuncOp>(
