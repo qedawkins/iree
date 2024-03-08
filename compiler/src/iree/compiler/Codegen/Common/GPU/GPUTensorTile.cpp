@@ -215,7 +215,11 @@ static LogicalResult tileParallelDims(mlir::FunctionOpInterface funcOp,
       distributeToWarp ? workgroupSize[0] / kWarpSize : workgroupSize[0],
       workgroupSize[1], workgroupSize[2]};
   SmallVector<TilingInterface> computeOps;
-  funcOp.walk([&](TilingInterface op) { computeOps.push_back(op); });
+  funcOp.walk([&](TilingInterface op) {
+    if (!isa<tensor::PadOp>(op)) {
+      computeOps.push_back(op);
+    }
+  });
 
   auto marker =
       StringAttr::get(funcOp.getContext(), getCopyToWorkgroupMemoryMarker());
@@ -335,6 +339,16 @@ public:
     if (!isEntryPoint(funcOp))
       return;
 
+    funcOp->walk([](tensor::PadOp padOp) {
+      if (padOp->hasAttr("lowering_config")) {
+        padOp->removeAttr("lowering_config");
+      }
+    });
+
+    fusePadIntoConsumer(funcOp);
+
+    concretizePadShape(funcOp);
+
     auto workgroupSize = llvm::map_to_vector(
         getEntryPoint(funcOp)->getWorkgroupSize().value(),
         [&](Attribute attr) { return llvm::cast<IntegerAttr>(attr).getInt(); });
@@ -347,6 +361,10 @@ public:
       funcOp.dump();
     });
 
+    fusePadIntoConsumer(funcOp);
+
+    concretizePadShape(funcOp);
+
     // Tile to serial loops to the wg tile size to handle reductions and other
     // dimension that have not been distributed.
     if (failed(tileReductionToSerialLoops(funcOp)))
@@ -357,9 +375,13 @@ public:
       funcOp.dump();
     });
 
+    fusePadIntoConsumer(funcOp);
+
     if (failed(tileAndUnrollConv(funcOp))) {
       return signalPassFailure();
     }
+
+    concretizePadShape(funcOp);
 
     LLVM_DEBUG({
       llvm::dbgs() << "// --- After conv unrolling:\n";

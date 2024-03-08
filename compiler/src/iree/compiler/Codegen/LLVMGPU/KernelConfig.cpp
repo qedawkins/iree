@@ -1535,8 +1535,20 @@ static bool distributeToOneDim(const int64_t inputDim,
       // Handle 4 elements per thread for the innermost dimension. We need
       // this for vectorized load.
       chosenTileSize = 4;
-      if (inputDim % (dim * chosenTileSize) != 0)
-        continue;
+      if (inputDim % (dim * chosenTileSize) != 0) {
+        if (dim != lb) {
+          continue;
+        }
+        while (chosenTileSize >= 1) {
+          chosenTileSize >>= 1;
+          if (inputDim % (dim * chosenTileSize) == 0) {
+            break;
+          }
+        }
+        if (chosenTileSize < 1) {
+          return false;
+        }
+      }
     } else {
       for (int64_t t = residualTilingFactor; t >= 1; t >>= 1)
         if (inputDim % (dim * t) == 0) {

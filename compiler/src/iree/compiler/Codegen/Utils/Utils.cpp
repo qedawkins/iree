@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Utils/Utils.h"
 
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Interfaces/ProcessorOpInterfaces.h"
 #include "iree/compiler/Codegen/Interfaces/UKernelOpInterface.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
@@ -16,6 +17,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
@@ -25,6 +27,7 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/TilingInterface.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #define DEBUG_TYPE "iree-codegen-utils"
 
@@ -1174,6 +1177,35 @@ bool hasFusedLeadingOp(linalg::LinalgOp rootOp) {
 
   return llvm::any_of(backwardSlice, [](Operation *op) {
     return llvm::isa<linalg::LinalgOp>(op);
+  });
+}
+
+void fusePadIntoConsumer(mlir::FunctionOpInterface funcOp) {
+  MLIRContext *context = funcOp.getContext();
+  RewritePatternSet patterns(context);
+  patterns.insert<linalg::ExtractSliceOfPadTensorSwapPattern>(
+      context, [](tensor::ExtractSliceOp) { return false; });
+  (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "--- After fusing padding into consumers ---\n";
+    funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    llvm::dbgs() << "\n\n";
+  });
+};
+
+void concretizePadShape(mlir::FunctionOpInterface funcOp) {
+  MLIRContext *context = funcOp.getContext();
+  RewritePatternSet patterns(context);
+  SmallVector<int64_t> numWorkgroups = getStaticNumWorkgroups(funcOp);
+  populateConcretizePadResultShapePatterns(patterns, numWorkgroups);
+  populateFoldAffineMinInDistributedLoopsPatterns(patterns, numWorkgroups);
+  (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "--- After concretizing pad result shape ---\n";
+    funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    llvm::dbgs() << "\n\n";
   });
 }
 

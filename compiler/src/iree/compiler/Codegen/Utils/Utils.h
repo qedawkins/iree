@@ -237,6 +237,13 @@ void sinkOpsInCFG(const SmallVector<Operation *> &allocs,
 // the inputs.
 bool hasFusedLeadingOp(linalg::LinalgOp rootOp);
 
+/// Fuses `tensor.pad` ops into the the materalized loop nests containing
+/// their consumer ops.
+void fusePadIntoConsumer(mlir::FunctionOpInterface funcOp);
+
+/// Concretizes `tensor.pad` ops' result shapes.
+void concretizePadShape(mlir::FunctionOpInterface funcOp);
+
 // Helper to get the broadcasted dim mask and permutation from a
 // vector.transfer_* op.
 template <typename TransferOpTy>

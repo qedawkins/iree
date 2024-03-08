@@ -160,38 +160,6 @@ tileReduction(mlir::FunctionOpInterface funcOp,
   return result;
 }
 
-/// Fuses `tensor.pad` ops into the the materalized loop nests containing
-/// their consumer ops.
-static void fusePadIntoConsumer(mlir::FunctionOpInterface funcOp) {
-  MLIRContext *context = funcOp.getContext();
-  RewritePatternSet patterns(context);
-  patterns.insert<linalg::ExtractSliceOfPadTensorSwapPattern>(
-      context, [](tensor::ExtractSliceOp) { return false; });
-  (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
-
-  LLVM_DEBUG({
-    llvm::dbgs() << "--- After fusing padding into consumers ---\n";
-    funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-    llvm::dbgs() << "\n\n";
-  });
-};
-
-/// Concretizes `tensor.pad` ops' result shapes.
-static void concretizePadShape(mlir::FunctionOpInterface funcOp) {
-  MLIRContext *context = funcOp.getContext();
-  RewritePatternSet patterns(context);
-  SmallVector<int64_t> numWorkgroups = getStaticNumWorkgroups(funcOp);
-  populateConcretizePadResultShapePatterns(patterns, numWorkgroups);
-  populateFoldAffineMinInDistributedLoopsPatterns(patterns, numWorkgroups);
-  (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
-
-  LLVM_DEBUG({
-    llvm::dbgs() << "--- After concretizing pad result shape ---\n";
-    funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-    llvm::dbgs() << "\n\n";
-  });
-}
-
 /// Tiles one of the convolution output window dimensions with size 1 to prepare
 /// for downsizing 2-D convolution ops into 1-D ones.
 static LogicalResult tileAndUnrollConvWindow(mlir::FunctionOpInterface funcOp,
