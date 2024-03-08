@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -674,6 +675,29 @@ isFusableWithProducer(OpOperand &operand,
 
   if (options.fusePadWithConsumers && isa<tensor::PadOp>(producer) &&
       isa<linalg::ConvolutionOpInterface>(consumer)) {
+    auto convDims =
+        linalg::inferConvolutionDims(llvm::cast<linalg::LinalgOp>(consumer));
+    auto bounds = llvm::cast<linalg::LinalgOp>(consumer).getStaticLoopRanges();
+    if (convDims->outputChannel.size() != 1 ||
+        convDims->inputChannel.size() != 1 ||
+        convDims->outputImage.size() != 2) {
+      return false;
+    }
+    if (bounds[convDims->outputChannel[0]] % 16 != 0) {
+      return false;
+    }
+    if (bounds[convDims->outputImage[1]] % 16 != 0) {
+      return false;
+    }
+    if (bounds[convDims->inputChannel[0]] % 16 != 0) {
+      return false;
+    }
+    if (llvm::any_of(convDims->strides, [](int64_t i) { return i != 1; })) {
+      return false;
+    }
+    if (llvm::any_of(convDims->dilations, [](int64_t i) { return i != 1; })) {
+      return false;
+    }
     return true;
   }
 
