@@ -35,8 +35,8 @@ public:
       }
     });
 
-    // Fuse the pad with the workgroup level slice.
-    fusePadIntoConsumer(funcOp);
+    // // Fuse the pad with the workgroup level slice.
+    // fusePadIntoConsumer(funcOp);
 
     LLVM_DEBUG({
       llvm::dbgs() << "--- After fusing pad once ---\n";

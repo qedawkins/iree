@@ -345,9 +345,9 @@ public:
       }
     });
 
-    fusePadIntoConsumer(funcOp);
+    // fusePadIntoConsumer(funcOp);
 
-    concretizePadShape(funcOp);
+    // concretizePadShape(funcOp);
 
     auto workgroupSize = llvm::map_to_vector(
         getEntryPoint(funcOp)->getWorkgroupSize().value(),

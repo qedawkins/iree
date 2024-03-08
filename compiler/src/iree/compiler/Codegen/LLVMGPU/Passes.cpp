@@ -142,6 +142,8 @@ tileAndDistributeToWorkgroup(OpPassManager &pm,
 
   auto &nestedModulePM = pm.nest<ModuleOp>();
   nestedModulePM.addNestedPass<func::FuncOp>(
+      createFuseTensorPadWithConsumerPass());
+  nestedModulePM.addNestedPass<func::FuncOp>(
       createConvertToDestinationPassingStylePass(
           useWARForCooperativeMatrixCodegen));
   // TODO(#16421): Disable decomposition due to failure in bufferization.
@@ -183,11 +185,15 @@ void addGPUVectorizationPassPipeline(OpPassManager &pm) {
 
   auto &nestedModulePM = pm.nest<ModuleOp>();
 
-  nestedModulePM.addPass(createCanonicalizerPass());
   nestedModulePM.addNestedPass<func::FuncOp>(
-      createWorkgroupSpecializationPass());
+      createFoldAffineMinInDistributedLoopsPass());
+  nestedModulePM.addPass(memref::createResolveShapedTypeResultDimsPass());
+
   nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
+  // nestedModulePM.addNestedPass<func::FuncOp>(
+  //     createWorkgroupSpecializationPass());
+  // nestedModulePM.addPass(createCanonicalizerPass());
+  // nestedModulePM.addPass(createCSEPass());
 
   // Distribute linalg onto threads within the workgroup.
   nestedModulePM.addNestedPass<func::FuncOp>(createGPUTensorTile(false));
@@ -526,11 +532,11 @@ void addGPUVectorDistributePassPipeline(OpPassManager &pm) {
   nestedModulePM.addPass(createCanonicalizerPass());
   nestedModulePM.addPass(createCSEPass());
 
+  nestedModulePM.addNestedPass<func::FuncOp>(createGPUCreateFastSlowPathPass());
+
   // Problem specific (reduction) tiling.
   nestedModulePM.addNestedPass<func::FuncOp>(
       createGPUTensorTileToSerialLoops());
-
-  // nestedModulePM.addNestedPass<func::FuncOp>(createGPUCreateFastSlowPathPass());
 
   // Generalize all named ops so that we can fold away unit extent dims. By this
   // point, all tiling is finished so the tiling configurations on those ops can
