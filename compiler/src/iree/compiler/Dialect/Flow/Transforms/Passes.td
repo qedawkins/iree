@@ -95,6 +95,12 @@ def FormScalarDispatches :
   let constructor = "mlir::iree_compiler::IREE::Flow::createFormScalarDispatchesPass()";
 }
 
+def FuseConsumerTensorSlices :
+    InterfacePass<"iree-flow-fuse-consumer-tensor-slices", "mlir::FunctionOpInterface"> {
+  let summary = "Canonicalize and fuse tensor.insert_slice ops with producer dispatches";
+  let constructor = "mlir::iree_compiler::IREE::Flow::createFuseConsumerTensorSlicesPass()";
+}
+
 def CollapseDimensions :
     InterfacePass<"iree-flow-collapse-dimensions", "mlir::FunctionOpInterface"> {
   let summary = "Collapse dimensions of Linalg Ops on tensor ops.";

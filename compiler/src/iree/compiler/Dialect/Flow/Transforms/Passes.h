@@ -197,6 +197,11 @@ std::unique_ptr<Pass> createSplitReductionPass();
 // Create a pass to collapse reduction dimensions
 std::unique_ptr<Pass> createCollapseDimsPass();
 
+// Create a pass to fuse `tensor.insert_slice` ops that are immediate
+// consumers of a dispatch.
+std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
+createFuseConsumerTensorSlicesPass();
+
 //===----------------------------------------------------------------------===//
 // Module Analysis and Finalization
 //===----------------------------------------------------------------------===//
