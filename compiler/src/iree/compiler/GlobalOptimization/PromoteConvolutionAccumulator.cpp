@@ -79,6 +79,64 @@ static void promoteConv(RewriterBase &rewriter, linalg::Conv2DNhwcHwcfOp conv) {
   rewriter.replaceOp(conv, newGenericOp);
 }
 
+static void promoteContraction(RewriterBase &rewriter,
+                               linalg::GenericOp contract) {
+
+  Location loc = contract->getLoc();
+
+  auto outType = cast<RankedTensorType>(contract.getResult(0).getType());
+
+  if (!outType.getElementType().isF16())
+    return;
+
+  RankedTensorType f32OutType =
+      RankedTensorType::get(outType.getShape(), rewriter.getF32Type());
+
+  Value baseOut = contract.getDpsInitOperand(0)->get();
+  auto origFill = baseOut.getDefiningOp<linalg::FillOp>();
+  if (!origFill)
+    return;
+  auto origEmpty =
+      origFill.getDpsInitOperand(0)->get().getDefiningOp<tensor::EmptyOp>();
+  if (!origEmpty)
+    return;
+
+  Value zeroF32 = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getF32Type(), rewriter.getZeroAttr(rewriter.getF32Type()));
+  auto newEmpty = rewriter.create<tensor::EmptyOp>(loc, f32OutType,
+                                                   origEmpty.getDynamicSizes());
+  auto newFill = rewriter.create<linalg::FillOp>(loc, f32OutType, zeroF32,
+                                                 newEmpty.getResult());
+
+  linalg::GenericOp newContractionOp = rewriter.create<linalg::GenericOp>(
+      loc, f32OutType, contract.getDpsInputs(), newFill.getResult(0),
+      contract.getIndexingMapsArray(), contract.getIteratorTypesArray(),
+      [](OpBuilder &builder, Location loc, ValueRange args) {
+        Value extLhs =
+            builder.create<arith::ExtFOp>(loc, builder.getF32Type(), args[0]);
+        Value extRhs =
+            builder.create<arith::ExtFOp>(loc, builder.getF32Type(), args[1]);
+        Value mul = builder.create<arith::MulFOp>(loc, extLhs, extRhs);
+        Value add = builder.create<arith::MulFOp>(loc, mul, args[2]);
+        builder.create<linalg::YieldOp>(loc, add);
+      });
+
+  SmallVector<utils::IteratorType> iteratorTypes(outType.getRank(),
+                                                 utils::IteratorType::parallel);
+  SmallVector<AffineMap> indexingMaps(
+      2, rewriter.getMultiDimIdentityMap(outType.getRank()));
+
+  linalg::GenericOp newGenericOp = rewriter.create<linalg::GenericOp>(
+      loc, outType, newContractionOp.getResult(0), origEmpty.getResult(),
+      indexingMaps, iteratorTypes,
+      [](OpBuilder &builder, Location loc, ValueRange args) {
+        Value trunc =
+            builder.create<arith::TruncFOp>(loc, builder.getF16Type(), args[0]);
+        builder.create<linalg::YieldOp>(loc, trunc);
+      });
+  rewriter.replaceOp(contract, newGenericOp);
+}
+
 namespace {
 
 struct PromoteConvolutionAccumulatorPass
@@ -111,6 +169,18 @@ void PromoteConvolutionAccumulatorPass::runOnOperation() {
   for (auto conv : convs) {
     rewriter.setInsertionPointAfter(conv);
     promoteConv(rewriter, conv);
+  }
+
+  SmallVector<linalg::GenericOp> contracts;
+
+  getOperation()->walk([&](linalg::GenericOp contract) {
+    if (linalg::isaContractionOpInterface(contract))
+      contracts.push_back(contract);
+  });
+
+  for (auto contract : contracts) {
+    rewriter.setInsertionPointAfter(contract);
+    promoteContraction(rewriter, contract);
   }
 }
 
