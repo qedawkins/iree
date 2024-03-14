@@ -32,6 +32,54 @@
 
 namespace mlir::iree_compiler::GlobalOptimization {
 
+static void promoteMatmul(RewriterBase &rewriter,
+                          linalg::MatmulTransposeBOp matmul) {
+
+  Location loc = matmul->getLoc();
+
+  auto outType = cast<RankedTensorType>(matmul.getResult(0).getType());
+
+  if (!outType.getElementType().isF16())
+    return;
+
+  RankedTensorType f32OutType =
+      RankedTensorType::get(outType.getShape(), rewriter.getF32Type());
+
+  Value baseOut = matmul.getDpsInitOperand(0)->get();
+  auto origFill = baseOut.getDefiningOp<linalg::FillOp>();
+  if (!origFill)
+    return;
+  auto origEmpty =
+      origFill.getDpsInitOperand(0)->get().getDefiningOp<tensor::EmptyOp>();
+  if (!origEmpty)
+    return;
+
+  Value zeroF32 = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getF32Type(), rewriter.getZeroAttr(rewriter.getF32Type()));
+  auto newEmpty = rewriter.create<tensor::EmptyOp>(loc, f32OutType,
+                                                   origEmpty.getDynamicSizes());
+  auto newFill = rewriter.create<linalg::FillOp>(loc, f32OutType, zeroF32,
+                                                 newEmpty.getResult());
+
+  linalg::MatmulTransposeBOp newMatmul =
+      rewriter.create<linalg::MatmulTransposeBOp>(
+          loc, f32OutType, matmul.getDpsInputs(), newFill.getResult(0));
+
+  SmallVector<utils::IteratorType> iteratorTypes(outType.getRank(),
+                                                 utils::IteratorType::parallel);
+  SmallVector<AffineMap> indexingMaps(
+      2, rewriter.getMultiDimIdentityMap(outType.getRank()));
+
+  linalg::GenericOp newGenericOp = rewriter.create<linalg::GenericOp>(
+      loc, outType, newMatmul.getResult(0), origEmpty.getResult(), indexingMaps,
+      iteratorTypes, [](OpBuilder &builder, Location loc, ValueRange args) {
+        Value trunc =
+            builder.create<arith::TruncFOp>(loc, builder.getF16Type(), args[0]);
+        builder.create<linalg::YieldOp>(loc, trunc);
+      });
+  rewriter.replaceOp(matmul, newGenericOp);
+}
+
 static void promoteConv(RewriterBase &rewriter, linalg::Conv2DNhwcHwcfOp conv) {
 
   Location loc = conv->getLoc();
@@ -181,6 +229,16 @@ void PromoteConvolutionAccumulatorPass::runOnOperation() {
   for (auto contract : contracts) {
     rewriter.setInsertionPointAfter(contract);
     promoteContraction(rewriter, contract);
+  }
+
+  SmallVector<linalg::MatmulTransposeBOp> matmuls;
+
+  getOperation()->walk(
+      [&](linalg::MatmulTransposeBOp matmul) { matmuls.push_back(matmul); });
+
+  for (auto matmul : matmuls) {
+    rewriter.setInsertionPointAfter(matmul);
+    promoteMatmul(rewriter, matmul);
   }
 }
 
