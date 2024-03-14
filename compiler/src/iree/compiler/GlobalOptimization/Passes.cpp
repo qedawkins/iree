@@ -80,6 +80,7 @@ void buildGlobalOptimizationPassPipeline(
   FunctionLikeNest(mainPassManager)
       .addPass(createRemoveZeroExtentTensorsPass)
       .addPass(createDetachElementwiseFromNamedOpsPass)
+      .addPass(createPromoteConvolutionAccumulatorPass)
       .addPass(mlir::createLinalgNamedOpConversionPass)
       .addPass(createConvert1X1FilterConv2DToMatmulPass);
   mainPassManager.addPass(createEraseUnusedLinalgOperands());
