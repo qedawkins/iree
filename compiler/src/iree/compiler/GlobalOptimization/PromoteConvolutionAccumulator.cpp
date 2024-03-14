@@ -32,8 +32,8 @@
 
 namespace mlir::iree_compiler::GlobalOptimization {
 
-static void promoteMatmul(RewriterBase &rewriter,
-                          linalg::MatmulTransposeBOp matmul) {
+template <typename MatmulTy>
+static void promoteMatmul(RewriterBase &rewriter, MatmulTy matmul) {
 
   Location loc = matmul->getLoc();
 
@@ -61,9 +61,8 @@ static void promoteMatmul(RewriterBase &rewriter,
   auto newFill = rewriter.create<linalg::FillOp>(loc, f32OutType, zeroF32,
                                                  newEmpty.getResult());
 
-  linalg::MatmulTransposeBOp newMatmul =
-      rewriter.create<linalg::MatmulTransposeBOp>(
-          loc, f32OutType, matmul.getDpsInputs(), newFill.getResult(0));
+  MatmulTy newMatmul = rewriter.create<MatmulTy>(
+      loc, f32OutType, matmul.getDpsInputs(), newFill.getResult(0));
 
   SmallVector<utils::IteratorType> iteratorTypes(outType.getRank(),
                                                  utils::IteratorType::parallel);
@@ -231,10 +230,21 @@ void PromoteConvolutionAccumulatorPass::runOnOperation() {
     promoteContraction(rewriter, contract);
   }
 
-  SmallVector<linalg::MatmulTransposeBOp> matmuls;
+  SmallVector<linalg::MatmulTransposeBOp> transposedMatmuls;
+
+  getOperation()->walk([&](linalg::MatmulTransposeBOp matmul) {
+    transposedMatmuls.push_back(matmul);
+  });
+
+  for (auto matmul : transposedMatmuls) {
+    rewriter.setInsertionPointAfter(matmul);
+    promoteMatmul(rewriter, matmul);
+  }
+
+  SmallVector<linalg::MatmulOp> matmuls;
 
   getOperation()->walk(
-      [&](linalg::MatmulTransposeBOp matmul) { matmuls.push_back(matmul); });
+      [&](linalg::MatmulOp matmul) { matmuls.push_back(matmul); });
 
   for (auto matmul : matmuls) {
     rewriter.setInsertionPointAfter(matmul);
