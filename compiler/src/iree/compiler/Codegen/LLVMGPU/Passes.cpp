@@ -702,6 +702,9 @@ void addGPUConvVectorDistributePassPipeline(OpPassManager &pm) {
   // Linalg -> Vector
   addGPUVectorizationPasses(nestedModulePM);
 
+  nestedModulePM.addNestedPass<func::FuncOp>(
+      createGPUVectorAlloc(/*promoteLhs=*/false));
+
   // Tensor -> Memref
   addVectorBufferizePasses(nestedModulePM);
   nestedModulePM.addPass(createCanonicalizerPass());
