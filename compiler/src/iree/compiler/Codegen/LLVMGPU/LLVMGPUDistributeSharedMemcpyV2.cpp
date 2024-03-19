@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include <functional>
+#include <numeric>
 #include "iree/compiler/Codegen/LLVMGPU/PassDetail.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "iree/compiler/Codegen/Utils/MarkerUtils.h"
@@ -47,14 +49,26 @@ static int getBaseVectorSize(linalg::GenericOp genericOp) {
 
 /// Return the shape of copy op that can be vectorized to a
 /// transfer_read/transfer_write of size `targetVectorSize`.
-static SmallVector<int64_t> getNativeDstShape(linalg::GenericOp copyOp) {
-  int targetVectorSize = getBaseVectorSize(copyOp);
+static SmallVector<int64_t> getNativeDstShape(linalg::GenericOp copyOp, int64_t flatWorkgroupSize) {
+  auto loopRanges = copyOp.getStaticLoopRanges();
+  int64_t copySize = std::accumulate(loopRanges.begin(), loopRanges.end(), 1, [](const int64_t &a, const int64_t &b) { return a * b; });
+  while (copySize % 2 == 0 && copySize > flatWorkgroupSize) {
+    copySize /= 2;
+  }
+  assert(copySize <= flatWorkgroupSize);
+  // int targetVectorSize = getBaseVectorSize(copyOp);
   SmallVector<int64_t> dstShape;
   for (int64_t dim : copyOp.getStaticLoopRanges()) {
+    int64_t numThreads = std::gcd(copySize, dim);
+    copySize /= numThreads;
+    int64_t tileSize = dim / numThreads;
+    if (dim == 1) {
+      tileSize = 0;
+    }
     // Skip tiling of dimension of size 1 to simplify distribution.
-    dstShape.push_back(dim == 1 ? 0 : 1);
+    dstShape.push_back(tileSize);
   }
-  dstShape.back() = targetVectorSize;
+  // dstShape.back() = targetVectorSize;
   return dstShape;
 }
 
@@ -137,17 +151,19 @@ struct LLVMGPUDistributeSharedMemcpyV2Pass
       return;
     }
 
+    int64_t flatWorkgroupSize = std::accumulate(workgroupSize.begin(), workgroupSize.end(), 1, [](const int64_t &a, const int64_t &b) { return a * b; });
+
     IRRewriter rewriter(ctx);
     for (auto op : candidates) {
       rewriter.setInsertionPoint(op);
 
       linalg::TileSizeComputationFunction wgCopyTileSizeFn =
-          [](OpBuilder &builder, Operation *operation) {
+          [flatWorkgroupSize](OpBuilder &builder, Operation *operation) {
             SmallVector<Value> tileSizesVal;
             auto copyOp = dyn_cast<linalg::GenericOp>(operation);
             if (!copyOp)
               return tileSizesVal;
-            SmallVector<int64_t> staticSize = getNativeDstShape(copyOp);
+            SmallVector<int64_t> staticSize = getNativeDstShape(copyOp, flatWorkgroupSize);
             for (int64_t dim : staticSize) {
               tileSizesVal.push_back(builder.create<arith::ConstantIndexOp>(
                   operation->getLoc(), dim));
