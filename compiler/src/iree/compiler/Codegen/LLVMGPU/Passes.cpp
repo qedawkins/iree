@@ -609,6 +609,8 @@ void addGPUVectorDistributePassPipeline(OpPassManager &pm,
   // Problem specific (reduction) tiling.
   nestedModulePM.addNestedPass<func::FuncOp>(
       createGPUTensorTileToSerialLoops(true));
+  nestedModulePM.addPass(createCanonicalizerPass());
+  nestedModulePM.addPass(createCSEPass());
 
   if (usePadToModelSharedMemcpy) {
     LLVMGPUMatmulPadOption option = LLVMGPUMatmulPadOption::ReductionDims;
@@ -717,7 +719,9 @@ void addGPUConvVectorDistributePassPipeline(OpPassManager &pm) {
 
   // Problem specific (reduction) tiling.
   nestedModulePM.addNestedPass<func::FuncOp>(
-      createGPUTensorTileToSerialLoops(true));
+      createGPUTensorTileToSerialLoops(false));
+  nestedModulePM.addPass(createCanonicalizerPass());
+  nestedModulePM.addPass(createCSEPass());
   nestedModulePM.addNestedPass<func::FuncOp>(
       createLLVMGPUPromoteConvImgAndTileFilterPass());
 

@@ -4,12 +4,15 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include <cwchar>
 #include "iree/compiler/Codegen/LLVMGPU/PassDetail.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Visitors.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #define DEBUG_TYPE "iree-llvmgpu-promote-conv-img"
@@ -26,7 +29,13 @@ struct LLVMGPUPromoteConvImgAndTileFilterPass
     auto funcOp = getOperation();
 
     linalg::LinalgOp conv;
-    auto found = funcOp->walk([&](linalg::Conv2DNhwcHwcfOp op) {
+    auto found = funcOp->walk([&](linalg::LinalgOp op) {
+      if (!linalg::isaConvolutionOpInterface(op)) {
+        return WalkResult::advance();
+      }
+      if (linalg::inferConvolutionDims(op)->filterLoop.empty()) {
+        return WalkResult::advance();
+      }
       if (conv) {
         return WalkResult::interrupt();
       }
@@ -40,7 +49,8 @@ struct LLVMGPUPromoteConvImgAndTileFilterPass
 
     LLVM_DEBUG(llvm::dbgs() << "candidate: " << conv << "\n");
     IRRewriter rewriter(ctx);
-    SmallVector<int64_t> paddingDims = {0, 1, 2, 3};
+    SmallVector<int64_t> paddingDims = llvm::to_vector(llvm::seq(
+        static_cast<int64_t>(0), static_cast<int64_t>(conv.getNumLoops())));
     SmallVector<bool> packPaddings = {1, 0, 0};
     SmallVector<int64_t> padToMultipleOf(paddingDims.size(), 1);
     SmallVector<Attribute> paddingValueAttributes;
@@ -68,7 +78,19 @@ struct LLVMGPUPromoteConvImgAndTileFilterPass
 
     // tile filter
     {
-      funcOp->walk([&](linalg::Conv2DNhwcHwcfOp op) { conv = op; });
+      auto found = funcOp->walk([&](linalg::LinalgOp op) {
+        if (!linalg::isaConvolutionOpInterface(op)) {
+          return WalkResult::advance();
+        }
+        if (linalg::inferConvolutionDims(op)->filterLoop.empty()) {
+          return WalkResult::advance();
+        }
+        conv = op;
+        return WalkResult::advance();
+      });
+      if (found.wasInterrupted()) {
+        return signalPassFailure();
+      }
       FailureOr<IREE::Codegen::LoweringConfigAttr> loweringConfig =
           getLoweringConfig(conv);
       if (failed(loweringConfig)) {

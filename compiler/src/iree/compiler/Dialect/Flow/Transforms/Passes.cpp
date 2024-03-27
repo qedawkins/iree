@@ -140,7 +140,7 @@ void buildFlowTransformPassPipeline(OpPassManager &passManager,
 
   FunctionLikeNest(passManager)
       // Preprocess the input to a form more amenable for fusion
-      .addPass(createInterchangeGenericOpsPass)
+      // .addPass(createInterchangeGenericOpsPass)
       .addPass(memref::createResolveShapedTypeResultDimsPass)
       .addPass(mlir::createCanonicalizerPass)
       .addPass(mlir::createCSEPass)
@@ -158,7 +158,7 @@ void buildFlowTransformPassPipeline(OpPassManager &passManager,
       .addPass(createSplitReductionPass)
       // SplitReductionPass may create reduction dimension that are not the last
       // dimension.
-      .addPass(createInterchangeGenericOpsPass)
+      // .addPass(createInterchangeGenericOpsPass)
       // Normalize the input indexing map to make the input indexing map
       // identity. This helps fusing named linalg op with a generic op with
       // transpose.
