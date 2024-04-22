@@ -306,7 +306,7 @@ public:
       options.warpAllocationFn = allocateGlobalSharedMemory;
       options.warpSyncronizationFn = [](Location loc, OpBuilder &builder,
                                         vector::WarpExecuteOnLane0Op warpOp) {
-        builder.create<gpu::BarrierOp>(loc);
+        // builder.create<gpu::BarrierOp>(loc);
       };
       vector::populateWarpExecuteOnLane0OpToScfForPattern(patterns, options);
       (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));

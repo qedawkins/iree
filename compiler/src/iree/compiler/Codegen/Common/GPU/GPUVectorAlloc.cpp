@@ -121,7 +121,7 @@ public:
 
       // Synchronize before the write to shared memory to avoid stepping over
       // reads in the previous iteration of a loop.
-      builder.create<gpu::BarrierOp>(contractOp->getLoc());
+      // builder.create<gpu::BarrierOp>(contractOp->getLoc());
 
       // Promote both of the input operands, excluding the accumulator.
       OpOperand &lhs = contractOp.getLhsMutable();

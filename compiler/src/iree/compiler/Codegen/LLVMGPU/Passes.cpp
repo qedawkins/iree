@@ -134,12 +134,12 @@ static LogicalResult gpuCopyFn(OpBuilder &builder, Location loc, Value from,
   if (hasSharedMemoryAddressSpace(llvm::cast<MemRefType>(to.getType()))) {
     needsBarrier = true;
   }
-  if (needsBarrier)
-    builder.create<gpu::BarrierOp>(loc);
+  // if (needsBarrier)
+  //   builder.create<gpu::BarrierOp>(loc);
   Operation *copy = builder.create<memref::CopyOp>(loc, from, to);
   if (needsBarrier) {
     setMarker(copy, getCopyToWorkgroupMemoryMarker());
-    builder.create<gpu::BarrierOp>(loc);
+    // builder.create<gpu::BarrierOp>(loc);
   }
   return success();
 }
@@ -493,8 +493,8 @@ static LogicalResult gpuVectorCopyFn(OpBuilder &builder, Location loc,
   if (hasSharedMemoryAddressSpace(llvm::cast<MemRefType>(to.getType()))) {
     needsBarrier = true;
   }
-  if (needsBarrier)
-    builder.create<gpu::BarrierOp>(loc);
+  // if (needsBarrier)
+  //   builder.create<gpu::BarrierOp>(loc);
   VectorType vectorType =
       VectorType::get(fromType.getShape(), fromType.getElementType());
   Value c0 = builder.create<arith::ConstantIndexOp>(loc, 0);
@@ -503,9 +503,9 @@ static LogicalResult gpuVectorCopyFn(OpBuilder &builder, Location loc,
   Value read = builder.create<vector::TransferReadOp>(loc, vectorType, from,
                                                       indices, inBounds);
   builder.create<vector::TransferWriteOp>(loc, read, to, indices, inBounds);
-  if (needsBarrier) {
-    builder.create<gpu::BarrierOp>(loc);
-  }
+  // if (needsBarrier) {
+  //   builder.create<gpu::BarrierOp>(loc);
+  // }
   return success();
 }
 
