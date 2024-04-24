@@ -25,6 +25,7 @@
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Conversion/VectorToGPU/VectorToGPU.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
@@ -56,6 +57,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Value.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/CSE.h"
@@ -171,6 +173,176 @@ struct FoldFillIntoPad : public OpRewritePattern<tensor::PadOp> {
 void transform_dialect::ApplyFoldFillIntoPadPatternsOp::populatePatterns(
     RewritePatternSet &patterns) {
   patterns.insert<FoldFillIntoPad>(patterns.getContext());
+}
+
+//===---------------------------------------------------------------------===//
+// ApplyHoistForallFromForPatternsOp
+//===---------------------------------------------------------------------===//
+
+namespace {
+struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(scf::ForOp loop,
+                                PatternRewriter &rewriter) const final {
+    if (loop.getBody()->getOperations().size() != 2) {
+      return rewriter.notifyMatchFailure(
+          loop, "Body of the loop contains more than one op");
+    }
+
+    auto forallOp =
+        dyn_cast<scf::ForallOp>(loop.getBody()->without_terminator().begin());
+    if (!forallOp) {
+      return rewriter.notifyMatchFailure(
+          loop, "Loop single contained op is not scf.forall op");
+    }
+
+    SmallVector<Operation *> sliceOperandProducers;
+
+    BackwardSliceOptions backwardOptions;
+    backwardOptions.inclusive = true;
+    backwardOptions.filter = [&](Operation *op) -> bool {
+      bool yay = forallOp->isProperAncestor(op);
+      return yay;
+    };
+    SetVector<Operation *> slice;
+
+    scf::InParallelOp parallelTerminator = forallOp.getTerminator();
+    SmallVector<tensor::ParallelInsertSliceOp> terminators(
+        forallOp.getNumResults());
+    int64_t numInductionVars = forallOp.getInductionVars().size();
+    for (auto &yieldingOp : parallelTerminator.getYieldingOps()) {
+      auto parallelInsert = cast<tensor::ParallelInsertSliceOp>(&yieldingOp);
+      BlockArgument destBbArg =
+          llvm::cast<BlockArgument>(parallelInsert.getDest());
+      terminators[destBbArg.getArgNumber() - numInductionVars] = parallelInsert;
+      SmallVector<Value> insertOperands;
+      insertOperands.append(parallelInsert.getOffsets().begin(),
+                            parallelInsert.getOffsets().end());
+      insertOperands.append(parallelInsert.getSizes().begin(),
+                            parallelInsert.getSizes().end());
+      insertOperands.append(parallelInsert.getStrides().begin(),
+                            parallelInsert.getStrides().end());
+      for (Value operand : insertOperands) {
+        if (auto bbArg = dyn_cast<BlockArgument>(operand)) {
+          if (bbArg.getOwner()->getParentOp() == loop) {
+            return rewriter.notifyMatchFailure(
+                loop, "Slice operand producers depend on loop");
+          }
+        }
+        SetVector<Operation *> tmpBackwardSlice;
+        getBackwardSlice(operand, &tmpBackwardSlice, backwardOptions);
+        slice.set_union(tmpBackwardSlice);
+      }
+    }
+
+    auto isSafeToHoist = [&](Operation *op) {
+      return op->getBlock() == forallOp.getBody() && isMemoryEffectFree(op) &&
+             isSpeculatable(op) &&
+             llvm::none_of(op->getOperands(), [&](Value operand) {
+               if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
+                 return blockArg.getOwner() == loop.getBody();
+               }
+               return false;
+             });
+    };
+
+    if (!llvm::all_of(slice, isSafeToHoist)) {
+      return rewriter.notifyMatchFailure(
+          loop, "Slice operand producers not safe to hoist out of loop");
+    }
+
+    SmallVector<Operation *> sliceVec(slice.getArrayRef());
+    std::sort(sliceVec.begin(), sliceVec.end(),
+              [](Operation *l, Operation *r) { return l->isBeforeInBlock(r); });
+
+    // 1. Create the ForallOp. We don't use the lambda body-builder
+    // version because we require the use of RewriterBase in the body, so we
+    // manually move the insertion point to the body below.
+    Location loc = forallOp.getLoc();
+    scf::ForallOp newForallOp = rewriter.create<scf::ForallOp>(
+        loc, forallOp.getMixedLowerBound(), forallOp.getMixedUpperBound(),
+        forallOp.getMixedStep(), loop.getInitArgs(), forallOp.getMappingAttr());
+
+    // 2. Fill out the ForallOp body.
+
+    // 3. Clone the tileable op and update its destination operands to use the
+    // output bbArgs of the ForallOp.
+    {
+      // 3.a. RAII guard, inserting within forallOp, before terminator.
+      OpBuilder::InsertionGuard g(rewriter);
+      rewriter.setInsertionPoint(newForallOp.getTerminator());
+      auto newLoop = rewriter.create<scf::ForOp>(
+          loop.getLoc(), loop.getLowerBound(), loop.getUpperBound(),
+          loop.getStep(), newForallOp.getRegionIterArgs(),
+          [](OpBuilder &, Location, Value, ValueRange) {});
+
+      {
+        OpBuilder::InsertionGuard g2(rewriter);
+        SmallVector<Value> argReplacements(newForallOp.getInductionVars());
+        argReplacements.append(newLoop.getRegionIterArgs().begin(),
+                               newLoop.getRegionIterArgs().end());
+        rewriter.mergeBlocks(forallOp.getBody(), newLoop.getBody(),
+                             argReplacements);
+        rewriter.replaceAllUsesWith(loop.getInductionVar(),
+                                    newLoop.getInductionVar());
+
+        // Set the insertion point to the now moved parallel terminator of the
+        // original loop.
+        rewriter.setInsertionPoint(parallelTerminator);
+
+        SmallVector<Value> newYields;
+        for (auto parallelSlice : terminators) {
+          newYields.push_back(rewriter.create<tensor::InsertSliceOp>(
+              forallOp.getLoc(), parallelSlice.getDest().getType(),
+              parallelSlice.getSource(), parallelSlice.getDest(),
+              parallelSlice.getOffsets(), parallelSlice.getSizes(),
+              parallelSlice.getStrides(), parallelSlice.getStaticOffsets(),
+              parallelSlice.getStaticSizes(),
+              parallelSlice.getStaticStrides()));
+        }
+        rewriter.setInsertionPointToEnd(newLoop.getBody());
+        rewriter.create<scf::YieldOp>(loop.getLoc(), newYields);
+      }
+
+      for (auto sliceOperandProducer : sliceVec) {
+        rewriter.moveOpBefore(sliceOperandProducer, newLoop);
+      }
+
+      SmallVector<Value> newExtractedSlices;
+      for (auto [parallelSlice, loopResult] :
+           llvm::zip_equal(terminators, newLoop.getResults())) {
+        newExtractedSlices.push_back(rewriter.create<tensor::ExtractSliceOp>(
+            parallelSlice.getLoc(), parallelSlice.getSource().getType(),
+            loopResult, parallelSlice.getOffsets(), parallelSlice.getSizes(),
+            parallelSlice.getStrides(), parallelSlice.getStaticOffsets(),
+            parallelSlice.getStaticSizes(), parallelSlice.getStaticStrides()));
+      }
+
+      rewriter.setInsertionPointToEnd(newForallOp.getTerminator().getBody());
+      for (auto [parallelSlice, source, dest] :
+           llvm::zip_equal(terminators, newExtractedSlices,
+                           newForallOp.getRegionIterArgs())) {
+        rewriter.create<tensor::ParallelInsertSliceOp>(
+            parallelSlice.getLoc(), source, dest, parallelSlice.getOffsets(),
+            parallelSlice.getSizes(), parallelSlice.getStrides(),
+            parallelSlice.getStaticOffsets(), parallelSlice.getStaticSizes(),
+            parallelSlice.getStaticStrides());
+      }
+    }
+
+    for (auto parallelSlice : terminators) {
+      rewriter.eraseOp(parallelSlice);
+    }
+    rewriter.eraseOp(parallelTerminator);
+    rewriter.replaceOp(loop, newForallOp);
+    return success();
+  }
+};
+} // namespace
+
+void transform_dialect::ApplyHoistForallFromForPatternsOp::populatePatterns(
+    RewritePatternSet &patterns) {
+  patterns.insert<HoistForallFromFor>(patterns.getContext());
 }
 
 //===---------------------------------------------------------------------===//

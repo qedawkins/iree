@@ -98,6 +98,17 @@ def ApplyFoldTensorSliceIntoTransferPatternsOp : Op<Transform_Dialect,
   let assemblyFormat = "attr-dict";
 }
 
+def ApplyHoistForallFromForPatternsOp : Op<Transform_Dialect,
+    "apply_patterns.iree.hoist_forall_from_for",
+    [DeclareOpInterfaceMethods<PatternDescriptorOpInterface>]> {
+  let description = [{
+    Hoists perfectly nested `scf.forall` ops from parent `scf.for` ops.
+  }];
+
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+  let assemblyFormat = "attr-dict";
+}
+
 def ApplyIREELinalgElementwiseGreedyFusionPatternsOp : Op<Transform_Dialect,
     "apply_patterns.iree.linalg_elementwise_greedy_fusion",
     [DeclareOpInterfaceMethods<PatternDescriptorOpInterface>,
