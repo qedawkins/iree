@@ -14,6 +14,7 @@
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/Common/VectorLayoutAnalysis.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Interfaces/BufferizationInterfaces.h"
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
@@ -1012,7 +1013,7 @@ fuseThreadForallIntoWarpSlice(RewriterBase &rewriter, scf::ForallOp producer,
   auto newForallOp = rewriter.create<scf::ForallOp>(
       loc, ArrayRef<OpFoldResult>{zero}, ArrayRef<OpFoldResult>{subgroupSize},
       ArrayRef<OpFoldResult>{one}, producer.getOutputs(),
-      producer.getMapping());
+      ArrayAttr::get(context, {IREE::GPU::LaneIdAttr::get(context, 0)}));
 
   rewriter.setInsertionPointToStart(newForallOp.getBody());
 
