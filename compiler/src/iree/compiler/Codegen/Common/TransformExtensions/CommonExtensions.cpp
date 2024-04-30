@@ -648,6 +648,75 @@ void transform_dialect::FlattenForallMappingOp::getEffects(
 }
 
 //===---------------------------------------------------------------------===//
+// ForallToLanesOp
+//===---------------------------------------------------------------------===//
+
+bool isLaneMappableForall(scf::ForallOp forallOp) {
+  if (forallOp.getNumResults() > 0)
+    return false;
+  if (forallOp.getRank() != 1)
+    return false;
+  if (!forallOp.getMapping().has_value())
+    return false;
+  Attribute mapping = *forallOp.getMapping()->getValue().begin();
+  if (mapping != IREE::GPU::LaneIdAttr::get(forallOp.getContext(), 0)) {
+    return false;
+  }
+  return true;
+}
+
+void rewriteForallToLanes(RewriterBase &rewriter, scf::ForallOp forallOp) {
+  Location loc = forallOp->getLoc();
+  assert(isLaneMappableForall(forallOp) &&
+         "mapping non-lane mappable forall op");
+
+  Value laneId = rewriter.create<gpu::LaneIdOp>(loc);
+
+  // Step 4. Predicate omitted given unique topLevel scf::ForallOp.
+
+  // Step 5. Move the body of forallOp.
+  // Erase the terminator first, it will not be used since we are on buffers.
+  rewriter.eraseOp(forallOp.getTerminator());
+  rewriter.setInsertionPoint(forallOp);
+  rewriter.inlineBlockBefore(forallOp.getBody(), forallOp, {laneId});
+  rewriter.create<gpu::BarrierOp>(loc);
+
+  // Step 7. Erase old op.
+  rewriter.eraseOp(forallOp);
+}
+
+DiagnosedSilenceableFailure transform_dialect::ForallToLanesOp::applyToOne(
+    transform::TransformRewriter &rewriter, mlir::FunctionOpInterface target,
+    transform::ApplyToEachResultList &results,
+    transform::TransformState &state) {
+
+  SmallVector<scf::ForallOp> foralls;
+  target->walk([&](scf::ForallOp forallOp) {
+    if (isLaneMappableForall(forallOp)) {
+      foralls.push_back(forallOp);
+    }
+  });
+
+  if (foralls.empty()) {
+    return mlir::emitSilenceableFailure(
+        target, "could not find a lane mappable scf.forall");
+  }
+
+  for (auto forall : foralls) {
+    rewriter.setInsertionPoint(forall);
+    rewriteForallToLanes(rewriter, forall);
+  }
+
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform_dialect::ForallToLanesOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getTarget(), effects);
+  transform::modifiesPayload(effects);
+}
+
+//===---------------------------------------------------------------------===//
 // ForallToWorkgroupOp
 //===---------------------------------------------------------------------===//
 
