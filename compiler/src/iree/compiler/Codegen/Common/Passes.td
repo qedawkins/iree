@@ -267,6 +267,11 @@ def FoldTensorExtractOpPass :
   }];
 }
 
+def FoldVectorOpsIntoVectorTransfersPass :
+  InterfacePass<"iree-codegen-fold-vector-ops-into-vector-transfers", "mlir::FunctionOpInterface"> {
+  let summary = "Folds vector.transpose and vector.broadcast ops into transfers";
+}
+
 def ForOpCanonicalizationPass :
   InterfacePass<"iree-codegen-canonicalize-scf-for", "mlir::FunctionOpInterface"> {
   let summary =
