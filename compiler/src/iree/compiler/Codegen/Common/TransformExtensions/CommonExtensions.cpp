@@ -61,6 +61,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/SubsetOpInterface.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/CSE.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -203,28 +204,53 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
     BackwardSliceOptions backwardOptions;
     backwardOptions.inclusive = true;
     backwardOptions.filter = [&](Operation *op) -> bool {
-      bool yay = forallOp->isProperAncestor(op);
-      return yay;
+      return forallOp->isProperAncestor(op);
     };
     SetVector<Operation *> slice;
 
     scf::InParallelOp parallelTerminator = forallOp.getTerminator();
     SmallVector<tensor::ParallelInsertSliceOp> terminators(
         forallOp.getNumResults());
+    SmallVector<tensor::ExtractSliceOp> pairedSlices(forallOp.getNumResults());
     int64_t numInductionVars = forallOp.getInductionVars().size();
     for (auto &yieldingOp : parallelTerminator.getYieldingOps()) {
       auto parallelInsert = cast<tensor::ParallelInsertSliceOp>(&yieldingOp);
       BlockArgument destBbArg =
           llvm::cast<BlockArgument>(parallelInsert.getDest());
+      tensor::ExtractSliceOp destSlice;
+      for (auto user : destBbArg.getUsers()) {
+        if (user == parallelInsert)
+          continue;
+        auto maybeSlice = dyn_cast<tensor::ExtractSliceOp>(user);
+        // Fail if the destination has more users than a direct insert and
+        // extract slice.
+        if (!maybeSlice) {
+          return failure();
+        }
+        // Require a single extract per destination.
+        if (destSlice) {
+          return failure();
+        }
+        destSlice = maybeSlice;
+      }
+      if (!cast<SubsetOpInterface>(*destSlice)
+               .operatesOnEquivalentSubset(
+                   cast<SubsetOpInterface>(*parallelInsert),
+                   [](Value v1, Value v2) { return v1 == v2; })) {
+        return failure();
+      }
       terminators[destBbArg.getArgNumber() - numInductionVars] = parallelInsert;
-      SmallVector<Value> insertOperands;
-      insertOperands.append(parallelInsert.getOffsets().begin(),
-                            parallelInsert.getOffsets().end());
-      insertOperands.append(parallelInsert.getSizes().begin(),
-                            parallelInsert.getSizes().end());
-      insertOperands.append(parallelInsert.getStrides().begin(),
-                            parallelInsert.getStrides().end());
-      for (Value operand : insertOperands) {
+      pairedSlices[destBbArg.getArgNumber() - numInductionVars] = destSlice;
+      llvm::SmallDenseSet<Value> sliceOperands;
+      sliceOperands.insert(
+          parallelInsert.getOperands().begin() +
+              parallelInsert.getOffsetSizeAndStrideStartOperandIndex(),
+          parallelInsert.getOperands().end());
+      sliceOperands.insert(
+          destSlice.getOperands().begin() +
+              destSlice.getOffsetSizeAndStrideStartOperandIndex(),
+          destSlice.getOperands().end());
+      for (Value operand : sliceOperands) {
         if (auto bbArg = dyn_cast<BlockArgument>(operand)) {
           if (bbArg.getOwner()->getParentOp() == loop) {
             return rewriter.notifyMatchFailure(
@@ -273,20 +299,28 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
       // 3.a. RAII guard, inserting within forallOp, before terminator.
       OpBuilder::InsertionGuard g(rewriter);
       rewriter.setInsertionPoint(newForallOp.getTerminator());
+      SmallVector<Value> newInits;
+      for (auto slice : pairedSlices) {
+        newInits.push_back(slice.getResult());
+      }
       auto newLoop = rewriter.create<scf::ForOp>(
           loop.getLoc(), loop.getLowerBound(), loop.getUpperBound(),
-          loop.getStep(), newForallOp.getRegionIterArgs(),
+          loop.getStep(), newInits,
           [](OpBuilder &, Location, Value, ValueRange) {});
 
       {
         OpBuilder::InsertionGuard g2(rewriter);
         SmallVector<Value> argReplacements(newForallOp.getInductionVars());
-        argReplacements.append(newLoop.getRegionIterArgs().begin(),
-                               newLoop.getRegionIterArgs().end());
+        argReplacements.append(newForallOp.getRegionIterArgs().begin(),
+                               newForallOp.getRegionIterArgs().end());
         rewriter.mergeBlocks(forallOp.getBody(), newLoop.getBody(),
                              argReplacements);
         rewriter.replaceAllUsesWith(loop.getInductionVar(),
                                     newLoop.getInductionVar());
+        for (auto [hoistedSlice, iterArg] :
+             llvm::zip_equal(pairedSlices, newLoop.getRegionIterArgs())) {
+          rewriter.replaceAllUsesExcept(hoistedSlice, iterArg, newLoop);
+        }
 
         // Set the insertion point to the now moved parallel terminator of the
         // original loop.
@@ -294,13 +328,7 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
 
         SmallVector<Value> newYields;
         for (auto parallelSlice : terminators) {
-          newYields.push_back(rewriter.create<tensor::InsertSliceOp>(
-              forallOp.getLoc(), parallelSlice.getDest().getType(),
-              parallelSlice.getSource(), parallelSlice.getDest(),
-              parallelSlice.getOffsets(), parallelSlice.getSizes(),
-              parallelSlice.getStrides(), parallelSlice.getStaticOffsets(),
-              parallelSlice.getStaticSizes(),
-              parallelSlice.getStaticStrides()));
+          newYields.push_back(parallelSlice.getSource());
         }
         rewriter.setInsertionPointToEnd(newLoop.getBody());
         rewriter.create<scf::YieldOp>(loop.getLoc(), newYields);
@@ -309,20 +337,13 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
       for (auto sliceOperandProducer : sliceVec) {
         rewriter.moveOpBefore(sliceOperandProducer, newLoop);
       }
-
-      SmallVector<Value> newExtractedSlices;
-      for (auto [parallelSlice, loopResult] :
-           llvm::zip_equal(terminators, newLoop.getResults())) {
-        newExtractedSlices.push_back(rewriter.create<tensor::ExtractSliceOp>(
-            parallelSlice.getLoc(), parallelSlice.getSource().getType(),
-            loopResult, parallelSlice.getOffsets(), parallelSlice.getSizes(),
-            parallelSlice.getStrides(), parallelSlice.getStaticOffsets(),
-            parallelSlice.getStaticSizes(), parallelSlice.getStaticStrides()));
+      for (auto slice : pairedSlices) {
+        rewriter.moveOpBefore(slice, newLoop);
       }
 
       rewriter.setInsertionPointToEnd(newForallOp.getTerminator().getBody());
       for (auto [parallelSlice, source, dest] :
-           llvm::zip_equal(terminators, newExtractedSlices,
+           llvm::zip_equal(terminators, newLoop.getResults(),
                            newForallOp.getRegionIterArgs())) {
         rewriter.create<tensor::ParallelInsertSliceOp>(
             parallelSlice.getLoc(), source, dest, parallelSlice.getOffsets(),
