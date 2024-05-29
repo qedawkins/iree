@@ -11,9 +11,19 @@ include "mlir/Pass/PassBase.td"
 
 def FuseAndHoistParallelLoopsPass :
     InterfacePass<"iree-gpu-fuse-and-hoist-parallel-loops", "mlir::FunctionOpInterface"> {
-  let summary = "Checks GPU specific resource usage constraints like shared memory limits";
+  let summary = "Greedily fuses and hoists parallel loops.";
   let dependentDialects = [
     "::mlir::affine::AffineDialect",
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect"
+  ];
+}
+
+def VectorizeAndLowerIREEGPUOpsPass :
+    InterfacePass<"iree-gpu-vectorize-and-lower-ops", "mlir::FunctionOpInterface"> {
+  let summary = "Vectorizes then lowers a few iree-gpu ops before vectorization.";
+  let dependentDialects = [
+    "::mlir::vector::VectorDialect",
+    "::mlir::arith::ArithDialect",
     "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect"
   ];
 }

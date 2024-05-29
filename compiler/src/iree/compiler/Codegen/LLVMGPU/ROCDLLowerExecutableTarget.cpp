@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/PassUtils.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMGPU/ROCDLPassDetail.h"
 #include "iree/compiler/Codegen/LLVMGPU/ROCDLPasses.h"
@@ -31,10 +32,10 @@ class ROCDLLowerExecutableTargetPass
     : public ROCDLLowerExecutableTargetBase<ROCDLLowerExecutableTargetPass> {
 public:
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry
-        .insert<IREE::HAL::HALDialect, IREE::LinalgExt::IREELinalgExtDialect,
-                gpu::GPUDialect, linalg::LinalgDialect, scf::SCFDialect,
-                tensor::TensorDialect, vector::VectorDialect>();
+    registry.insert<
+        IREE::HAL::HALDialect, IREE::LinalgExt::IREELinalgExtDialect,
+        IREE::GPU::IREEGPUDialect, gpu::GPUDialect, linalg::LinalgDialect,
+        scf::SCFDialect, tensor::TensorDialect, vector::VectorDialect>();
   }
 
   void runOnOperation() override {
@@ -61,6 +62,9 @@ public:
       break;
     case CodeGenPipeline::LLVMGPUWarpReduction:
       addGPUWarpReductionPassPipeline(pipeline);
+      break;
+    case CodeGenPipeline::LLVMGPUTileAndFuse:
+      addGPUTileAndFusePassPipeline(pipeline);
       break;
     // If no pipeline specified, then nothing to do.
     case IREE::Codegen::DispatchLoweringPassPipeline::None:

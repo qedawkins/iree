@@ -12,6 +12,8 @@
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
+#include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMGPU/ROCDLPasses.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
@@ -77,7 +79,8 @@ static llvm::cl::opt<bool> clLLVMGPUEnablePrefetch(
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
                               const LLVMGPUPipelineOptions &options) {
-  return os << "{" << "enableReduceSharedMemoryBankConflicts = "
+  return os << "{"
+            << "enableReduceSharedMemoryBankConflicts = "
             << options.enableReduceSharedMemoryBankConflicts
             << ", enableReorderWorkgroups = " << options.enableReorderWorkgroups
             << ", enableUkernels = " << options.enableUkernels << "}";
@@ -242,6 +245,54 @@ void addGPUVectorizationPassPipeline(OpPassManager &funcPassManager) {
   funcPassManager.addPass(createGPUDistributePass());
 
   // Post bufferization optimizations.
+  funcPassManager.addPass(createLoopInvariantCodeMotionPass());
+  funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createOptimizeVectorTransferPass());
+  funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
+}
+
+//===---------------------------------------------------------------------===//
+// Tile and Fuse
+//===---------------------------------------------------------------------===//
+
+void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
+  tileAndDistributeToWorkgroup(funcPassManager);
+
+  // Step 1. Tile and fuse tileable ops to reduction loops.
+  {
+    GPUApplyTilingLevelPassOptions options;
+    options.tilingLevel = IREE::GPU::TilingLevel::Reduction;
+    funcPassManager.addPass(createGPUApplyTilingLevelPass(options));
+    funcPassManager.addPass(createCanonicalizerPass());
+    funcPassManager.addPass(createCSEPass());
+  }
+
+  // Step 2. Tile and fuse tileable ops to threads.
+  {
+    GPUApplyTilingLevelPassOptions options;
+    options.tilingLevel = IREE::GPU::TilingLevel::Thread;
+    funcPassManager.addPass(createGPUApplyTilingLevelPass(options));
+    funcPassManager.addPass(createCanonicalizerPass());
+    funcPassManager.addPass(createCSEPass());
+  }
+
+  // Step 3. Greedily fuse parallel loops and hoist from serial loops.
+  // TODO: Tileable consumer fusion needs to happen here as well.
+  funcPassManager.addPass(IREE::GPU::createFuseAndHoistParallelLoopsPass());
+
+  // Step 4. Lower special ops and vectorize.
+  funcPassManager.addPass(IREE::GPU::createVectorizeAndLowerIREEGPUOpsPass());
+  addGPUVectorizationPasses(funcPassManager);
+
+  // Step 5. Bufferize.
+  addBufferizePasses(funcPassManager);
+
+  // Step 6. Resolve remaining parallel loops.
+  funcPassManager.addPass(createGPUDistributePass());
+
+  // Step 7. Remaining post-bufferization optimizations.
   funcPassManager.addPass(createLoopInvariantCodeMotionPass());
   funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
   funcPassManager.addPass(createCanonicalizerPass());

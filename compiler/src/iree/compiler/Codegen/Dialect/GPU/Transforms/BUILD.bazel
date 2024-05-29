@@ -54,6 +54,7 @@ iree_compiler_cc_library(
         "FuseAndHoistParallelLoops.cpp",
         "Passes.cpp",
         "Transforms.cpp",
+        "VectorizeAndLowerIREEGPUOps.cpp",
     ],
     hdrs = [
         "Passes.h",

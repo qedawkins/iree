@@ -48,6 +48,7 @@ iree_cc_library(
     "FuseAndHoistParallelLoops.cpp"
     "Passes.cpp"
     "Transforms.cpp"
+    "VectorizeAndLowerIREEGPUOps.cpp"
   DEPS
     ::PassesIncGen
     LLVMSupport
