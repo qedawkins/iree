@@ -1,4 +1,4 @@
-// RUN: iree-opt --split-input-file --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(iree-codegen-linalg-to-rocdl-pipeline2)))" %s | FileCheck %s
+// RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx940 --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(iree-codegen-linalg-to-rocdl-pipeline2)))" %s | FileCheck %s
 
 #pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
   #hal.descriptor_set.layout<0, bindings = [
@@ -6,13 +6,15 @@
     #hal.descriptor_set.binding<1, storage_buffer>
   ]>
 ]>
-#config = #iree_gpu.lowering_config<{workgroup = [64, 64], reduction = [0, 0, 4], thread = [4, 4]}>
-hal.executable public @main_0_dispatch_0 {
+#config = #iree_gpu.lowering_config<{workgroup = [64, 64, 0], reduction = [0, 0, 4], thread = [4, 4]}>
+hal.executable public @main {
   hal.executable.variant public @rocm_hsaco_fb target(<"rocm", "rocm-hsaco-fb">) {
-    hal.executable.export public @main_0_dispatch_0_matmul_transpose_b_2048x10240x1280_f16xf16xf32 ordinal(0) layout(#pipeline_layout)
+    hal.executable.export public @matmul_transpose_b ordinal(0) layout(#pipeline_layout)
     attributes {hal.interface.bindings = [#hal.interface.binding<0, 0>, #hal.interface.binding<0, 1>, #hal.interface.binding<0, 2>]} {
     ^bb0(%arg0: !hal.device):
+    // ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_slice
+      // %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2
       hal.return %x, %y, %z : index, index, index
     }
     builtin.module {

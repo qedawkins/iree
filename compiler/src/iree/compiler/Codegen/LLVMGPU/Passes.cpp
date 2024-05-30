@@ -259,6 +259,8 @@ void addGPUVectorizationPassPipeline(OpPassManager &funcPassManager) {
 
 void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
   tileAndDistributeToWorkgroup(funcPassManager);
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 
   // Step 1. Tile and fuse tileable ops to reduction loops.
   {
@@ -281,6 +283,11 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
   // Step 3. Greedily fuse parallel loops and hoist from serial loops.
   // TODO: Tileable consumer fusion needs to happen here as well.
   funcPassManager.addPass(IREE::GPU::createFuseAndHoistParallelLoopsPass());
+
+  // Normalize loop bounds for later lowerings.
+  funcPassManager.addPass(createNormalizeLoopBoundsPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 
   // Step 4. Lower special ops and vectorize.
   funcPassManager.addPass(IREE::GPU::createVectorizeAndLowerIREEGPUOpsPass());
