@@ -277,9 +277,21 @@ static LogicalResult tileParallelDims(mlir::FunctionOpInterface funcOp,
     }
     std::reverse(idDims.begin(), idDims.end());
     ArrayAttr mapping = rewriter.getArrayAttr(idDims);
-    auto tilingResult =
-        linalg::tileToForallOp(rewriter, tilingOp, numThreads, mapping);
-    rewriter.replaceOp(tilingOp, tilingResult->tileOp->getResults());
+    // auto tilingResult =
+    //     linalg::tileToForallOp(rewriter, tilingOp, numThreads, mapping);
+    // rewriter.replaceOp(tilingOp, tilingResult->tileOp->getResults());
+
+    scf::SCFTilingOptions tilingOptions;
+    tilingOptions.setNumThreads(numThreads);
+    tilingOptions.setLoopType(scf::SCFTilingOptions::LoopType::ForallOp);
+    tilingOptions.setMapping(mapping);
+    scf::SCFTileAndFuseOptions tileAndFuseOptions;
+    tileAndFuseOptions.setTilingOptions(tilingOptions);
+    FailureOr<scf::SCFTileAndFuseResult> tilingResult =
+        scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingOp,
+                                                  tileAndFuseOptions);
+    rewriter.replaceOp(tilingOp,
+                       (*tilingResult->tiledAndFusedOps.begin())->getResults());
   }
   return success();
 }
