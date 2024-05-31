@@ -262,6 +262,8 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
 
+  funcPassManager.addPass(createGPUPromoteMatmulOperandsPass());
+
   // Step 1. Tile and fuse tileable ops to reduction loops.
   {
     GPUApplyTilingLevelPassOptions options;
