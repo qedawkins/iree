@@ -755,4 +755,24 @@ def WorkgroupSwizzleOp :  Op<Transform_Dialect, "iree.workgroup_swizzle",
   }];
 }
 
+def FuseConsumerOp : Op<Transform_Dialect, "iree.fuse_consumer",
+       [DeclareOpInterfaceMethods<TransformOpInterface>,
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        ReportTrackingListenerFailuresOpTrait]> {
+  let description = [{
+    Fuses the consumer of the operation pointed to by the target handle
+    using the options provided as attributes.
+  }];
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+
+  let arguments =
+    (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$consumer,
+                      TransformHandleTypeInterface:$fused_consumer);
+
+  let assemblyFormat = [{
+    $target attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 #endif // IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONS

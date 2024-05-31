@@ -1280,5 +1280,59 @@ void transform_dialect::WorkgroupSwizzleOp::getEffects(
   transform::modifiesPayload(effects);
 }
 
+//===----------------------------------------------------------------------===//
+// FuseConsumerOp
+//===----------------------------------------------------------------------===//
+
+/// Apply fusing of consumer transformation to all payload ops and store both
+/// the original consumer operation as well as the fused consumer operation.
+template <typename Range>
+static LogicalResult
+applyFuseConsumer(RewriterBase &rewriter, Operation *transformOp,
+                  Range &&payloadOps,
+                  transform::TransformResults &transformResults) {
+  SmallVector<Operation *> originalConsumerOps;
+  SmallVector<Operation *> fusedConsumerOps;
+
+  for (Operation *target : payloadOps) {
+    rewriter.setInsertionPoint(target);
+
+    FailureOr<scf::SCFFuseConsumerOfSliceResult> fuseConsumerResults =
+        scf::tileAndFuseConsumerOfSlice(rewriter, target);
+
+    if (failed(fuseConsumerResults))
+      return failure();
+
+    // Report back the relevant handles to the transform op.
+    originalConsumerOps.push_back(
+        fuseConsumerResults->origConsumerOperand->getOwner());
+    fusedConsumerOps.push_back(
+        fuseConsumerResults->tiledAndFusedConsumerOperand->getOwner());
+  }
+
+  transformResults.set(transformOp->getOpResult(0), originalConsumerOps);
+  transformResults.set(transformOp->getOpResult(1), fusedConsumerOps);
+  return success();
+}
+
+DiagnosedSilenceableFailure transform_dialect::FuseConsumerOp::apply(
+    transform::TransformRewriter &rewriter,
+    transform::TransformResults &transformResults,
+    transform::TransformState &state) {
+  LogicalResult result =
+      applyFuseConsumer(rewriter, getOperation(),
+                        state.getPayloadOps(getTarget()), transformResults);
+  return failed(result) ? DiagnosedSilenceableFailure::definiteFailure()
+                        : DiagnosedSilenceableFailure::success();
+}
+
+void transform_dialect::FuseConsumerOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  consumesHandle(getTarget(), effects);
+  producesHandle(getConsumer(), effects);
+  producesHandle(getFusedConsumer(), effects);
+  transform::modifiesPayload(effects);
+}
+
 #define GET_OP_CLASSES
 #include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensionsOps.cpp.inc"
