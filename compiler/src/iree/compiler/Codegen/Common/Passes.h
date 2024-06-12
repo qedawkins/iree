@@ -79,6 +79,10 @@ std::unique_ptr<OperationPass<>> createConvertBf16ArithToF32Pass();
 /// Convert BF16 buffer ops and conversions to simulated behavior with uint16.
 std::unique_ptr<OperationPass<>> createConvertBf16ToUInt16BuffersPass();
 
+/// Convert convolution ops to im2col using a codegen friendly pattern.
+std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
+createConvertConvToIm2colPass();
+
 /// Converts entry point function within dispatch regions to use
 /// destination-passing style, which is better suited for the upstream
 /// comprehensive bufferization pass.

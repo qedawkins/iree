@@ -42,6 +42,14 @@ void PropagateReshapesByExpansionPass::runOnOperation() {
   // Add patterns to do some additional cleanup (on top of canonicalizations
   // that can be done later) of reshape ops.
   tensor::populateFoldTensorEmptyPatterns(bubbleExpandShapePatterns);
+  linalg::FillOp::getCanonicalizationPatterns(bubbleExpandShapePatterns,
+                                              context);
+  tensor::CollapseShapeOp::getCanonicalizationPatterns(
+      bubbleExpandShapePatterns, context);
+  tensor::EmptyOp::getCanonicalizationPatterns(bubbleExpandShapePatterns,
+                                               context);
+  tensor::ExpandShapeOp::getCanonicalizationPatterns(bubbleExpandShapePatterns,
+                                                     context);
 
   if (failed(applyPatternsAndFoldGreedily(
           getOperation(), std::move(bubbleExpandShapePatterns)))) {

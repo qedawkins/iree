@@ -657,7 +657,7 @@ struct FoldReshapeIntoInterfaceTensorStore
 ///       offsets = [%x * 286, 0, 0, 0], sizes = [3, 3, 1, 96]
 ///       strides = [1, 1, 1, 1] : tensor<3x3x1x96xf32> ->
 ///       !flow.dispatch.tensor<writeonly:tensor<9x3x1x96xf32>>
-struct FoldStaticCollapsIntoInterfaceTensorStore
+struct FoldStaticCollapseIntoInterfaceTensorStore
     : OpRewritePattern<IREE::Flow::DispatchTensorStoreOp> {
   using OpRewritePattern<IREE::Flow::DispatchTensorStoreOp>::OpRewritePattern;
 
@@ -706,7 +706,7 @@ struct FoldStaticCollapsIntoInterfaceTensorStore
     OpFoldResult zero = rewriter.getIndexAttr(0);
     for (auto [size, group, offset] : llvm::zip_equal(
              subspanType.getShape(), collapseShape.getReassociationIndices(),
-             storeOp.getOffsets())) {
+             storeOp.getMixedOffsets())) {
       expandedSizes.push_back(rewriter.getIndexAttr(reshapeSrcShape[group[0]]));
 
       // Special case for 1 to avoid going through arith folders.
@@ -767,7 +767,7 @@ void populateReshapeToInterfaceTensorPatterns(RewritePatternSet &patterns) {
                   FoldReshapeIntoInterfaceTensorLoad<tensor::ExpandShapeOp>>(
       patterns.getContext());
   patterns.insert<FoldReshapeIntoInterfaceTensorStore>(patterns.getContext());
-  patterns.insert<FoldStaticCollapsIntoInterfaceTensorStore>(
+  patterns.insert<FoldStaticCollapseIntoInterfaceTensorStore>(
       patterns.getContext());
 }
 

@@ -58,6 +58,11 @@ def ConvertBf16ToUInt16Buffers :
   let constructor = "mlir::iree_compiler::createConvertBf16ToUInt16BuffersPass()";
 }
 
+def ConvertConvToIm2colPass : InterfacePass<"iree-codegen-convert-conv-to-im2col", "mlir::FunctionOpInterface"> {
+  let summary = "Converts convolutions like operations to im2col with a codegen friendly pattern";
+  let constructor = "mlir::iree_compiler::createConvertConvToIm2colPass()";
+}
+
 def ConvertToDestinationPassingStyle :
     InterfacePass<"iree-codegen-convert-to-destination-passing-style", "mlir::FunctionOpInterface"> {
   let summary =

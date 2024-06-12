@@ -293,6 +293,7 @@ void addGPUVectorizationPassPipeline(OpPassManager &funcPassManager) {
 //===---------------------------------------------------------------------===//
 
 void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
+  funcPassManager.addPass(createCleanupBufferAllocViewPass());
 
   funcPassManager.addPass(createGPUPromoteMatmulOperandsPass());
   funcPassManager.addPass(IREE::GPU::createPackToIntrinsicsPass());
@@ -1053,6 +1054,12 @@ static void buildLLVMGPUCodegenConfigurationPassPipelineImpl(
     FunctionLikeNest funcPassManager(modulePassManager);
     funcPassManager.addPass(createGPUGeneralizeNamedOpsPass);
     addCommonTargetExecutablePreprocessingPasses(funcPassManager);
+
+    funcPassManager.addPass(createConvertConvToIm2colPass);
+    funcPassManager.addPass(createPropagateReshapesByExpansionPass);
+    funcPassManager.addPass(createCanonicalizerPass);
+    funcPassManager.addPass(createCSEPass);
+    funcPassManager.addPass(createCleanupBufferAllocViewPass);
   }
   modulePassManager.addPass(createMaterializeUserConfigsPass());
 
