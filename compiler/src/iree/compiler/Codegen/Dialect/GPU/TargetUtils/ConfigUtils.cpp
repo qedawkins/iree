@@ -112,16 +112,26 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
 
   int64_t maxSharedMemoryBytes = target.getWgp().getMaxWorkgroupMemoryBytes();
 
-  LDBG("Matmul Vector Distribution Config");
+  LDBG("Matmul Distribution Config");
+
+  // Infer if lhs or rhs is transposed to help generate better schedule.
+  SmallVector<AffineMap> maps = linalgOp.getIndexingMapsArray();
+  bool transposedLhs =
+      kDim !=
+      llvm::cast<AffineDimExpr>(maps[0].getResults().back()).getPosition();
+  bool transposedRhs =
+      kDim !=
+      llvm::cast<AffineDimExpr>(maps[1].getResults().back()).getPosition();
 
   // First try to find a schedule with an exactly matching intrinsic.
   std::optional<GPUMMASchedule> schedule =
-      deduceMMASchedule(problem, intrinsics, seeds, maxSharedMemoryBytes);
+      deduceMMASchedule(problem, intrinsics, seeds, maxSharedMemoryBytes,
+                        transposedLhs, transposedRhs);
   if (!schedule) {
     // Then try again by allowing upcasting accumulator.
     schedule =
         deduceMMASchedule(problem, intrinsics, seeds, maxSharedMemoryBytes,
-                          /*canUpcastAcc=*/true);
+                          /*canUpcastAcc=*/true, transposedLhs, transposedRhs);
   }
 
   if (!schedule) {
