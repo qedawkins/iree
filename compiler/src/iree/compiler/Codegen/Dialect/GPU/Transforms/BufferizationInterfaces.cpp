@@ -69,15 +69,16 @@ struct ValueBarrierOpBufferizationInterface
 
     rewriter.create<gpu::BarrierOp>(barrierOp.getLoc());
 
+    SmallVector<Value> replacements;
     for (auto input : barrierOp.getInputs()) {
       FailureOr<Value> buffer = getBuffer(rewriter, input, options);
       if (failed(buffer)) {
         return failure();
       }
-
-      // This operation bufferizes in place
-      bufferization::replaceOpWithBufferizedValues(rewriter, op, *buffer);
+      replacements.push_back(*buffer);
     }
+    // This operation bufferizes in place
+    bufferization::replaceOpWithBufferizedValues(rewriter, op, replacements);
     return success();
   }
 };

@@ -375,6 +375,9 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
   addGPUVectorizationPasses(funcPassManager);
   funcPassManager.addPass(createCleanupBufferAllocViewPass());
 
+  // Step 6.5. Combine value barrier ops.
+  funcPassManager.addPass(createGPUCombineValueBarriersPass());
+
   // Step 7. Bufferize.
   // TODO: This is a workaround for a bug in the lowering of
   // `iree_gpu.shuffle_tensor` which does not properly represent the concurrent
@@ -395,6 +398,13 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
   // Step 9. Remaining post-bufferization optimizations/lowerings.
   funcPassManager.addPass(IREE::GPU::createLowerIREEGPUOpsPass());
   funcPassManager.addPass(createLoopInvariantCodeMotionPass());
+
+  {
+    GPUReduceBankConflictsPassOptions options = {};
+    options.paddingBits = 64;
+    funcPassManager.addPass(createGPUReduceBankConflictsPass(options));
+  }
+
   funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
