@@ -51,6 +51,11 @@ def ConvertConvToChannelsLastPass :
   ];
 }
 
+def ExtractExecutablesPass :
+    Pass<"iree-preprocessing-extract-executables", "mlir::ModuleOp"> {
+  let summary = "Extracts the body of all executable sources into their own functions";
+}
+
 def FoldAttentionWithTransposePass :
     Pass<"iree-preprocessing-fold-attention-with-transpose", ""> {
   let summary = "Fold attention operation with transpose";
