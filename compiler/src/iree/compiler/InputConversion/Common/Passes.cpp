@@ -30,12 +30,6 @@ void buildCommonInputConversionPassPipeline(
   // it's a mistake that it's here.
   passManager.addPass(IREE::Flow::createConvertMeshToFlowPass());
 
-  // Lower various quantized Linalg operations.
-  passManager.addNestedPass<IREE::Util::FuncOp>(
-      InputConversion::createLinalgQuantizedMatmulToMatmulPass());
-  passManager.addNestedPass<IREE::Util::FuncOp>(
-      InputConversion::createLinalgQuantizedConvToConvPass());
-
   // ML frontends have very uneven support for user-controlled types _and_ users
   // tend to use types not well suited for the work they are doing. These
   // demotions/promotions allow users to change the types after lowering out of
