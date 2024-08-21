@@ -125,8 +125,10 @@ def GPUPromoteMatmulOperandsPass :
   let summary = "Pass to insert copies with a different thread configuration "
                 "on matmul operands";
   let dependentDialects = [
+    "::mlir::bufferization::BufferizationDialect",
+    "::mlir::gpu::GPUDialect",
     "::mlir::linalg::LinalgDialect",
-    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect"
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
   ];
 }
 

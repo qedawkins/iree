@@ -13,6 +13,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUInterfaces.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
@@ -24,6 +25,12 @@
 #define DEBUG_TYPE "iree-gpu-config-utils"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
+
+static llvm::cl::opt<bool> clGPUPromoteCMatrix(
+    "iree-gpu-promote-c-matrix",
+    llvm::cl::desc(
+        "control whether to promote the C matrix in matmul strategies"),
+    llvm::cl::init(false));
 
 namespace mlir::iree_compiler::IREE::GPU {
 
@@ -193,6 +200,10 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
   attrs.emplace_back(StringAttr::get(context, "subgroup"),
                      b.getIndexArrayAttr(subgroupTileSizes));
   attrs.emplace_back(StringAttr::get(context, "mma_kind"), mmaKind);
+  if (clGPUPromoteCMatrix) {
+    attrs.emplace_back(StringAttr::get(context, "promote_c"),
+                       UnitAttr::get(context));
+  }
   auto configDict = DictionaryAttr::get(context, attrs);
   auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
 

@@ -10,10 +10,14 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/Utils/LinalgOpInfo.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/Passes.h"
@@ -24,6 +28,19 @@ namespace mlir::iree_compiler {
 #include "iree/compiler/Codegen/Common/GPU/Passes.h.inc"
 
 namespace {
+
+/// Creates a `linalg.copy` on the given tensor value and sets the lowering
+/// configuration for the copy to `#iree_gpu.derived_thread_config`.
+Value promoteValue(OpBuilder &builder, Location loc, Value v) {
+  auto tensorType = cast<RankedTensorType>(v.getType());
+  SmallVector<OpFoldResult> mixedSizes = tensor::getMixedSizes(builder, loc, v);
+  Value empty = builder.create<tensor::EmptyOp>(loc, mixedSizes,
+                                                tensorType.getElementType());
+  auto copy = builder.create<linalg::CopyOp>(loc, v, empty);
+  setLoweringConfig(
+      copy, IREE::GPU::DerivedThreadConfigAttr::get(builder.getContext()));
+  return copy.getResult(0);
+}
 
 /// Inserts a `linalg.copy` directly before the given operation on the
 /// specified operand, for example with operand index = 1:
@@ -42,7 +59,6 @@ namespace {
 /// to threads independently of the matmul.
 void promoteOperand(OpBuilder &builder, Operation *op, unsigned index) {
   Value operand = op->getOperand(index);
-
   if (auto producer = operand.getDefiningOp<TilingInterface>()) {
     setLoweringConfig(producer, IREE::GPU::DerivedThreadConfigAttr::get(
                                     builder.getContext()));
@@ -54,14 +70,36 @@ void promoteOperand(OpBuilder &builder, Operation *op, unsigned index) {
     return;
   }
 
-  SmallVector<OpFoldResult> mixedSizes =
-      tensor::getMixedSizes(builder, op->getLoc(), operand);
-  Value empty = builder.create<tensor::EmptyOp>(op->getLoc(), mixedSizes,
-                                                tensorType.getElementType());
-  auto copy = builder.create<linalg::CopyOp>(op->getLoc(), operand, empty);
-  setLoweringConfig(
-      copy, IREE::GPU::DerivedThreadConfigAttr::get(builder.getContext()));
-  op->setOperand(index, copy.getResult(0));
+  Value replacement = promoteValue(builder, op->getLoc(), operand);
+  op->setOperand(index, replacement);
+}
+
+/// Promotes the |index|th result of |op| by inserting a `linalg.copy` with
+/// `iree_gpu.derived_thread_config` for the lowering config.
+/// TODO: Currently this always creates a copy because derived_thread_config
+/// does not properly handle multiple results currently. Try to omit the
+/// copy given certain fusions once multiple results is properly supported.
+void promoteResult(OpBuilder &builder, Operation *op, unsigned index) {
+  Value result = op->getResult(index);
+
+  auto tensorType = cast<RankedTensorType>(result.getType());
+  SmallVector<Value> dynamicSizes;
+  for (auto [idx, size] : llvm::enumerate(tensorType.getShape())) {
+    if (ShapedType::isDynamic(size)) {
+      dynamicSizes.push_back(
+          builder.create<tensor::DimOp>(op->getLoc(), result, idx));
+    }
+  }
+  Attribute addressSpace = gpu::AddressSpaceAttr::get(
+      builder.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
+  auto alloc = builder.create<bufferization::AllocTensorOp>(
+      op->getLoc(), tensorType, dynamicSizes);
+  alloc.setMemorySpaceAttr(addressSpace);
+  auto copy =
+      builder.create<linalg::CopyOp>(op->getLoc(), result, alloc.getResult());
+
+  Value replacement = promoteValue(builder, op->getLoc(), copy.getResult(0));
+  result.replaceAllUsesExcept(replacement, copy);
 }
 
 bool isNonMatvecContraction(linalg::LinalgOp linalgOp) {
@@ -98,14 +136,26 @@ struct GPUPromoteMatmulOperandsPass final
     FunctionOpInterface funcOp = getOperation();
 
     OpBuilder builder(funcOp);
+    SmallVector<linalg::LinalgOp> promotionTargets;
     funcOp.walk([&](linalg::LinalgOp linalgOp) {
-      if (!isNonMatvecContraction(linalgOp)) {
-        return;
+      if (isNonMatvecContraction(linalgOp)) {
+        promotionTargets.push_back(linalgOp);
       }
+    });
+
+    for (auto linalgOp : promotionTargets) {
       builder.setInsertionPoint(linalgOp);
       promoteOperand(builder, linalgOp, 0);
       promoteOperand(builder, linalgOp, 1);
-    });
+
+      auto loweringConfig =
+          getLoweringConfig<IREE::GPU::LoweringConfigAttr>(linalgOp);
+      if (loweringConfig &&
+          loweringConfig.getAttributes().contains("promote_c")) {
+        builder.setInsertionPointAfter(linalgOp);
+        promoteResult(builder, linalgOp, 0);
+      }
+    }
   }
 };
 
