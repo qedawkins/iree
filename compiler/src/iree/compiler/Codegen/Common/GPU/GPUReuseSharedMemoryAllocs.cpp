@@ -40,7 +40,8 @@ static LivenessRange getLivenessRange(memref::AllocOp alloc,
   while (!workList.empty()) {
     auto op = workList.pop_back_val();
     for (auto user : op->getUsers()) {
-      if (isa<memref::SubViewOp>(user)) {
+      if (isa<memref::SubViewOp, memref::CollapseShapeOp,
+              memref::ExpandShapeOp>(user)) {
         workList.push_back(user);
         continue;
       }
@@ -152,7 +153,8 @@ computeAliasGroups(DenseMap<Operation *, LivenessRange> livenessMap,
 /// parent views in the set of `views`.
 static void getAllSubviews(Operation *op, SetVector<Operation *> &views) {
   for (auto user : op->getUsers()) {
-    if (isa<memref::SubViewOp>(user)) {
+    if (isa<memref::SubViewOp, memref::CollapseShapeOp, memref::ExpandShapeOp>(
+            user)) {
       if (user->getUsers().empty()) {
         return;
       }

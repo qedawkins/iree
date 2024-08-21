@@ -432,6 +432,7 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
   funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createGPUReuseSharedMemoryAllocsPass());
   funcPassManager.addPass(createOptimizeVectorTransferPass());
   funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
   funcPassManager.addPass(createHoistStaticallyBoundAllocationsPass());
