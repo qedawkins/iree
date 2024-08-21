@@ -52,6 +52,7 @@ iree_cc_library(
     "GPUCheckResourceUsage.cpp"
     "GPUCreateFastSlowPath.cpp"
     "GPUDistribute.cpp"
+    "GPUDistributeForall.cpp"
     "GPUDistributeScfFor.cpp"
     "GPUDistributeSharedMemoryCopy.cpp"
     "GPUDistributionPatterns.cpp"
