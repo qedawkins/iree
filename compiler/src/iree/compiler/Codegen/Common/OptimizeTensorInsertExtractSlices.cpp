@@ -8,6 +8,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Transforms/Hoisting.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Utils/Utils.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/Vector/Transforms/VectorTransforms.h"
 #include "mlir/Interfaces/SubsetOpInterface.h"
@@ -200,6 +202,40 @@ void hoistSubsetWithLoopInvariantTensor(RewriterBase &rewriter,
   }
 }
 
+namespace {
+class CastLikeExtractSliceOpFolder final
+    : public OpRewritePattern<tensor::ExtractSliceOp> {
+public:
+  using OpRewritePattern<tensor::ExtractSliceOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::ExtractSliceOp sliceOp,
+                                PatternRewriter &rewriter) const override {
+    if (!tensor::isCastLikeExtractSliceOp(sliceOp) ||
+        sliceOp.getSourceType() != sliceOp.getResultType()) {
+      return failure();
+    }
+    rewriter.replaceOp(sliceOp, sliceOp.getSource());
+    return success();
+  }
+};
+
+class CastLikeInsertSliceOpFolder final
+    : public OpRewritePattern<tensor::InsertSliceOp> {
+public:
+  using OpRewritePattern<tensor::InsertSliceOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::InsertSliceOp sliceOp,
+                                PatternRewriter &rewriter) const override {
+    if (!tensor::isCastLikeInsertSliceOp(sliceOp) ||
+        sliceOp.getSourceType() != sliceOp.getResultType()) {
+      return failure();
+    }
+    rewriter.replaceOp(sliceOp, sliceOp.getSource());
+    return success();
+  }
+};
+} // namespace
+
 void OptimizeTensorInsertExtractSlicesPass::runOnOperation() {
   auto funcOp = getOperation();
   linalg::hoistRedundantVectorTransfers(cast<func::FuncOp>(funcOp));
@@ -223,6 +259,8 @@ void OptimizeTensorInsertExtractSlicesPass::runOnOperation() {
   populateVectorTransferTensorSliceTransforms(patterns);
   scf::ForOp::getCanonicalizationPatterns(patterns, context);
   vector::TransferWriteOp::getCanonicalizationPatterns(patterns, context);
+  patterns.add<CastLikeExtractSliceOpFolder>(context);
+  patterns.add<CastLikeInsertSliceOpFolder>(context);
   if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
     return signalPassFailure();
   }

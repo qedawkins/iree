@@ -394,6 +394,7 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager) {
   // hoisting and fusion pass, as well as a lack of a fallback distribution
   // pass.
   funcPassManager.addPass(createLoopInvariantCodeMotionPass());
+  funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
 
   // Step 5. Greedily fuse parallel loops and hoist from serial loops.
   funcPassManager.addPass(IREE::GPU::createFuseAndHoistParallelLoopsPass());
