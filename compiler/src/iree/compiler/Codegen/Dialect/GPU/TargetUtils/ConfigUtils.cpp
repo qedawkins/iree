@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/ConfigUtils.h"
+#include <limits>
 
 #include "iree/compiler/Codegen/Common/GPU/GPUHeuristics.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
@@ -15,6 +16,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -63,10 +65,8 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
   int64_t nDim = contractionDims.n.back();
   int64_t kDim = contractionDims.k.back();
 
-  // Dynamic dims are expected to be taken care of earlier in the pipeline.
-  if (ShapedType::isDynamic(bounds[mDim]) ||
-      ShapedType::isDynamic(bounds[nDim]) ||
-      ShapedType::isDynamic(bounds[kDim])) {
+  // Dynamic k dims are currently unsupported.
+  if (ShapedType::isDynamic(bounds[kDim])) {
     return failure();
   }
 
@@ -80,6 +80,21 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
 
   GPUMatmulShapeType problem{bounds[mDim], bounds[nDim], bounds[kDim],
                              lhsElemType,  rhsElemType,  initElemType};
+
+  if (ShapedType::isDynamic(problem.mSize)) {
+    problem.mSize = 1024;
+  }
+  if (ShapedType::isDynamic(problem.nSize)) {
+    problem.nSize = 1024;
+  }
+
+  problem.mSize = llvm::divideCeil(problem.mSize, 32) * 32;
+  problem.nSize = llvm::divideCeil(problem.nSize, 32) * 32;
+  problem.kSize = llvm::divideCeil(problem.kSize, 32) * 32;
+
+  bool needsPadding = problem.mSize != bounds[mDim] ||
+                      problem.nSize != bounds[nDim] ||
+                      problem.kSize != bounds[kDim];
 
   SmallVector<GPUMatmulShapeType> intrinsics;
   for (IREE::GPU::MMAAttr mma : target.getWgp().getMma()) {
@@ -200,7 +215,7 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
   attrs.emplace_back(StringAttr::get(context, "subgroup"),
                      b.getIndexArrayAttr(subgroupTileSizes));
   attrs.emplace_back(StringAttr::get(context, "mma_kind"), mmaKind);
-  if (clGPUPromoteCMatrix) {
+  if (clGPUPromoteCMatrix || needsPadding) {
     attrs.emplace_back(StringAttr::get(context, "promote_c"),
                        UnitAttr::get(context));
   }

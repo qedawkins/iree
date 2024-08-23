@@ -139,6 +139,10 @@ applyTileAndFuseToEachRoot(RewriterBase &rewriter,
           if (auto tilingOwner = dyn_cast<TilingInterface>(owner)) {
             shouldFuse = !payloadOps.contains(tilingOwner);
           }
+          if (isa<tensor::PadOp>(owner) &&
+              tilingLevel == IREE::GPU::TilingLevel::Reduction) {
+            shouldFuse = false;
+          }
           // Do not fuse destination operands.
           shouldFuse &= !isDestinationOperand;
           return std::make_tuple(shouldFuse, yieldProducerReplacement);
