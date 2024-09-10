@@ -253,7 +253,7 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
   SmallVector<int64_t> threadTileSizes;
 
   // Initialize the configuration.
-  auto initConfiguration = [&]() {
+  auto initConfiguration = [&, subgroupSize, loopDepth]() {
     workgroupSize = {subgroupSize, 1, 1};
     workgroupTileSizes.resize(loopDepth, 0);
     threadTileSizes.resize(loopDepth, 0);
@@ -298,9 +298,10 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
       std::max(8 / minBitwidth, static_cast<unsigned>(1));
 
   // Distribute workload to the given `numThreads` by allowing a potental loss.
-  auto distributeToThreads = [&](int64_t numThreads,
-                                 std::optional<int64_t> lossFactor =
-                                     std::nullopt) {
+  auto distributeToThreads = [&,
+                              scaleToByte](int64_t numThreads,
+                                           std::optional<int64_t> lossFactor =
+                                               std::nullopt) {
     LDBG("Loss factor: " << lossFactor << "\n");
     initConfiguration();
     // If there are more than 3 parallel dim try to tile the extra higher level
@@ -397,7 +398,8 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
   };
 
   // First try to see if we can use up all threads without any loss.
-  if (distributeToThreads(subgroupSize) != 1) {
+  int64_t newNumThreads = subgroupSize;
+  if (distributeToThreads(newNumThreads) != 1) {
     // Otherwise, allow larger and larger loss factor.
 
     // Threads for distribution. Use 32 at least.
@@ -408,22 +410,6 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
     for (; lossFactor >= 1; lossFactor >>= 1) {
       if (distributeToThreads(numThreads, lossFactor) == 1)
         break;
-    }
-  }
-
-  // TODO(qedawkins): Currently scf.forall resolution only supports static
-  // trip counts, meaning the workgroup tile size must perfectly divide the
-  // loop bound (and thread tile size must perfectly divide the workgroup tile)
-  // so that the trip count won't be static. Remove this check once proper
-  // dynamic trip count resolution support is added.
-  for (auto [loopId, threadTile] : llvm::enumerate(threadTileSizes)) {
-    if (threadTile == 0) {
-      continue;
-    }
-    int64_t bound = loopBounds[loopId];
-    int64_t wkgpTile = workgroupTileSizes[loopId];
-    if (bound % wkgpTile != 0 || wkgpTile % threadTile != 0) {
-      return failure();
     }
   }
 
