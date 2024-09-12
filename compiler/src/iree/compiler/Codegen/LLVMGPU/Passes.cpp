@@ -430,7 +430,7 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   }
   if (pipelineOptions.prefetchSharedMemory) {
     funcPassManager.addPass(createHoistStaticallyBoundAllocationsPass());
-    funcPassManager.addPass(createLLVMGPUPrefetchSharedMemoryPass());
+    // funcPassManager.addPass(createLLVMGPUPrefetchSharedMemoryPass());
   }
 
   funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
