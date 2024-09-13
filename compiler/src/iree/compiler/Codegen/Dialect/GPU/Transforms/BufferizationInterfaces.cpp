@@ -61,6 +61,11 @@ struct BarrierRegionOpBufferizationInterface
     return false;
   }
 
+  bool isWritable(Operation *op, Value value,
+                  const AnalysisState &state) const {
+    return true;
+  }
+
   // Operands alias with the region operands.
   bufferization::AliasingValueList
   getAliasingValues(Operation *op, OpOperand &opOperand,
@@ -229,7 +234,7 @@ struct YieldOpBufferizationInterface
           YieldOpBufferizationInterface, IREE::GPU::YieldOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
                               const AnalysisState &state) const {
-    return true;
+    return false;
   }
 
   bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
