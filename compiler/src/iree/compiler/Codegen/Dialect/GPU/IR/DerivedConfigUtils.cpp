@@ -82,7 +82,8 @@ SmallVector<int64_t> deriveLinalgOpThreadTileSizes(linalg::LinalgOp linalgOp,
   int64_t vectorSize = kPreferredCopyNumBits /
                        getElementTypeOrSelf(linalgOp->getResultTypes()[0])
                            .getIntOrFloatBitWidth();
-  return getThreadTileSizesFromLoopRanges(loopRanges, numThreads, vectorSize);
+  return getVectorSizeTileSizes(loopRanges.size(), loopRanges.back(),
+                                vectorSize);
 }
 
 SmallVector<int64_t>
