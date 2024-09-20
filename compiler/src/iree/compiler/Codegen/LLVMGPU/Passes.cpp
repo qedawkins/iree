@@ -325,8 +325,7 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   tileAndDistributeToWorkgroup(funcPassManager,
                                /*convertToDpsOptions=*/std::nullopt);
 
-  // Step 1. Promote matmul operands and pack to intrinsic shapes.
-  funcPassManager.addPass(createGPUPromoteMatmulOperandsPass());
+  // Step 1. Pack to intrinsic shapes.
   funcPassManager.addPass(IREE::GPU::createPackToIntrinsicsPass());
 
   // Step 1.5. Expand result shapes of MultiMmaOps before reduction tiling.
@@ -360,6 +359,11 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   }
 
   funcPassManager.addPass(createPropagateReshapesByExpansionPass());
+
+  // Step 3.6. Promote matmul operands after decomposition and reshape
+  // propagation.
+  funcPassManager.addPass(createGPUPromoteMatmulOperandsPass());
+
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
   funcPassManager.addPass(createConvertToDestinationPassingStylePass(
