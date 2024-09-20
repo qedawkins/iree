@@ -8,6 +8,7 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Utils/LinalgOpInfo.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -64,7 +65,12 @@ void promoteOperand(OpBuilder &builder, Operation *op, unsigned index) {
   op->setOperand(index, copy.getResult(0));
 }
 
-bool isNonMatvecContraction(linalg::LinalgOp linalgOp) {
+bool isNonMatvecContraction(Operation *op) {
+  auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+  if (!linalgOp) {
+    return false;
+  }
+
   SmallVector<int64_t, 4> bounds = linalgOp.getStaticLoopRanges();
   FailureOr<mlir::linalg::ContractionDimensions> contractionDims =
       mlir::linalg::inferContractionDims(linalgOp);
@@ -98,13 +104,14 @@ struct GPUPromoteMatmulOperandsPass final
     FunctionOpInterface funcOp = getOperation();
 
     OpBuilder builder(funcOp);
-    funcOp.walk([&](linalg::LinalgOp linalgOp) {
-      if (!isNonMatvecContraction(linalgOp)) {
+    funcOp.walk([&](Operation *op) {
+      if (!isNonMatvecContraction(op) && !isa<IREE::GPU::MultiMmaOp>(op)) {
         return;
       }
-      builder.setInsertionPoint(linalgOp);
-      promoteOperand(builder, linalgOp, 0);
-      promoteOperand(builder, linalgOp, 1);
+
+      builder.setInsertionPoint(op);
+      promoteOperand(builder, op, 0);
+      promoteOperand(builder, op, 1);
     });
   }
 };
