@@ -22,6 +22,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
+#include "mlir/Interfaces/ValueBoundsOpInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #define DEBUG_TYPE "iree-codegen-gpu-apply-tiling-level"
@@ -38,6 +39,128 @@ struct GPUApplyTilingLevelPass final
   void runOnOperation() override;
 };
 } // namespace
+
+LogicalResult swapExpandShapeWithSlice(RewriterBase &rewriter,
+                                       tensor::ExpandShapeOp expandShapeOp,
+                                       tensor::ExtractSliceOp sliceOp) {
+
+  SmallVector<OpFoldResult> offsets = sliceOp.getMixedOffsets();
+  SmallVector<OpFoldResult> sizes = sliceOp.getMixedSizes();
+
+  // Helper variables and function for accumulating the new offset and length
+  // values.
+  Location loc = expandShapeOp->getLoc();
+  AffineExpr d0, d1, d2;
+  bindDims(rewriter.getContext(), d0, d1, d2);
+  // Multiply two integers.
+  auto mul = [&](OpFoldResult v1, OpFoldResult v2) {
+    auto mulMap = AffineMap::get(2, 0, {d0 * d1});
+    return affine::makeComposedFoldedAffineApply(rewriter, loc, mulMap,
+                                                 {v1, v2});
+  };
+  auto mulAdd = [&](OpFoldResult v1, OpFoldResult v2, OpFoldResult v3) {
+    auto mulMap = AffineMap::get(3, 0, {d0 * d1 + d2});
+    return affine::makeComposedFoldedAffineApply(rewriter, loc, mulMap,
+                                                 {v1, v2, v3});
+  };
+
+  SmallVector<OpFoldResult> outputShape =
+      getMixedValues(expandShapeOp.getStaticOutputShape(),
+                     expandShapeOp.getOutputShape(), rewriter);
+
+  // Compute new offsets, lengths, and strides.
+  SmallVector<OpFoldResult> newOffsets, newLengths, newStrides;
+
+  auto isZeroOffsetAndFullSize = [](OpFoldResult offset, OpFoldResult sliceSize,
+                                    OpFoldResult size) {
+    if (!isConstantIntValue(offset, 0))
+      return false;
+    FailureOr<bool> maybeEqual =
+        ValueBoundsConstraintSet::areEqual(sliceSize, size);
+    return llvm::succeeded(maybeEqual) && maybeEqual.value();
+  };
+
+  for (const ReassociationIndices &indices :
+       expandShapeOp.getReassociationIndices()) {
+    OpFoldResult newOffset = rewriter.getIndexAttr(0);
+    OpFoldResult newSize = rewriter.getIndexAttr(1);
+
+    int64_t i = 0;
+    int64_t e = indices.size();
+    for (; i < e; ++i) {
+      int64_t expandedDim = indices[i];
+      if (!isConstantIntValue(sizes[expandedDim], 1))
+        break;
+
+      newOffset =
+          mulAdd(newOffset, outputShape[expandedDim], offsets[expandedDim]);
+    }
+
+    if (i != e) {
+      int64_t expandedDim = indices[i];
+      newOffset =
+          mulAdd(newOffset, outputShape[expandedDim], offsets[expandedDim]);
+      newSize = sizes[expandedDim];
+      i++;
+    }
+
+    for (; i < e; ++i) {
+      int64_t expandedDim = indices[i];
+      OpFoldResult offset = offsets[expandedDim];
+      OpFoldResult fullSize = outputShape[expandedDim];
+      if (!isZeroOffsetAndFullSize(offset, sizes[expandedDim], fullSize)) {
+        return failure();
+      }
+
+      newOffset = mul(newOffset, fullSize);
+      newSize = mul(newSize, fullSize);
+    }
+
+    newOffsets.push_back(newOffset);
+    newLengths.push_back(newSize);
+
+    // Only unit stride supported.
+    newStrides.push_back(rewriter.getIndexAttr(1));
+  }
+
+  // The shape of the result can be obtained from the sizes passed in.
+  SmallVector<Value> dynDims;
+  SmallVector<int64_t> shape;
+  dispatchIndexOpFoldResults(sizes, dynDims, shape);
+  RankedTensorType resultType = RankedTensorType::get(
+      shape, expandShapeOp.getResultType().getElementType());
+
+  // Create a new ExtractSliceOp and ExpandShapeOp.
+  Value newSliceOp = rewriter.create<tensor::ExtractSliceOp>(
+      loc, expandShapeOp.getSrc(), newOffsets, newLengths, newStrides);
+  auto newExpandShapeOp = rewriter.create<tensor::ExpandShapeOp>(
+      loc, resultType, newSliceOp, expandShapeOp.getReassociationIndices(),
+      sizes);
+  rewriter.replaceOp(sliceOp, newExpandShapeOp);
+  return success();
+}
+
+/// tensor.empty does not define any tensor contents, so an unpadded pack
+/// can be folded away.
+struct SwapExpandShapeWithSlicePattern
+    : public OpRewritePattern<tensor::ExtractSliceOp> {
+  using OpRewritePattern<tensor::ExtractSliceOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::ExtractSliceOp sliceOp,
+                                PatternRewriter &rewriter) const override {
+    auto expandOp = sliceOp.getSource().getDefiningOp<tensor::ExpandShapeOp>();
+    if (!expandOp) {
+      return failure();
+    }
+
+    if (!sliceOp.hasUnitStride()) {
+      return rewriter.notifyMatchFailure(sliceOp,
+                                         "unsupported: non-unit stride");
+    }
+
+    return swapExpandShapeWithSlice(rewriter, expandOp, sliceOp);
+  }
+};
 
 /// This collects the set of operations to tile + fuse starting from the given
 /// root |op| and walking up to its producers. Stops at operations given by
@@ -151,10 +274,16 @@ applyTileAndFuseToEachRoot(RewriterBase &rewriter,
     };
     tileAndFuseOptions.setFusionControlFn(controlFn);
 
-    RewritePatternSet patterns(context);
-    tensor::ExtractSliceOp::getCanonicalizationPatterns(patterns, context);
-    tensor::populateMergeConsecutiveInsertExtractSlicePatterns(patterns);
-    tileAndFuseOptions.cleanupPatterns = std::move(patterns);
+    // Avoid cleanup for subgroup level tiling because cleanup/fusion must
+    // happen later during lane tiling because failure to fuse at the lane
+    // tiling level is irrecoverable if fusion happens now.
+    if (tilingLevel != IREE::GPU::TilingLevel::Subgroup) {
+      RewritePatternSet patterns(context);
+      tensor::ExtractSliceOp::getCanonicalizationPatterns(patterns, context);
+      tensor::populateMergeConsecutiveInsertExtractSlicePatterns(patterns);
+      patterns.add<SwapExpandShapeWithSlicePattern>(context);
+      tileAndFuseOptions.cleanupPatterns = std::move(patterns);
+    }
 
     FailureOr<scf::SCFTileAndFuseResult> tiledResults =
         scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp,
