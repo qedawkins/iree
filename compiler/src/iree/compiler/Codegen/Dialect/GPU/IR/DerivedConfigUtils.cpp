@@ -21,13 +21,15 @@ static constexpr int64_t kPreferredCopyNumBits = 128;
 // Helper to construct a list of tile sizes that simply uses the given vector
 // size or the innerDimSize as the inner most tile size, whichever is smaller.
 // All other dims are tiled to 1.
-static SmallVector<int64_t>
-getVectorSizeTileSizes(int64_t rank, int64_t innerDimSize, int64_t vectorSize) {
+static SmallVector<int64_t> getVectorSizeTileSizes(int64_t rank,
+                                                   int64_t innerDimSize,
+                                                   int64_t vectorSize,
+                                                   int64_t tilingDim) {
   SmallVector<int64_t> tileSizes(rank, 1);
   if (ShapedType::isDynamic(innerDimSize) || innerDimSize >= vectorSize) {
-    tileSizes.back() = vectorSize;
+    tileSizes[tilingDim] = vectorSize;
   } else {
-    tileSizes.back() = innerDimSize;
+    tileSizes[tilingDim] = innerDimSize;
   }
   return tileSizes;
 }
@@ -38,14 +40,14 @@ getThreadTileSizesFromLoopRanges(SmallVector<int64_t> loopRanges,
   if (llvm::any_of(loopRanges,
                    [](int64_t s) { return ShapedType::isDynamic(s); })) {
     return getVectorSizeTileSizes(loopRanges.size(), loopRanges.back(),
-                                  vectorSize);
+                                  vectorSize, loopRanges.size() - 1);
   }
 
   int64_t flatNumTrips = std::accumulate(loopRanges.begin(), loopRanges.end(),
                                          1, std::multiplies<int64_t>());
   if (flatNumTrips % numThreads != 0) {
     return getVectorSizeTileSizes(loopRanges.size(), loopRanges.back(),
-                                  vectorSize);
+                                  vectorSize, loopRanges.size() - 1);
   }
   int64_t maxVectorSize = flatNumTrips / numThreads;
 
@@ -82,8 +84,19 @@ SmallVector<int64_t> deriveLinalgOpThreadTileSizes(linalg::LinalgOp linalgOp,
   int64_t vectorSize = kPreferredCopyNumBits /
                        getElementTypeOrSelf(linalgOp->getResultTypes()[0])
                            .getIntOrFloatBitWidth();
-  return getVectorSizeTileSizes(loopRanges.size(), loopRanges.back(),
-                                vectorSize);
+  int64_t rank = loopRanges.size();
+
+  if (auto transpose = dyn_cast<linalg::TransposeOp>(*linalgOp)) {
+    int64_t tilingDim = 0;
+    while (transpose.getPermutation()[tilingDim] != rank - 1) {
+      tilingDim++;
+    }
+    return getVectorSizeTileSizes(rank, loopRanges[tilingDim], vectorSize,
+                                  tilingDim);
+  }
+
+  return getVectorSizeTileSizes(rank, loopRanges.back(), vectorSize,
+                                loopRanges.size() - 1);
 }
 
 SmallVector<int64_t>
