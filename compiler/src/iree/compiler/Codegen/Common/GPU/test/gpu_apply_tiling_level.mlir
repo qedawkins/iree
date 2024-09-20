@@ -360,3 +360,31 @@ module {
 //       SUBGROUP:     scf.forall.in_parallel
 //       SUBGROUP:       tensor.parallel_insert_slice %[[MMA]] into %[[INIT]]
 //       SUBGROUP:   return
+
+// -----
+
+#config = #iree_gpu.lowering_config<{thread = [2, 16], subgroup = [2, 16]}>
+#map = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @cleanup_slices(%3: tensor<260x70xf32>, %4: tensor<64x256xf32>, %5: tensor<64x256xf32>) -> tensor<64x256xf32> {
+    %empty = tensor.empty() : tensor<70x260xf32>
+    %transpose = linalg.transpose ins(%3 : tensor<260x70xf32>) outs(%empty : tensor<70x260xf32>) permutation = [1, 0]
+    %slice = tensor.extract_slice %transpose [0, 0] [64, 256] [1, 1] : tensor<70x260xf32> to tensor<64x256xf32>
+    %6 = linalg.generic {
+      indexing_maps = [#map, #map, #map],
+      iterator_types = ["parallel", "parallel"]
+      } ins(%slice, %4 : tensor<64x256xf32>, tensor<64x256xf32>) outs(%5 : tensor<64x256xf32>) attrs =  {lowering_config = #config} {
+    ^bb0(%in: f32, %in_0: f32, %out: f32):
+      %7 = arith.addf %in, %in_0 : f32
+      linalg.yield %7 : f32
+    } -> tensor<64x256xf32>
+    return %6 : tensor<64x256xf32>
+  }
+}
+
+// THREAD-LABEL: func.func @cleanup_slices
+//       THREAD:   scf.forall ({{.*}}) = (0, 0) to (64, 256) step (2, 16)
+//       THREAD:     linalg.transpose ins(%{{.*}}: tensor<16x2xf32>)
+//       THREAD:     linalg.generic {{.*}} ins(%{{.*}}: tensor<2x16xf32>, tensor<2x16xf32>)
+//       THREAD:     scf.forall.in_parallel
+//       THREAD:   mapping = [#gpu.thread<linear_dim_1>, #gpu.thread<linear_dim_0>]

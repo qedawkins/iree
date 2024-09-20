@@ -16,6 +16,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
@@ -149,6 +150,11 @@ applyTileAndFuseToEachRoot(RewriterBase &rewriter,
       return std::nullopt;
     };
     tileAndFuseOptions.setFusionControlFn(controlFn);
+
+    RewritePatternSet patterns(context);
+    tensor::ExtractSliceOp::getCanonicalizationPatterns(patterns, context);
+    tensor::populateMergeConsecutiveInsertExtractSlicePatterns(patterns);
+    tileAndFuseOptions.cleanupPatterns = std::move(patterns);
 
     FailureOr<scf::SCFTileAndFuseResult> tiledResults =
         scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp,
