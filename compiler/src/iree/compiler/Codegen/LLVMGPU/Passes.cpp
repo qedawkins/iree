@@ -447,6 +447,7 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
     funcPassManager.addPass(createLLVMGPUPrefetchSharedMemoryPass());
   }
 
+  funcPassManager.addPass(createDropVectorUnitDimsPass());
   funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
