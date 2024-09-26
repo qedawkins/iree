@@ -249,10 +249,10 @@ LogicalResult fuseForallIntoConsumer(RewriterBase &rewriter,
 
   // We require a descending relative mapping, so delinearize in reverse order.
   auto delinearize = rewriter.create<affine::AffineDelinearizeIndexOp>(
-      loc, newFlatProducerId, llvm::to_vector(llvm::reverse(producerRanges)));
+      loc, newFlatProducerId, llvm::to_vector(producerRanges));
 
   SmallVector<Value> newBlockArgs =
-      llvm::map_to_vector(llvm::reverse(delinearize.getResults()),
+      llvm::map_to_vector(delinearize.getResults(),
                           [](OpResult r) -> Value { return r; });
   newBlockArgs.append(newProducer.getRegionIterArgs().begin(),
                       newProducer.getRegionIterArgs().end());
