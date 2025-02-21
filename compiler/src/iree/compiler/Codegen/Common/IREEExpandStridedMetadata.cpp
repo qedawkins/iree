@@ -267,7 +267,8 @@ struct IREEExpandStridedMetadataPass final
 
 void populateIREEResolveExtractStridedMetadataPatterns(
     RewritePatternSet &patterns) {
-  memref::populateResolveExtractStridedMetadataPatterns(patterns);
+  // memref::populateResolveExtractStridedMetadataPatterns(patterns);
+  memref::populateExpandStridedMetadataPatterns(patterns);
   amdgpu::populateAmdgpuResolveStridedMetadataPatterns(patterns);
   patterns.insert<ResolveExtractMetadataFromHalInterfaceBindingSubspan>(
       patterns.getContext());

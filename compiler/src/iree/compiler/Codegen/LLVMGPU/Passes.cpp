@@ -407,6 +407,7 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createPropagateReshapesByExpansionPass());
   funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createFoldExtractIntoLoadPass());
 
   // Step 4. Tile and fuse tileable ops to subgroups/threads.
   {

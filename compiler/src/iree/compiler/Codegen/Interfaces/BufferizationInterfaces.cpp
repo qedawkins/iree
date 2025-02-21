@@ -202,25 +202,40 @@ struct DispatchTensorLoadOpInterface
     assert(tensorSubspanOp && "expected that source is a SubspanOp");
     Value source = findOrCreateSubspanBuffer(rewriter, tensorSubspanOp);
 
+    bool useRocdlBuffers = false;
+    if (auto *ireeGpuDialect =
+            rewriter.getContext()
+                ->getLoadedDialect<IREE::GPU::IREEGPUDialect>()) {
+      useRocdlBuffers =
+          ireeGpuDialect->getUseRocdlBufferInstructionsAttrHelper()
+              .isAttrPresent(loadOp);
+    }
+
+    Value buffer;
     if (equalTensorShape(loadOp.getType(), loadOp.sizes(),
                          llvm::cast<IREE::Flow::DispatchTensorType>(
                              loadOp.getSource().getType()),
                          loadOp.getSourceDims())) {
       // The entire tensor is loaded.
-      replaceOpWithBufferizedValues(rewriter, op, source);
-      return success();
+      buffer = source;
+    } else {
+      // Bufferize to subview.
+      auto subviewMemRefType = memref::SubViewOp::inferRankReducedResultType(
+          loadOp.getType().getShape(), llvm::cast<MemRefType>(source.getType()),
+          loadOp.getMixedOffsets(), loadOp.getMixedSizes(),
+          loadOp.getMixedStrides());
+      buffer = rewriter.create<memref::SubViewOp>(
+          op->getLoc(), llvm::cast<MemRefType>(subviewMemRefType), source,
+          loadOp.getMixedOffsets(), loadOp.getMixedSizes(),
+          loadOp.getMixedStrides());
     }
-
-    // Bufferize to subview.
-    auto subviewMemRefType = memref::SubViewOp::inferRankReducedResultType(
-        loadOp.getType().getShape(), llvm::cast<MemRefType>(source.getType()),
-        loadOp.getMixedOffsets(), loadOp.getMixedSizes(),
-        loadOp.getMixedStrides());
-    replaceOpWithNewBufferizedOp<memref::SubViewOp>(
-        rewriter, op, llvm::cast<MemRefType>(subviewMemRefType), source,
-        loadOp.getMixedOffsets(), loadOp.getMixedSizes(),
-        loadOp.getMixedStrides());
-
+    if (useRocdlBuffers) {
+      buffer = rewriter.create<amdgpu::FatRawBufferCastOp>(
+          op->getLoc(), buffer, /*validBytes=*/Value{},
+          /*cacheSwizzleStride=*/Value{}, /*boundsCheck=*/true,
+          /*resetOffset=*/true);
+    }
+    replaceOpWithBufferizedValues(rewriter, op, buffer);
     return success();
   }
 };

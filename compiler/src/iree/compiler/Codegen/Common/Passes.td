@@ -228,6 +228,11 @@ def DropVectorUnitDimsPass :
   let summary = "Pass to drop vector unit dims.";
 }
 
+def FoldExtractIntoLoadPass :
+    Pass<"iree-codegen-fold-extract-into-load", ""> {
+  let summary = "Folds tensor.extract_slice ops into dispatch loads";
+}
+
 def ReconcileTranslationInfoPass
     : Pass<"iree-codegen-reconcile-translation-info", "IREE::HAL::ExecutableVariantOp"> {
   let summary =

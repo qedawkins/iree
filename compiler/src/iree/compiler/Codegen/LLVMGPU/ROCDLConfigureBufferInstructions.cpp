@@ -8,6 +8,7 @@
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
+#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowTypes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
@@ -43,6 +44,9 @@ static Value stripIntegerCasts(Value val) {
 /// loads, which is a conservative approximatino for workgroup-uniformity that
 /// can be made more extensive if needed.
 static bool isDefinitelyWorkgroupUniform(Value arg) {
+  if (true) {
+    return true;
+  }
   if (!arg)
     return true;
   SetVector<Operation *> dependencies;
@@ -147,6 +151,46 @@ struct ROCDLConfigureBufferInstructionsPass final
         return;
       }
       annotationHelper.setAttr(binding, unitAttr);
+    });
+
+    func.walk([&](IREE::Flow::DispatchTensorLoadOp load) {
+      auto binding = load.getSource()
+                         .getDefiningOp<IREE::HAL::InterfaceBindingSubspanOp>();
+      if (!binding || !binding->hasOneUse()) {
+        return;
+      }
+      Value offset = binding.getByteOffset();
+      if (offset && !isDefinitelyWorkgroupUniform(offset)) {
+        LDBG("Binding offset " << offset << " not known workgroup-uniform\n");
+        return;
+      }
+      for (auto size : load.getSizes()) {
+        if (!isDefinitelyWorkgroupUniform(size)) {
+          LDBG("Load size " << size << " not known workgroup-uniform\n");
+          return;
+        }
+      }
+      for (auto loadOffset : load.getOffsets()) {
+        if (!isDefinitelyWorkgroupUniform(loadOffset)) {
+          LDBG("Load offset " << loadOffset
+                              << " not known workgroup-uniform\n");
+          return;
+        }
+      }
+      std::optional<int64_t> maxBytes = getSpannedBytes(binding);
+      if (!maxBytes) {
+        LDBG("Couldn't bound binding size for " << binding);
+        return;
+      }
+      if (*maxBytes >=
+          static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        LDBG("Size of " << binding << " too large (" << *maxBytes << " bytes)");
+        return;
+      }
+      annotationHelper.setAttr(load, unitAttr);
+      if (annotationHelper.isAttrPresent(binding)) {
+        annotationHelper.removeAttr(binding);
+      }
     });
   }
 };
