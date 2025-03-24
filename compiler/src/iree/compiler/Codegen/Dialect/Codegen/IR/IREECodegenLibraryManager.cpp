@@ -55,6 +55,13 @@ static FailureOr<ModuleOp> getOrParseTransformLibraryModuleImpl(
   return parsedLibrary.get();
 }
 
+std::optional<ModuleOp> IREECodegenDialect::getLoneTransformLibraryModule() {
+  if (libraryModules.size() != 1) {
+    return std::nullopt;
+  }
+  return libraryModules[*libraryModules.keys().begin()].get();
+}
+
 FailureOr<ModuleOp>
 IREECodegenDialect::getOrLoadTransformLibraryModule(StringRef libraryPath) {
   // Acquire a lock on the map that will release once out of scope.

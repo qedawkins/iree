@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/InliningUtils.h"
 
 namespace mlir::iree_compiler::IREE::Util {
 
@@ -36,6 +37,29 @@ IREE::Util::transform_dialect::GetNearestSymbolTableOp::applyToOne(
 void IREE::Util::transform_dialect::GetNearestSymbolTableOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::onlyReadsHandle(getTargetMutable(), effects);
+  transform::producesHandle(getOperation()->getOpResults(), effects);
+  transform::modifiesPayload(effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GetSiblingSymbolOp
+//===----------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure
+IREE::Util::transform_dialect::GetSiblingSymbolOp::apply(
+    transform::TransformRewriter &rewriter,
+    transform::TransformResults &transformResults,
+    transform::TransformState &state) {
+  auto symbolOp = SymbolTable::lookupNearestSymbolFrom(*this, getSymbol());
+  if (!symbolOp) {
+    return emitDefiniteFailure() << "could not find corresponding symbol op";
+  }
+  transformResults.set(cast<OpResult>(getTargetSymbol()), {symbolOp});
+  return DiagnosedSilenceableFailure::success();
+}
+
+void IREE::Util::transform_dialect::GetSiblingSymbolOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::producesHandle(getOperation()->getOpResults(), effects);
   transform::modifiesPayload(effects);
 }
@@ -241,15 +265,30 @@ DiagnosedSilenceableFailure IREE::Util::transform_dialect::CastAndCallOp::apply(
     }
   }
 
-  auto callOp = rewriter.create<IREE::Util::CallOp>(
-      insertionPoint->getLoc(), targetFunction.getResultTypes(),
-      targetFunction.getName(), inputs, /*tied_operands=*/ArrayAttr{},
-      /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
+  SmallVector<Value> replacements;
+  Operation *exceptedUser = nullptr;
+  if (getInlineCall()) {
+    auto funcCopy = cast<IREE::Util::FuncOp>(rewriter.clone(*targetFunction));
+
+    Block *body = &*funcCopy.getFunctionBody().begin();
+    Operation *terminator = body->getTerminator();
+    rewriter.inlineBlockBefore(body, &*rewriter.getInsertionPoint(), inputs);
+    replacements = terminator->getOperands();
+    rewriter.eraseOp(terminator);
+    rewriter.eraseOp(funcCopy);
+  } else {
+    auto callOp = rewriter.create<IREE::Util::CallOp>(
+        insertionPoint->getLoc(), targetFunction.getResultTypes(),
+        targetFunction.getName(), inputs, /*tied_operands=*/ArrayAttr{},
+        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
+    exceptedUser = callOp;
+    replacements = callOp->getOpResults();
+    results.set(cast<OpResult>(getResults()[0]), {callOp});
+  }
 
   // Cast the call results back to the expected types. If any conversions fail
   // this is a definite failure as the call has been constructed at this point.
-  for (auto [output, newOutput] :
-       llvm::zip_equal(outputs, callOp.getResults())) {
+  for (auto [output, newOutput] : llvm::zip_equal(outputs, replacements)) {
     Value convertedOutput = newOutput;
     if (output.getType() != newOutput.getType()) {
       convertedOutput = converter.materializeTargetConversion(
@@ -260,9 +299,12 @@ DiagnosedSilenceableFailure IREE::Util::transform_dialect::CastAndCallOp::apply(
                << " to type " << output.getType();
       }
     }
-    rewriter.replaceAllUsesExcept(output, convertedOutput, callOp);
+    if (exceptedUser) {
+      rewriter.replaceAllUsesExcept(output, convertedOutput, exceptedUser);
+    } else {
+      rewriter.replaceAllUsesWith(output, convertedOutput);
+    }
   }
-  results.set(cast<OpResult>(getResult()), {callOp});
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -284,6 +326,9 @@ LogicalResult IREE::Util::transform_dialect::CastAndCallOp::verify() {
   if (getFunction() && getFunctionName()) {
     return emitOpError() << "function handle and name are mutually exclusive";
   }
+  if (getInlineCall() && getNumResults() != 0) {
+    return emitOpError() << "inlining mode does not produce a result";
+  }
   return success();
 }
 
@@ -297,6 +342,43 @@ void IREE::Util::transform_dialect::CastAndCallOp::getEffects(
   if (getFunction())
     transform::onlyReadsHandle(getFunctionMutable(), effects);
   transform::producesHandle(getOperation()->getOpResults(), effects);
+  transform::modifiesPayload(effects);
+}
+
+//===----------------------------------------------------------------------===//
+// InlineOp
+//===----------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure IREE::Util::transform_dialect::InlineOp::apply(
+    transform::TransformRewriter &rewriter,
+    transform::TransformResults &results, transform::TransformState &state) {
+  // Get the insertion point for the call.
+  auto callOps = state.getPayloadOps(getCall());
+  if (!llvm::hasSingleElement(callOps)) {
+    return emitSilenceableFailure(getLoc())
+           << "Unimplemented: inlining more than one call";
+  }
+
+  auto call = cast<IREE::Util::CallOp>(*callOps.begin());
+  auto symbolTable = SymbolTable::getNearestSymbolTable(call);
+  auto funcOp = cast<IREE::Util::FuncOp>(
+      SymbolTable::lookupSymbolIn(symbolTable, call.getCalleeAttr()));
+
+  auto funcCopy = funcOp.clone();
+
+  Block *body = &*funcCopy.getFunctionBody().begin();
+  Operation *terminator = body->getTerminator();
+  rewriter.inlineBlockBefore(body, call, call->getOperands());
+  rewriter.replaceAllOpUsesWith(call, terminator->getOperands());
+  rewriter.eraseOp(terminator);
+  rewriter.eraseOp(funcCopy);
+
+  return DiagnosedSilenceableFailure::success();
+}
+
+void IREE::Util::transform_dialect::InlineOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getCallMutable(), effects);
   transform::modifiesPayload(effects);
 }
 

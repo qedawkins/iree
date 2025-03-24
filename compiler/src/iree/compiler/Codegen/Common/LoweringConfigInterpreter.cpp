@@ -31,6 +31,10 @@ public:
   void runOnOperation() override {
     Operation *rootOp = getOperation();
     auto *symbolTableOp = SymbolTable::getNearestSymbolTable(rootOp);
+    MLIRContext *ctx = &getContext();
+    auto dialect = ctx->getOrLoadDialect<IREE::Codegen::IREECodegenDialect>();
+    std::optional<ModuleOp> originalSpec =
+        dialect->getLoneTransformLibraryModule();
 
     SmallVector<std::pair<Operation *, transform::NamedSequenceOp>>
         targetStrategyPairs;
@@ -49,6 +53,13 @@ public:
 
       auto strategy = dyn_cast_or_null<transform::NamedSequenceOp>(
           SymbolTable::lookupSymbolIn(symbolTableOp, *maybeSymName));
+      if (!strategy) {
+        if (originalSpec) {
+          strategy = dyn_cast_or_null<transform::NamedSequenceOp>(
+              SymbolTable::lookupSymbolIn(originalSpec.value(), *maybeSymName));
+        }
+      }
+
       if (!strategy) {
         return;
       }

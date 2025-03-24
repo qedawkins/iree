@@ -93,6 +93,35 @@ def ImportSymbolOp : Op<Transform_Dialect, "util.import_symbol", [
   let hasVerifier = 1;
 }
 
+def GetSiblingSymbolOp : Op<Transform_Dialect, "util.get_sibling_symbol", [
+  FunctionalStyleTransformOpTrait,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+  DeclareOpInterfaceMethods<TransformOpInterface>,
+  ReportTrackingListenerFailuresOpTrait,
+]> {
+  let cppNamespace = "mlir::iree_compiler::IREE::Util::transform_dialect";
+
+  let description = [{
+    Returns a reference to the symbol with the specified name within the nearest
+    symbol table to this operation.
+
+    #### Return modes
+
+    This operation produces the `target_symbol` handle based on `symbol` and
+    the nearest symbol table. This operation emits a definite failure if the
+    symbol does not exist.
+  }];
+
+  let arguments = (ins SymbolRefAttr:$symbol);
+  let results = (outs
+    TransformHandleTypeInterface:$target_symbol
+  );
+
+  let assemblyFormat = [{
+    $symbol attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def CastAndCallOp : Op<Transform_Dialect, "util.cast_and_call", [
   DeclareOpInterfaceMethods<TransformOpInterface>,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
@@ -147,19 +176,21 @@ def CastAndCallOp : Op<Transform_Dialect, "util.cast_and_call", [
   let arguments = (ins
     TransformHandleTypeInterface:$insertion_point,
     UnitAttr:$insert_after,
+    UnitAttr:$inline_call,
     Optional<TransformValueHandleTypeInterface>:$inputs,
     Optional<TransformValueHandleTypeInterface>:$outputs,
     OptionalAttr<SymbolRefAttr>:$function_name,
     Optional<TransformHandleTypeInterface>:$function
   );
   let results = (outs
-    TransformHandleTypeInterface:$result
+    Variadic<TransformHandleTypeInterface>:$result
   );
   let regions = (region
     MaxSizedRegion<1>:$conversions
   );
 
   let assemblyFormat = [{
+    (`inline_call` $inline_call^)?
     ($function_name^)? ($function^)?
     ( `(` $inputs^ `)` )?
     ( `->` $outputs^ )?
@@ -168,6 +199,32 @@ def CastAndCallOp : Op<Transform_Dialect, "util.cast_and_call", [
   }];
 
   let hasVerifier = 1;
+}
+
+def InlineOp : Op<Transform_Dialect, "util.inline", [
+  DeclareOpInterfaceMethods<TransformOpInterface>,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+  ReportTrackingListenerFailuresOpTrait,
+]> {
+  let cppNamespace = "mlir::iree_compiler::IREE::Util::transform_dialect";
+
+  let summary = "Inlines a util.call op";
+  let description = [{
+    This transform takes a handle to a `util.call` op and inlines the function
+    call.
+
+    This transform will emit a definite failure if the input is not a
+    `util.call` op.
+  }];
+
+  let arguments = (ins
+    TransformHandleTypeInterface:$call
+  );
+  let results = (outs);
+
+  let assemblyFormat = [{
+    $call attr-dict `:` functional-type(operands, results)
+  }];
 }
 
 #endif // IREE_COMPILER_DIALECT_UTIL_TRANSFORMOPS_UTILTRANSFORM_OPS
