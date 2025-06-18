@@ -227,6 +227,23 @@ void setCompilationInfo(Operation *op,
 /// operation.
 void eraseCompilationInfo(Operation *op);
 
+//===----------------------------------------------------------------------===//
+// Helpers for getting/setting attributes related to ukernels.
+//===----------------------------------------------------------------------===//
+
+/// Walks up the IR for the nearest definition of `hal.executable.target`
+/// and returns the `iree_codegen.ukernel_provider` in the target configuration
+/// if present.
+IREE::Codegen::UKernelProviderInterface
+getUKernelLibraryFromTarget(DictionaryAttr dict);
+
+/// Returns the `iree_codegen.ukernel` on the operation.
+IREE::Codegen::UKernelDescriptorAttr getUKernelDescriptor(Operation *op);
+
+/// Sets the `iree_codegen.ukernel` on the operation.
+void setUKernelDescriptor(Operation *op,
+                          IREE::Codegen::UKernelDescriptorAttr descriptor);
+
 } // namespace mlir::iree_compiler
 
 #endif // IREE_COMPILER_CODEGEN_DIALECT_LOWERINGCONFIG_H_

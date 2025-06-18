@@ -466,4 +466,57 @@ def IREECodegen_RotateRowsAttr  :
   let genVerifyDecl = 1;
 }
 
+//===---------------------------------------------------------------------===//
+// iree_codegen.symbolic_ukernel_provider
+//===---------------------------------------------------------------------===//
+
+def IREECodegen_SymbolicUKernelProviderAttr  :
+    AttrDef<IREECodegen_Dialect, "SymbolicUKernelProvider", [
+    DeclareAttrInterfaceMethods<IREECodegen_UKernelProviderInterface, [
+        "getMLIRUKernel"
+      ]>
+    ]> {
+  let mnemonic = "symbolic_ukernel_provider";
+  let summary = [{
+    An attribute that provides ukernel implementations by looking up the
+    nearest symbol table from the annotation site.
+  }];
+  let parameters = (ins);
+  let assemblyFormat = [{}];
+}
+
+//===---------------------------------------------------------------------===//
+// iree_codegen.ukernel_descriptor
+//===---------------------------------------------------------------------===//
+
+def UKernelKind_Tensor : I64EnumAttrCase<"Tensor", 0, "tensor">;
+def UKernelKind_Memref : I64EnumAttrCase<"Memref", 1, "memref">;
+def UKernelKind_Bitcode : I64EnumAttrCase<"Bitcode", 2, "bitcode">;
+
+def UKernelArgumentKindEnum :
+    I64EnumAttr<"UKernelArgumentKind", "Attribute describing the ukernel integration point",
+    [
+      UKernelKind_Tensor,
+      UKernelKind_Memref,
+      UKernelKind_Bitcode
+    ]> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
+}
+
+def IREECodegen_UKernelDescriptorAttr  :
+    AttrDef<IREECodegen_Dialect, "UKernelDescriptor"> {
+  let mnemonic = "ukernel_descriptor";
+  let summary = [{
+    An attribute that provides ukernel implementations by looking up the
+    nearest symbol table from the annotation site.
+  }];
+  let parameters = (ins
+    StringRefParameter<>:$ukernel_name,
+    EnumParameter<UKernelArgumentKindEnum>:$kind
+  );
+  let assemblyFormat = [{
+    `<` $ukernel_name `,` $kind `>`
+  }];
+}
+
 #endif // IREE_COMPILER_CODEGEN_DIALECT_IREECODEGENATTRS
