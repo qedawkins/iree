@@ -57,6 +57,7 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
+#include "mlir/Transforms/Passes.h"
 
 namespace mlir::iree_compiler::IREE::HAL {
 
@@ -373,9 +374,12 @@ public:
         }
         options.targets.push_back(attr.getArch().str());
         OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
-        FunctionLikeNest(modulePassManager).addPass([&]() {
-          return ROCM::createApplyBuiltinPDLPatternsPass(options);
-        });
+        FunctionLikeNest(modulePassManager)
+            .addPass(createCSEPass)
+            .addPass(createCanonicalizerPass)
+            .addPass([&]() {
+              return ROCM::createApplyBuiltinPDLPatternsPass(options);
+            });
       }
     }
     buildLLVMGPUCodegenConfigurationPassPipeline(passManager);

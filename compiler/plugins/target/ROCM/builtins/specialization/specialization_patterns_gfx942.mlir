@@ -63,3 +63,39 @@ pdl.pattern @f8E4M3_pingpong : benefit(1) {
         : !pdl.operation, !pdl.attribute, !pdl.attribute)
   }
 }
+
+pdl.pattern @attention : benefit(1) {
+  %imaps = pdl.attribute = [
+    affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d0, d1, d2, d3, d5)>,
+    affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d0, d6, d1, d5)>,
+    affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d0, d6, d1, d4)>,
+    affine_map<(d0, d1, d2, d3, d4, d5, d6) -> ()>,
+    affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d3, d6)>,
+    affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d0, d1, d2, d3, d4)>
+  ]
+  %operands = pdl.operands
+  %types = pdl.types
+  %attention = pdl.operation "iree_linalg_ext.attention"
+    (%operands : !pdl.range<value>) {"indexing_maps" = %imaps} -> (%types : !pdl.range<type>)
+
+  // Skip if the operation already has ranges.
+  %attr_name = pdl.attribute = "iree_codegen.specialization_ranges"
+  pdl.apply_native_constraint "hasAttr"(
+        %attention, %attr_name
+        : !pdl.operation, !pdl.attribute) {isNegated = true}
+
+  pdl.rewrite %attention {
+    %ranges = pdl.attribute = #util<int.assumption.multi_array[
+        [<udiv = 1>,
+         <udiv = 1>,
+         <udiv = 1>,
+         <udiv = 64>,
+         <udiv = 1>,
+         <udiv = 1>,
+         <udiv = 64>]
+      ]>
+    pdl.apply_native_rewrite "annotateOperation"(
+        %attention, %attr_name, %ranges
+        : !pdl.operation, !pdl.attribute, !pdl.attribute)
+  }
+}
