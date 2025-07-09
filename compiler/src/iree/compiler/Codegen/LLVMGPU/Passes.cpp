@@ -1120,7 +1120,7 @@ addLowerAndOptimizeAddressComputationPasses(FunctionLikeNest &funcPassManager) {
       .addPass(memref::createFoldMemRefAliasOpsPass)
       // Propagate constants close to loads/stores to improve the ability for
       // swizzling to CSE.
-      .addPass(createPropagateConstantOffsetsPass)
+      // .addPass(createPropagateConstantOffsetsPass)
       // Propagating constants introduces CSE opportunities.
       .addPass(createCSEPass)
       // Resolve swizzling hints before lowering affine ops but after
