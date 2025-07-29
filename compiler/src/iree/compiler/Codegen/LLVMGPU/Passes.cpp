@@ -422,13 +422,15 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   tileAndDistributeToWorkgroup(funcPassManager, /*useForall=*/true,
                                /*convertToDpsOptions=*/std::nullopt);
 
-  // Step 0. Apply any user annotated lowering strategies. This runs first as
+  // Step 0. Apply any user annotated lowering strategies. This includes tensor
+  // based ukernels and custom transform dialect strategies. The passes in
   // steps 1 - 4 are essentially applying patterns based on the lowering config,
   // so a custom strategy runs first circumventing that.
   //
   // In the future there may be cases where we want the custom strategy run at
   // later points in the pipeline.
   funcPassManager.addPass(createLoweringConfigInterpreterPass());
+  funcPassManager.addPass(createLowerTensorUKernelsPass());
   funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
 

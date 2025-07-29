@@ -126,7 +126,8 @@ static LogicalResult convertToUKernelGeneric(RewriterBase &rewriter,
 /// operands/results and the function's arguments/return types.
 static LogicalResult castAndInline(RewriterBase &rewriter, Operation *op,
                                    FunctionOpInterface targetFunction) {
-  ValueRange inputs = op->getOperands();
+  // Vector for the inputs in case they need conversion.
+  SmallVector<Value> inputs = op->getOperands();
   ValueRange outputs = op->getResults();
 
   // Verify that the function argument and result lengths match the inputs and
@@ -141,6 +142,9 @@ static LogicalResult castAndInline(RewriterBase &rewriter, Operation *op,
                            << targetFunction->getNumResults()
                            << " and number of outputs " << outputs.size();
   }
+
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(op);
 
   // Gather tensor and memref type converters.
   // TODO: Add converters for other types as necessary, e.g. int/float.
@@ -161,7 +165,6 @@ static LogicalResult castAndInline(RewriterBase &rewriter, Operation *op,
     }
   }
 
-  SmallVector<Value> replacements;
   // TODO: Support inlining multi-block functions using `scf.execute_region`
   // (needed in case the callsite parent requires a single block region).
   if (!targetFunction.getFunctionBody().hasOneBlock()) {
@@ -180,7 +183,7 @@ static LogicalResult castAndInline(RewriterBase &rewriter, Operation *op,
 
   // Inlining the block removes it from the parent region.
   rewriter.inlineBlockBefore(body, op, inputs);
-  replacements = terminator->getOperands();
+  SmallVector<Value> replacements = terminator->getOperands();
   rewriter.eraseOp(terminator);
 
   // Cast the call results back to the expected types. If any conversions fail

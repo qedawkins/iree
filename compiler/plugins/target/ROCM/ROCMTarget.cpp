@@ -317,6 +317,11 @@ public:
         }
       }
 
+      if (target.getArch().str() == "gfx950") {
+        addConfig("iree_codegen.ukernel_provider",
+                  IREE::ROCM::BuiltinUKernelProviderAttr::get(context));
+      }
+
       if (maybeSpecName) {
         addConfig("iree_codegen.default_tuning_spec",
                   IREE::ROCM::BuiltinTuningModuleAttr::get(

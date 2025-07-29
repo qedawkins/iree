@@ -37,6 +37,7 @@ iree_cc_library(
     iree::compiler::Utils
     iree::compiler::plugins::target::ROCM::builtins::specialization::iree_specialization_patterns_amdgpu
     iree::compiler::plugins::target::ROCM::builtins::tuning::iree_default_tuning_specs_amdgpu
+    iree::compiler::plugins::target::ROCM::builtins::ukernel::mlir::iree_mlir_ukernels_amdgpu
   PUBLIC
 )
 

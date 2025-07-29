@@ -8,6 +8,7 @@
 #define IREE_PLUGINS_TARGET_ROCM_DIALECT_ROCMATTRS
 
 include "ROCMDialect.td"
+include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.td"
 include "iree/compiler/Dialect/Util/IR/UtilInterfaces.td"
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/BuiltinTypeInterfaces.td"
@@ -36,6 +37,20 @@ def ROCM_BuiltinTuningModuleAttr :
     StringRefParameter<>:$builtin_filename
   );
   let assemblyFormat = "`<` $builtin_filename `>`";
+}
+
+def ROCM_BuiltinUKernelProviderAttr  :
+    AttrDef<ROCM_Dialect, "BuiltinUKernelProvider", [
+    DeclareAttrInterfaceMethods<IREECodegen_UKernelProviderInterface, [
+        "getMLIRUKernel"
+      ]>
+    ]> {
+  let mnemonic = "builtin.ukernel_provider";
+  let summary = [{
+    An attribute that provides builtin ROCM ukernel implementations.
+  }];
+  let parameters = (ins);
+  let assemblyFormat = [{}];
 }
 
 #endif // IREE_PLUGINS_TARGET_ROCM_DIALECT_ROCMATTRS
