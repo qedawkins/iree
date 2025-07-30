@@ -261,7 +261,7 @@ util.func private @mmt_8x128_f4f4f32(
     %mfma_ids:4 = affine.delinearize_index %id into (1, 4, 4, 16) : index, index, index, index
     %m_id = arith.muli %mfma_ids#0, %c2 : index
     %n_id = arith.muli %mfma_ids#1, %c1 : index
-    %n_id_plus1 = arith.addi %n_id, %c1 : index
+    %n_id_plus4 = arith.addi %n_id, %c4 : index
     %inner_lane_offset = arith.muli %mfma_ids#3, %c1 : index
     %outer_lane_offset = arith.muli %mfma_ids#2, %c16 : index
 
@@ -298,11 +298,11 @@ util.func private @mmt_8x128_f4f4f32(
       // Wait till second half is available.
       rocdl.s.barrier
 
-      %rhs_byte_vec_1 = vector.transfer_read %rhs_shared_expand[%buffer_num, %n_id_plus1, %inner_lane_offset, %c0, %outer_lane_offset],
+      %rhs_byte_vec_1 = vector.transfer_read %rhs_shared_expand[%buffer_num, %n_id_plus4, %inner_lane_offset, %c0, %outer_lane_offset],
         %cst_rhs {in_bounds = [true, true, true, true]} : !rhs_shared_expand_ty, !rhs_byte_vec_ty
       %rhs_vec_1 = vector.bitcast %rhs_byte_vec_1 : !rhs_byte_vec_ty to !rhs_vec_ty
 
-      %rhs_scale_byte_vec_1 = vector.transfer_read %rhs_scale_shared_expand[%buffer_num, %n_id_plus1, %inner_lane_offset, %c0, %mfma_ids#2],
+      %rhs_scale_byte_vec_1 = vector.transfer_read %rhs_scale_shared_expand[%buffer_num, %n_id_plus4, %inner_lane_offset, %c0, %mfma_ids#2],
         %cst_scale {in_bounds = [true, true, true, true]} : !rhs_scale_shared_expand_ty, !rhs_scale_byte_vec_ty
       %rhs_scale_vec_1 = vector.bitcast %rhs_scale_byte_vec_1 : !rhs_scale_byte_vec_ty to !rhs_scale_vec_ty
 
@@ -331,18 +331,18 @@ util.func private @mmt_8x128_f4f4f32(
     %dpp3 = amdgpu.dpp %o3 %s3 row_shr ( 0x8 : i32 ) { bank_mask = 12 : i32 } : f32
 
     %final = arith.constant dense<0.0> : !acc_ty
-    %i0 = vector.insert %dpp0, %final[0, 0, 0, 1] : f32 into !acc_ty
+    %i0 = vector.insert %dpp0, %final[0, 0, 0, 0] : f32 into !acc_ty
     %i1 = vector.insert %dpp1, %i0[0, 0, 0, 1] : f32 into !acc_ty
-    %i2 = vector.insert %dpp2, %i1[0, 0, 0, 1] : f32 into !acc_ty
-    %i3 = vector.insert %dpp3, %i2[0, 0, 0, 1] : f32 into !acc_ty
+    %i2 = vector.insert %dpp2, %i1[0, 0, 0, 2] : f32 into !acc_ty
+    %i3 = vector.insert %dpp3, %i2[0, 0, 0, 3] : f32 into !acc_ty
 
     %empty = tensor.empty() : !tensor_store_ty
     %to_tensor = vector.transfer_write %i3, %empty[%c0, %c0, %c0, %c0]
       {in_bounds = [true, true, true, true]} : !acc_ty, !tensor_store_ty
 
     %store_mfma_ids:4 = affine.delinearize_index %id into (4, 4, 2, 8) : index, index, index, index
-    %store_sg_outer = arith.muli %store_mfma_ids#0, %c2 : index
-    %store_outer_n_offset = arith.addi %store_mfma_ids#2, %store_sg_outer : index
+    %store_lane_outer = arith.muli %store_mfma_ids#2, %c4 : index
+    %store_outer_n_offset = arith.addi %store_mfma_ids#0, %store_lane_outer : index
     %store_inner_n_offset = arith.muli %store_mfma_ids#1, %c4 : index
     scf.forall.in_parallel {
       tensor.parallel_insert_slice %to_tensor into
