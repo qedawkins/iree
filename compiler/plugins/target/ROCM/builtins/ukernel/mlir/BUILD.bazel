@@ -24,9 +24,9 @@ endif()
 )
 
 ukernel_mlir_files = [
-    "iree_mlir_ukernel_mmt_64x256_f4f4f32_gfx950.mlir"
+    "iree_mlir_ukernel_mmt_64x256_f4f4f32_gfx950.mlir",
+    "iree_mlir_ukernel_mmt_8x128_f4f4f32_gfx950.mlir",
 ]
-# "iree_mlir_ukernel_mmt_8x256_f4f4f32_gfx950.mlir"
 
 iree_c_embed_data(
     name = "iree_mlir_ukernels_amdgpu",

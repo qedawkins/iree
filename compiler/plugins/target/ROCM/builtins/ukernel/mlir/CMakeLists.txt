@@ -19,6 +19,7 @@ iree_c_embed_data(
     iree_mlir_ukernels_amdgpu
   SRCS
     "iree_mlir_ukernel_mmt_64x256_f4f4f32_gfx950.mlir"
+    "iree_mlir_ukernel_mmt_8x128_f4f4f32_gfx950.mlir"
   C_FILE_OUTPUT
     "iree_mlir_ukernels_amdgpu.c"
   H_FILE_OUTPUT
@@ -32,6 +33,7 @@ iree_lit_test_suite(
     verify_mlir_ukernels_amdgpu
   SRCS
     "iree_mlir_ukernel_mmt_64x256_f4f4f32_gfx950.mlir"
+    "iree_mlir_ukernel_mmt_8x128_f4f4f32_gfx950.mlir"
   TOOLS
     iree-opt
 )
