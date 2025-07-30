@@ -174,6 +174,17 @@ util.func private @mmt_8x128_f4f4f32(
   %rhs_scale = bufferization.to_buffer %rhs_scale_byte {read_only} : !rhs_scale_byte_ty to !rhs_scale_buffer_ty
 
   scf.forall (%base_id) in (512) {
+
+    // Zerofill lhs inputs and scales.
+    %zids:3 = affine.delinearize_index %base_id into (16, 8, 4) : index, index, index
+    %zinner = arith.muli %zids#2, %c16 : index
+    %v0_i8 = arith.constant dense<0> : vector<2x1x1x16xi8>
+    vector.transfer_write %v0_i8, %lhs_shared_base[%c0, %zids#0, %zids#1, %zinner] {in_bounds = [true, true, true, true]} : vector<2x1x1x16xi8>, !lhs_shared_ty
+    %v0_i8_scales = arith.constant dense<127> : vector<2x1x1x1x4xi8>
+    vector.transfer_write %v0_i8_scales, %lhs_scale_shared[%c0, %zids#0, %zids#1, %zids#2, %c0] {in_bounds = [true, true, true, true, true]} : vector<2x1x1x1x4xi8>, !lhs_scale_shared_ty
+    amdgpu.lds_barrier
+
+    // Make the upper 4 waves start copying data.
     %cmp = arith.cmpi sge, %base_id, %c256 : index
     scf.if %cmp {
       %id = arith.subi %base_id, %c256 : index
