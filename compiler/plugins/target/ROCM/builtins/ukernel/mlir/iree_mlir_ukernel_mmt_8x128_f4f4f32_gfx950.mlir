@@ -202,9 +202,6 @@ util.func private @mmt_8x128_f4f4f32(
         %buffer_num = arith.andi %shift, %c1 : index
         %loop_inner = arith.addi %inner, %i : index
 
-        rocdl.s.waitcnt 0
-        rocdl.s.barrier
-
         // Copy lhs.
         amdgpu.gather_to_lds %lhs[%outer_base, %loop_inner, %c0], %lhs_shared_base[%buffer_num, %shared_inner_base, %c0, %c0]
           : !lhs_copy_vec_ty, !lhs_buffer_ty, !lhs_shared_ty
@@ -262,6 +259,7 @@ util.func private @mmt_8x128_f4f4f32(
       %shift = arith.shrui %i, %c5 : index
       %buffer_num = arith.andi %shift, %c1 : index
 
+      // wait till first half is available.
       rocdl.s.barrier
 
       // Load inputs/scales from LDS.
@@ -286,6 +284,7 @@ util.func private @mmt_8x128_f4f4f32(
         kind = #mfma_type
       } : !lhs_vec_ty, !lhs_scale_vec_ty, !rhs_vec_ty, !rhs_scale_vec_ty into !acc_ty
 
+      // Wait till second half is available.
       rocdl.s.barrier
 
       %rhs_byte_vec_1 = vector.transfer_read %rhs_shared_expand[%buffer_num, %n_id_plus1, %inner_lane_offset, %c0, %outer_lane_offset],
@@ -301,8 +300,6 @@ util.func private @mmt_8x128_f4f4f32(
         iterator_types = #iterator_types,
         kind = #mfma_type
       } : !lhs_vec_ty, !lhs_scale_vec_ty, !rhs_vec_ty, !rhs_scale_vec_ty into !acc_ty
-
-      rocdl.s.barrier
 
       scf.yield %dot0, %dot1 : !acc_ty, !acc_ty
     }
