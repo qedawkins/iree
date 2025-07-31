@@ -302,6 +302,10 @@ util.func private @mmt_8x128_f4f4f32(
         %cst_scale {in_bounds = [true, true, true, true]} : !rhs_scale_shared_expand_ty, !rhs_scale_byte_vec_ty
       %rhs_scale_vec_0 = vector.bitcast %rhs_scale_byte_vec_0 : !rhs_scale_byte_vec_ty to !rhs_scale_vec_ty
 
+      %rhs_scale_byte_vec_1 = vector.transfer_read %rhs_scale_shared_expand[%buffer_num, %n_id_plus4, %inner_lane_offset, %c0, %mfma_ids#2],
+        %cst_scale {in_bounds = [true, true, true, true]} : !rhs_scale_shared_expand_ty, !rhs_scale_byte_vec_ty
+      %rhs_scale_vec_1 = vector.bitcast %rhs_scale_byte_vec_1 : !rhs_scale_byte_vec_ty to !rhs_scale_vec_ty
+
       %dot0 = iree_codegen.inner_tiled ins(%lhs_vec, %lhs_scale_vec, %rhs_vec_0, %rhs_scale_vec_0) outs(%iter0) {
         indexing_maps = #contraction_accesses,
         iterator_types = #iterator_types,
@@ -309,15 +313,11 @@ util.func private @mmt_8x128_f4f4f32(
       } : !lhs_vec_ty, !lhs_scale_vec_ty, !rhs_vec_ty, !rhs_scale_vec_ty into !acc_ty
 
       // Wait till second half is available.
-      rocdl.s.barrier
+      amdgpu.lds_barrier
 
       %rhs_byte_vec_1 = vector.transfer_read %rhs_shared_expand[%buffer_num, %n_id_plus4, %inner_lane_offset, %c0, %outer_lane_offset],
         %cst_rhs {in_bounds = [true, true, true, true]} : !rhs_shared_expand_ty, !rhs_byte_vec_ty
       %rhs_vec_1 = vector.bitcast %rhs_byte_vec_1 : !rhs_byte_vec_ty to !rhs_vec_ty
-
-      %rhs_scale_byte_vec_1 = vector.transfer_read %rhs_scale_shared_expand[%buffer_num, %n_id_plus4, %inner_lane_offset, %c0, %mfma_ids#2],
-        %cst_scale {in_bounds = [true, true, true, true]} : !rhs_scale_shared_expand_ty, !rhs_scale_byte_vec_ty
-      %rhs_scale_vec_1 = vector.bitcast %rhs_scale_byte_vec_1 : !rhs_scale_byte_vec_ty to !rhs_scale_vec_ty
 
       %dot1 = iree_codegen.inner_tiled ins(%lhs_vec, %lhs_scale_vec, %rhs_vec_1, %rhs_scale_vec_1) outs(%iter1) {
         indexing_maps = #contraction_accesses,
