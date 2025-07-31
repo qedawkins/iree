@@ -214,18 +214,22 @@ util.func private @mmt_8x128_f4f4f32(
         %loop_inner = arith.addi %inner, %i : index
 
         // Copy lhs.
+        // 1 x b128
         amdgpu.gather_to_lds %lhs[%outer_base, %loop_inner, %c0], %lhs_shared_base[%buffer_num, %shared_inner_base, %c0, %c0]
           : !lhs_copy_vec_ty, !lhs_buffer_ty, !lhs_shared_ty
 
         // Copy scales.
         %rhs_loop_scale_inner = arith.addi %rhs_scale_inner_base, %i : index
+        // 1 x b128
         amdgpu.gather_to_lds %rhs_scale[%rhs_scale_outer, %rhs_loop_scale_inner], %rhs_scale_shared[%buffer_num, %rhs_scale_shared_inner, %c0, %c0]
           : !rhs_scale_copy_vec_ty, !rhs_scale_buffer_ty, !rhs_scale_shared_ty
         %lhs_loop_scale_inner = arith.addi %lhs_scale_inner_base, %i : index
+        // 1 x b8
         amdgpu.gather_to_lds %lhs_scale[%lhs_scale_outer, %lhs_loop_scale_inner], %lhs_scale_shared[%buffer_num, %lhs_scale_shared_inner, %c0, %c0, %c0]
           : !lhs_scale_copy_vec_ty, !lhs_scale_buffer_ty, !lhs_scale_shared_ty
 
         // Copy half of rhs.
+        // 8 x b128
         scf.for %j = %c0 to %c64 step %c8 {
           %shared_inner = arith.addi %shared_inner_base, %j : index
           %outer = arith.addi %outer_base, %j : index
@@ -233,10 +237,12 @@ util.func private @mmt_8x128_f4f4f32(
             : !rhs_copy_vec_ty, !rhs_buffer_ty, !rhs_shared_ty
         }
 
-        rocdl.s.waitcnt 0
+        // Wait on previous iteration's group.
+        rocdl.s.waitcnt 11
         rocdl.s.barrier
 
         // Copy other half of rhs.
+        // 8 x b128
         scf.for %j = %c64 to %c128 step %c8 {
           %shared_inner = arith.addi %shared_inner_base, %j : index
           %outer = arith.addi %outer_base, %j : index
@@ -244,11 +250,15 @@ util.func private @mmt_8x128_f4f4f32(
             : !rhs_copy_vec_ty, !rhs_buffer_ty, !rhs_shared_ty
         }
 
-        rocdl.s.waitcnt 0
+        // Wait on previous group.
+        rocdl.s.waitcnt 8
         rocdl.s.barrier
 
         scf.yield
       }
+
+      // Realign subgroups.
+      rocdl.s.barrier
     }
 
   } {mapping = [#gpu.thread<linear_dim_0>]}
@@ -264,6 +274,9 @@ util.func private @mmt_8x128_f4f4f32(
     %n_id_plus4 = arith.addi %n_id, %c4 : index
     %inner_lane_offset = arith.muli %mfma_ids#3, %c1 : index
     %outer_lane_offset = arith.muli %mfma_ids#2, %c16 : index
+
+    // Misalign by one group.
+    rocdl.s.barrier
 
     %loop:2 = scf.for %i = %c0 to %k step %c32
       iter_args(%iter0 = %init0, %iter1 = %init1) -> (!acc_ty, !acc_ty) {
