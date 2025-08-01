@@ -105,6 +105,34 @@ transform.named_sequence
   transform.yield %matmul, %config, %ukernel : !transform.any_op, !transform.any_param, !transform.any_param
 }
 
+transform.named_sequence
+@match_smmt_8x64_f4f4f32(%matmul: !transform.any_op {transform.readonly})
+  -> (!transform.any_op, !transform.any_param, !transform.any_param) {
+  %mmt = transform.include @match_smmt_f4_f4_f32_impl failures(propagate) (%matmul)
+    : (!transform.any_op) -> !transform.any_op
+  %lhs = transform.get_operand %matmul[0] : (!transform.any_op) -> !transform.any_value
+  %rhs = transform.get_operand %matmul[1] : (!transform.any_op) -> !transform.any_value
+
+  // M % 256 == 0, K % 64 == 0, N % 256 == 0
+  transform.iree.match.dim_is_multiple_of  %lhs[0], 8 : !transform.any_value
+  transform.iree.match.dim_is_multiple_of  %lhs[1], 64 : !transform.any_value
+  transform.iree.match.dim_is_multiple_of  %rhs[0], 64 : !transform.any_value
+  transform.iree.match.dim_is_multiple_of  %rhs[1], 64 : !transform.any_value
+
+  %config = transform.param.constant #iree_codegen.compilation_info<
+    lowering_config = #iree_gpu.lowering_config<{workgroup = [8, 64, 0]}>,
+    translation_info = #iree_codegen.translation_info<pipeline = LLVMGPUTileAndFuse
+      workgroup_size = [512, 1, 1] subgroup_size = 64,
+      {gpu_pipeline_options =
+        #iree_gpu.pipeline_options<
+          prefetch_shared_memory = false,
+          no_reduce_shared_memory_bank_conflicts = true>,
+        llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
+  > -> !transform.any_param
+  %ukernel = transform.param.constant #iree_codegen.ukernel_descriptor<"mmt_8x64_f4f4f32", tensor> -> !transform.any_param
+  transform.yield %matmul, %config, %ukernel : !transform.any_op, !transform.any_param, !transform.any_param
+}
+
 /// Applies the op config for pingpong_large. This requires importing external
 /// symbols needed for the custom lowering (in this case inline + replace).
 transform.named_sequence @apply_ukernel_op_config(
@@ -124,6 +152,7 @@ transform.named_sequence
   attributes { iree_codegen.tuning_spec_entrypoint } {
   %res = transform.foreach_match in %variant_op
     // Match pingpong variants.
+    @match_smmt_8x64_f4f4f32 -> @apply_ukernel_op_config,
     @match_smmt_8x128_f4f4f32 -> @apply_ukernel_op_config,
     @match_smmt_64x256_f4f4f32 -> @apply_ukernel_op_config
     : (!transform.any_op) -> !transform.any_op
