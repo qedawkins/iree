@@ -134,7 +134,7 @@ util.func private @mmt_8x64_f4f4f32(
   %c1 = arith.constant 1 : index
   %c2 = arith.constant 2 : index
   %c4 = arith.constant 4 : index
-  %c5 = arith.constant 5 : index
+  %c6 = arith.constant 6 : index
   %c8 = arith.constant 8 : index
   %c16 = arith.constant 16 : index
   %c32 = arith.constant 32 : index
@@ -203,10 +203,10 @@ util.func private @mmt_8x64_f4f4f32(
       %lhs_scale_ids:2 = affine.delinearize_index %id into (4, 64) : index, index
       %lhs_scale_inner_base = arith.muli %lhs_scale_ids#1, %c1 : index
       %lhs_scale_outer = arith.muli %lhs_scale_ids#0, %c1 : index
-      %lhs_scale_shared_outer = arith.muli %sg, %c2 : index
+      %lhs_scale_shared_outer = arith.muli %sg, %c1 : index
 
       scf.for %i = %c0 to %k step %c64 {
-        %shift = arith.shrui %i, %c5 : index
+        %shift = arith.shrui %i, %c6 : index
         %buffer_num = arith.andi %shift, %c1 : index
         %loop_inner = arith.addi %inner, %i : index
 
@@ -215,7 +215,7 @@ util.func private @mmt_8x64_f4f4f32(
         scf.for %j = %c0 to %c8 step %c4 {
           %shared_inner = arith.addi %shared_inner_base, %j : index
           %outer = arith.addi %outer_base, %j : index
-          amdgpu.gather_to_lds %lhs[%outer, %loop_inner, %c0], %lhs_shared_base[%buffer_num, %shared_inner_base, %c0, %c0]
+          amdgpu.gather_to_lds %lhs[%outer, %loop_inner, %c0], %lhs_shared_base[%buffer_num, %shared_inner, %c0, %c0]
             : !lhs_copy_vec_ty, !lhs_buffer_ty, !lhs_shared_ty
         }
 
@@ -286,12 +286,14 @@ util.func private @mmt_8x64_f4f4f32(
     %inner_lane_offset = arith.muli %mfma_ids#4, %c1 : index
     %outer_lane_offset = arith.muli %mfma_ids#3, %c16 : index
 
-    %oob = arith.cmpi uge, %mfma_ids#0, %c8 : index
-    %keep = arith.constant dense<15> : !lhs_byte_vec_ty
+    %lhs_inner_lane_offset = arith.remui %inner_lane_offset, %c8 : index
+
+    %oob = arith.cmpi sge, %mfma_ids#4, %c8 : index
+    %keep = arith.constant dense<255> : !lhs_byte_vec_ty
     %discard = arith.constant dense<0> : !lhs_byte_vec_ty
     %mask = arith.select %oob, %discard, %keep : !lhs_byte_vec_ty
 
-    %scale_keep = arith.constant dense<15> : !lhs_scale_byte_vec_ty
+    %scale_keep = arith.constant dense<255> : !lhs_scale_byte_vec_ty
     %scale_discard = arith.constant dense<0> : !lhs_scale_byte_vec_ty
     %scale_mask = arith.select %oob, %scale_discard, %scale_keep : !lhs_scale_byte_vec_ty
 
@@ -300,18 +302,19 @@ util.func private @mmt_8x64_f4f4f32(
 
     %loop:2 = scf.for %i = %c0 to %k step %c64
       iter_args(%iter0 = %init0, %iter1 = %init1) -> (!acc_ty, !acc_ty) {
-      %shift = arith.shrui %i, %c5 : index
+      %shift = arith.shrui %i, %c6 : index
       %buffer_num = arith.andi %shift, %c1 : index
 
       // wait till first half is available.
       rocdl.s.barrier
 
       // Load inputs/scales from LDS.
-      %lhs_byte_vec = vector.transfer_read %lhs_shared_expand[%buffer_num, %m_id, %inner_lane_offset, %k_id, %outer_lane_offset],
+      %lhs_byte_vec = vector.transfer_read %lhs_shared_expand[%buffer_num, %m_id, %lhs_inner_lane_offset, %k_id, %outer_lane_offset],
         %cst_lhs {in_bounds = [true, true, true, true]} : !lhs_shared_expand_ty, !lhs_byte_vec_ty
       %lhs_mask_vec = arith.andi %lhs_byte_vec, %mask : !lhs_byte_vec_ty
       %lhs_vec = vector.bitcast %lhs_mask_vec : !lhs_byte_vec_ty to !lhs_vec_ty
-      %lhs_scale_byte_vec = vector.transfer_read %lhs_scale_shared_expand[%buffer_num, %m_id, %inner_lane_offset, %k_id, %mfma_ids#2, %c0],
+
+      %lhs_scale_byte_vec = vector.transfer_read %lhs_scale_shared_expand[%buffer_num, %m_id, %lhs_inner_lane_offset, %k_id, %mfma_ids#3, %c0],
         %cst_scale {in_bounds = [true, true, true, true, true]} : !lhs_scale_shared_expand_ty, !lhs_scale_byte_vec_ty
       %lhs_scale_mask_vec = arith.andi %lhs_scale_byte_vec, %scale_mask : !lhs_scale_byte_vec_ty
       %lhs_scale_vec = vector.bitcast %lhs_scale_mask_vec : !lhs_scale_byte_vec_ty to !lhs_scale_vec_ty
@@ -320,11 +323,11 @@ util.func private @mmt_8x64_f4f4f32(
         %cst_rhs {in_bounds = [true, true, true, true]} : !rhs_shared_expand_ty, !rhs_byte_vec_ty
       %rhs_vec_0 = vector.bitcast %rhs_byte_vec_0 : !rhs_byte_vec_ty to !rhs_vec_ty
 
-      %rhs_scale_byte_vec_0 = vector.transfer_read %rhs_scale_shared_expand[%buffer_num, %n_id, %inner_lane_offset, %k_id, %mfma_ids#2],
+      %rhs_scale_byte_vec_0 = vector.transfer_read %rhs_scale_shared_expand[%buffer_num, %n_id, %inner_lane_offset, %k_id, %mfma_ids#3],
         %cst_scale {in_bounds = [true, true, true, true]} : !rhs_scale_shared_expand_ty, !rhs_scale_byte_vec_ty
       %rhs_scale_vec_0 = vector.bitcast %rhs_scale_byte_vec_0 : !rhs_scale_byte_vec_ty to !rhs_scale_vec_ty
 
-      %rhs_scale_byte_vec_1 = vector.transfer_read %rhs_scale_shared_expand[%buffer_num, %n_id_plus2, %inner_lane_offset, %k_id, %mfma_ids#2],
+      %rhs_scale_byte_vec_1 = vector.transfer_read %rhs_scale_shared_expand[%buffer_num, %n_id_plus2, %inner_lane_offset, %k_id, %mfma_ids#3],
         %cst_scale {in_bounds = [true, true, true, true]} : !rhs_scale_shared_expand_ty, !rhs_scale_byte_vec_ty
       %rhs_scale_vec_1 = vector.bitcast %rhs_scale_byte_vec_1 : !rhs_scale_byte_vec_ty to !rhs_scale_vec_ty
 
