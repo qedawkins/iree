@@ -1919,7 +1919,7 @@ struct LowerGlobalLoadDMAPattern
     Type transferType = rewriter.getI32Type();
     rewriter.replaceOpWithNewOp<amdgpu::GatherToLDSOp>(
         dmaOp, dmaOp.getSource(), dmaOp.getSourceIndices(), dmaOp.getTarget(),
-        dmaOp.getTargetIndices(), transferType);
+        dmaOp.getTargetIndices(), transferType, IntegerAttr());
     return success();
   }
 };

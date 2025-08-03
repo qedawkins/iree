@@ -222,7 +222,7 @@ util.func private @mmt_8x64_f4f4f32(
         // Copy scales.
         %rhs_loop_scale_inner = arith.addi %rhs_scale_inner_base, %i : index
         // 1 x b128
-        amdgpu.gather_to_lds %rhs_scale[%rhs_scale_outer, %rhs_loop_scale_inner], %rhs_scale_shared[%buffer_num, %rhs_scale_shared_inner, %c0, %c0]
+        amdgpu.gather_to_lds %rhs_scale[%rhs_scale_outer, %rhs_loop_scale_inner], %rhs_scale_shared[%buffer_num, %rhs_scale_shared_inner, %c0, %c0] {aux = 3 : i32}
           : !rhs_scale_copy_vec_ty, !rhs_scale_buffer_ty, !rhs_scale_shared_ty
 
         %lhs_loop_scale_inner = arith.addi %lhs_scale_inner_base, %i : index
@@ -239,7 +239,7 @@ util.func private @mmt_8x64_f4f4f32(
         scf.for %j = %c0 to %c32 step %c4 {
           %shared_inner = arith.addi %shared_inner_base, %j : index
           %outer = arith.addi %outer_base, %j : index
-          amdgpu.gather_to_lds %rhs[%outer, %loop_inner, %c0], %rhs_shared_base[%buffer_num, %shared_inner, %c0, %c0]
+          amdgpu.gather_to_lds %rhs[%outer, %loop_inner, %c0], %rhs_shared_base[%buffer_num, %shared_inner, %c0, %c0] {aux = 3 : i32}
             : !rhs_copy_vec_ty, !rhs_buffer_ty, !rhs_shared_ty
         }
 
@@ -252,7 +252,7 @@ util.func private @mmt_8x64_f4f4f32(
         scf.for %j = %c32 to %c64 step %c4 {
           %shared_inner = arith.addi %shared_inner_base, %j : index
           %outer = arith.addi %outer_base, %j : index
-          amdgpu.gather_to_lds %rhs[%outer, %loop_inner, %c0], %rhs_shared_base[%buffer_num, %shared_inner, %c0, %c0]
+          amdgpu.gather_to_lds %rhs[%outer, %loop_inner, %c0], %rhs_shared_base[%buffer_num, %shared_inner, %c0, %c0] {aux = 3 : i32}
             : !rhs_copy_vec_ty, !rhs_buffer_ty, !rhs_shared_ty
         }
 
