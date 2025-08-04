@@ -59,7 +59,7 @@
 !lhs_scale_buffer_ty = memref<8x?xi8, strided<[?, 1], offset: ?>, #amdgpu.address_space<fat_raw_buffer>>
 !rhs_scale_buffer_ty = memref<64x?xi8, strided<[?, 1], offset: ?>, #amdgpu.address_space<fat_raw_buffer>>
 
-!lhs_scale_copy_vec_ty = vector<1xi8>
+!lhs_scale_copy_vec_ty = vector<2xi8>
 !rhs_scale_copy_vec_ty = vector<16xi8>
 
 // 2 = double buffer
@@ -68,11 +68,11 @@
 // 8 = outer k tile
 // 4 = inner k tile / k block
 //
-// lhs gets an extra factor of 4 because data is padded to dwords on load.
-!lhs_scale_shared_ty = memref<2x8x16x4x4xi8, #gpu.address_space<workgroup>>
+// lhs gets an extra factor of 2 because data is padded to dwords on load.
+!lhs_scale_shared_ty = memref<2x8x16x2x4xi8, #gpu.address_space<workgroup>>
 !rhs_scale_shared_ty = memref<2x64x16x4xi8, #gpu.address_space<workgroup>>
 
-!lhs_scale_shared_expand_ty = memref<2x1x8x16x4x4xi8, #gpu.address_space<workgroup>>
+!lhs_scale_shared_expand_ty = memref<2x1x8x16x2x4xi8, #gpu.address_space<workgroup>>
 !rhs_scale_shared_expand_ty = memref<2x4x16x16x4xi8, #gpu.address_space<workgroup>>
 
 !lhs_scale_byte_vec_ty = vector<1x1x8x1x1xi8>
@@ -161,7 +161,7 @@ util.func private @mmt_8x64_f4f4f32(
     output_shape [2, 4, 16, 16, 64] : !rhs_shared_ty into !rhs_shared_expand_ty
 
   %lhs_scale_shared_expand = memref.expand_shape %lhs_scale_shared [[0], [1, 2], [3], [4], [5]]
-    output_shape [2, 1, 8, 16, 4, 4] : !lhs_scale_shared_ty into !lhs_scale_shared_expand_ty
+    output_shape [2, 1, 8, 16, 2, 4] : !lhs_scale_shared_ty into !lhs_scale_shared_expand_ty
   %rhs_scale_shared_expand = memref.expand_shape %rhs_scale_shared [[0], [1, 2], [3], [4]]
     output_shape [2, 4, 16, 16, 4] : !rhs_scale_shared_ty into !rhs_scale_shared_expand_ty
 
@@ -200,10 +200,10 @@ util.func private @mmt_8x64_f4f4f32(
       %rhs_scale_outer = arith.muli %rhs_scale_ids#0, %c1 : index
       %rhs_scale_shared_inner = arith.muli %sg, %c16 : index
 
-      %lhs_scale_ids:2 = affine.delinearize_index %id into (4, 64) : index, index
-      %lhs_scale_inner_base = arith.muli %lhs_scale_ids#1, %c1 : index
+      %lhs_scale_ids:2 = affine.delinearize_index %id into (8, 32) : index, index
+      %lhs_scale_inner_base = arith.muli %lhs_scale_ids#1, %c2 : index
       %lhs_scale_outer = arith.muli %lhs_scale_ids#0, %c1 : index
-      %lhs_scale_shared_outer = arith.muli %sg, %c1 : index
+      %lhs_scale_shared_outer = arith.muli %sg, %c2 : index
 
       scf.for %i = %c0 to %k step %c64 {
         %shift = arith.shrui %i, %c6 : index
@@ -226,13 +226,11 @@ util.func private @mmt_8x64_f4f4f32(
           : !rhs_scale_copy_vec_ty, !rhs_scale_buffer_ty, !rhs_scale_shared_ty
 
         %lhs_loop_scale_inner = arith.addi %lhs_scale_inner_base, %i : index
-        // 2 x b8
-        scf.for %j = %c0 to %c8 step %c4 {
-          %global_outer = arith.addi %lhs_scale_outer, %j : index
-          %shared_outer = arith.addi %lhs_scale_shared_outer, %j : index
-          amdgpu.gather_to_lds %lhs_scale[%global_outer, %lhs_loop_scale_inner], %lhs_scale_shared[%buffer_num, %shared_outer, %c0, %c0, %c0]
-            : !lhs_scale_copy_vec_ty, !lhs_scale_buffer_ty, !lhs_scale_shared_ty
-        }
+        // 1 x b16
+        amdgpu.gather_to_lds
+          %lhs_scale[%lhs_scale_outer, %lhs_loop_scale_inner],
+          %lhs_scale_shared[%buffer_num, %lhs_scale_shared_outer, %c0, %c0, %c0]
+          : !lhs_scale_copy_vec_ty, !lhs_scale_buffer_ty, !lhs_scale_shared_ty
 
         // Copy half of rhs.
         // 8 x b128
@@ -314,7 +312,9 @@ util.func private @mmt_8x64_f4f4f32(
       %lhs_mask_vec = arith.andi %lhs_byte_vec, %mask : !lhs_byte_vec_ty
       %lhs_vec = vector.bitcast %lhs_mask_vec : !lhs_byte_vec_ty to !lhs_vec_ty
 
-      %lhs_scale_byte_vec = vector.transfer_read %lhs_scale_shared_expand[%buffer_num, %m_id, %lhs_inner_lane_offset, %k_id, %mfma_ids#3, %c0],
+      %lhs_scale_split:2 = affine.delinearize_index %mfma_ids#3 into (2, 2) : index, index
+      %lhs_scale_byte_vec = vector.transfer_read
+        %lhs_scale_shared_expand[%buffer_num, %m_id, %lhs_inner_lane_offset, %k_id, %lhs_scale_split#0, %lhs_scale_split#1],
         %cst_scale {in_bounds = [true, true, true, true, true]} : !lhs_scale_shared_expand_ty, !lhs_scale_byte_vec_ty
       %lhs_scale_mask_vec = arith.andi %lhs_scale_byte_vec, %scale_mask : !lhs_scale_byte_vec_ty
       %lhs_scale_vec = vector.bitcast %lhs_scale_mask_vec : !lhs_scale_byte_vec_ty to !lhs_scale_vec_ty
