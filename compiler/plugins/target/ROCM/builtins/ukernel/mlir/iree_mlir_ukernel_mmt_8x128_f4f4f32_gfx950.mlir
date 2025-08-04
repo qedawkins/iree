@@ -257,7 +257,8 @@ util.func private @mmt_8x128_f4f4f32(
         scf.yield
       }
 
-      // Realign subgroups.
+      // Realign subgroups and wait on the last group.
+      rocdl.s.waitcnt 0
       rocdl.s.barrier
     }
 

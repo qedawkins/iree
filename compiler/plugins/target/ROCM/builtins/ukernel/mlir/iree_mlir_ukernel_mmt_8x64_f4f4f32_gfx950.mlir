@@ -283,7 +283,8 @@ util.func private @mmt_8x64_f4f4f32(
         scf.yield
       }
 
-      // Realign subgroups.
+      // Realign subgroups and wait on the last iteration.
+      rocdl.s.waitcnt 0
       rocdl.s.barrier
 
       // One extra for the local reduce. Whether we can skip this barrier
@@ -412,11 +413,11 @@ util.func private @mmt_8x64_f4f4f32(
     amdgpu.lds_barrier
 
     %store_ids:2 = affine.delinearize_index %id into (8, 32) : index, index
-    %inner_id = arith.muli %store_ids#1, %c8 : index
+    %bc_inner_id = arith.muli %store_ids#1, %c8 : index
     %outer_id = arith.muli %store_ids#0, %c1 : index
-    %left_i8 = vector.transfer_read %subgroup_reduce[%c0, %outer_id, %inner_id],
+    %left_i8 = vector.transfer_read %subgroup_reduce[%c0, %outer_id, %bc_inner_id],
       %cst_acc {in_bounds = [true, true]} : !flat_sg_reduce_ty, !bc_reduce_ty
-    %right_i8 = vector.transfer_read %subgroup_reduce[%c1, %outer_id, %inner_id],
+    %right_i8 = vector.transfer_read %subgroup_reduce[%c1, %outer_id, %bc_inner_id],
       %cst_acc {in_bounds = [true, true]} : !flat_sg_reduce_ty, !bc_reduce_ty
     %left = vector.bitcast %left_i8 : !bc_reduce_ty to !reduce_ty
     %right = vector.bitcast %right_i8 : !bc_reduce_ty to !reduce_ty
@@ -426,6 +427,7 @@ util.func private @mmt_8x64_f4f4f32(
     %to_tensor = vector.transfer_write %reduce, %empty[%c0, %c0]
       {in_bounds = [true, true]} : !reduce_ty, !tensor_store_ty
 
+    %inner_id = arith.muli %store_ids#1, %c2 : index
     scf.forall.in_parallel {
       tensor.parallel_insert_slice %to_tensor into
         %out[%outer_id, %inner_id] [1, 2] [1, 1]
