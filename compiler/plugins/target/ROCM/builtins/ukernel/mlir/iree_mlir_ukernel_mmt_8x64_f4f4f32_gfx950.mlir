@@ -33,6 +33,9 @@
 !lhs_shared_ty = memref<2x8x16x64xi8, #gpu.address_space<workgroup>>
 !rhs_shared_ty = memref<2x64x16x64xi8, #gpu.address_space<workgroup>>
 
+!lhs_flat_shared_ty = memref<2x8x1024xi8, #gpu.address_space<workgroup>>
+!rhs_flat_shared_ty = memref<2x64x1024xi8, #gpu.address_space<workgroup>>
+
 !lhs_shared_expand_ty = memref<2x1x8x16x64xi8, #gpu.address_space<workgroup>>
 !rhs_shared_expand_ty = memref<2x4x16x16x64xi8, #gpu.address_space<workgroup>>
 
@@ -148,12 +151,17 @@ util.func private @mmt_8x64_f4f4f32(
   %cst_rhs = arith.constant 0 : i8
   %cst_scale = arith.constant 0 : i8
   %cst_acc = arith.constant 0.0 : f32
-  %lhs_shared_base = memref.alloc() : !lhs_shared_ty
-  %rhs_shared_base = memref.alloc() : !rhs_shared_ty
+  %lhs_shared_flat_base = memref.alloc() : !lhs_flat_shared_ty
+  %rhs_shared_flat_base = memref.alloc() : !rhs_flat_shared_ty
   %lhs_scale_shared = memref.alloc() : !lhs_scale_shared_ty
   %rhs_scale_shared = memref.alloc() : !rhs_scale_shared_ty
 
   %subgroup_reduce = memref.alloc() : !flat_sg_reduce_ty
+
+  %lhs_shared_base = memref.expand_shape %lhs_shared_flat_base [[0], [1], [2, 3]]
+    output_shape [2, 8, 16, 64] : !lhs_flat_shared_ty into !lhs_shared_ty
+  %rhs_shared_base = memref.expand_shape %rhs_shared_flat_base [[0], [1], [2, 3]]
+    output_shape [2, 64, 16, 64] : !rhs_flat_shared_ty into !rhs_shared_ty
 
   %lhs_shared_expand = memref.expand_shape %lhs_shared_base [[0], [1, 2], [3], [4]]
     output_shape [2, 1, 8, 16, 64] : !lhs_shared_ty into !lhs_shared_expand_ty
@@ -242,7 +250,7 @@ util.func private @mmt_8x64_f4f4f32(
         }
 
         // Wait on previous iteration's group.
-        rocdl.s.waitcnt 13
+        rocdl.s.waitcnt 12
         rocdl.s.barrier
 
         // Copy other half of rhs.
