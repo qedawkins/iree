@@ -30,14 +30,21 @@
 // 64 = n tile
 // 16 = outer k tile
 // 64 = 128 / 2 = inner k tile / 2
-!lhs_shared_ty = memref<2x8x16x64xi8, #gpu.address_space<workgroup>>
-!rhs_shared_ty = memref<2x64x16x64xi8, #gpu.address_space<workgroup>>
+!lhs_shared_ty = memref<2x8x16x64xi8, strided<[8320, 1040, 64, 1]>, #gpu.address_space<workgroup>>
+!rhs_shared_ty = memref<2x64x16x64xi8, strided<[66560, 1040, 64, 1]>, #gpu.address_space<workgroup>>
 
-!lhs_flat_shared_ty = memref<2x8x1024xi8, #gpu.address_space<workgroup>>
-!rhs_flat_shared_ty = memref<2x64x1024xi8, #gpu.address_space<workgroup>>
+// Padded by 4 dwords. Misaligns by 4 banks, but keep minimum alignment
+// needed for b128 loads.
+!lhs_padded_shared_ty = memref<2x8x1040xi8, #gpu.address_space<workgroup>>
+!rhs_padded_shared_ty = memref<2x64x1040xi8, #gpu.address_space<workgroup>>
 
-!lhs_shared_expand_ty = memref<2x1x8x16x64xi8, #gpu.address_space<workgroup>>
-!rhs_shared_expand_ty = memref<2x4x16x16x64xi8, #gpu.address_space<workgroup>>
+!lhs_flat_shared_ty = memref<2x8x1024xi8, strided<[8320, 1040, 1]>, #gpu.address_space<workgroup>>
+!rhs_flat_shared_ty = memref<2x64x1024xi8, strided<[66560, 1040, 1]>, #gpu.address_space<workgroup>>
+
+!lhs_shared_expand_ty = memref<2x1x8x16x64xi8, strided<[8320, 8320, 1040, 64, 1]>, #gpu.address_space<workgroup>>
+!rhs_shared_expand_ty = memref<2x4x16x16x64xi8, strided<[66560, 16640, 1040, 64, 1]>, #gpu.address_space<workgroup>>
+
+!flattened_lhs_shared_ty = memref<16640xi8, #gpu.address_space<workgroup>>
 
 !lhs_copy_vec_ty = vector<16xi8>
 !rhs_copy_vec_ty = vector<16xi8>
@@ -90,14 +97,18 @@
 // subgroup_m = 1 waves subgroup_n = 4 waves.
 // 8 total waves, half loading data half computing.
 !acc_ty = vector<1x1x1x4xf32>
+!bc_acc_ty = vector<1x1x1x16xi8>
 !reduce_ty = vector<1x2xf32>
+!bc_reduce_ty = vector<1x8xi8>
 
 // split factor = 2
 // inner m tile = 8
 // outer n tile = 2x2
 // inner n tile = 4x4
-!flat_sg_reduce_ty = memref<2x8x64xf32, #gpu.address_space<workgroup>>
-!sg_reduce_ty = memref<2x8x2x2x4x4xf32, #gpu.address_space<workgroup>>
+// 4xi8 -> 1xf32 for bitcasting
+!flattened_sg_reduce_ty = memref<4096xi8, #gpu.address_space<workgroup>>
+!flat_sg_reduce_ty = memref<2x8x256xi8, #gpu.address_space<workgroup>>
+!sg_reduce_ty = memref<2x8x2x2x4x16xi8, #gpu.address_space<workgroup>>
 
 // TODO: Swap to col major smfma to vectorize along N and allow use of DPP to
 // broadcast out padded stuff.
@@ -150,13 +161,16 @@ util.func private @mmt_8x64_f4f4f32(
   %cst_lhs = arith.constant 0 : i8
   %cst_rhs = arith.constant 0 : i8
   %cst_scale = arith.constant 0 : i8
-  %cst_acc = arith.constant 0.0 : f32
-  %lhs_shared_flat_base = memref.alloc() : !lhs_flat_shared_ty
-  %rhs_shared_flat_base = memref.alloc() : !rhs_flat_shared_ty
+  %cst_acc = arith.constant 0 : i8
+  %lhs_shared_padded_base = memref.alloc() : !lhs_padded_shared_ty
+  %rhs_shared_padded_base = memref.alloc() : !rhs_padded_shared_ty
   %lhs_scale_shared = memref.alloc() : !lhs_scale_shared_ty
   %rhs_scale_shared = memref.alloc() : !rhs_scale_shared_ty
 
-  %subgroup_reduce = memref.alloc() : !flat_sg_reduce_ty
+  %lhs_shared_flat_base = memref.subview %lhs_shared_padded_base [0, 0, 0] [2, 8, 1024] [1, 1, 1]
+    : !lhs_padded_shared_ty to !lhs_flat_shared_ty
+  %rhs_shared_flat_base = memref.subview %rhs_shared_padded_base [0, 0, 0] [2, 64, 1024] [1, 1, 1]
+    : !rhs_padded_shared_ty to !rhs_flat_shared_ty
 
   %lhs_shared_base = memref.expand_shape %lhs_shared_flat_base [[0], [1], [2, 3]]
     output_shape [2, 8, 16, 64] : !lhs_flat_shared_ty into !lhs_shared_ty
@@ -381,20 +395,31 @@ util.func private @mmt_8x64_f4f4f32(
     %i1 = vector.insert %dpp1, %i0[0, 0, 0, 1] : f32 into !acc_ty
     %i2 = vector.insert %dpp2, %i1[0, 0, 0, 2] : f32 into !acc_ty
     %i3 = vector.insert %dpp3, %i2[0, 0, 0, 3] : f32 into !acc_ty
+    %i3_bc = vector.bitcast %i3 : !acc_ty to !bc_acc_ty
 
+    // Reuse the lhs because we're done with it at this point.
+    %lhs_collapse_shape = memref.collapse_shape %lhs_shared_padded_base[[0, 1, 2]] : !lhs_padded_shared_ty into !flattened_lhs_shared_ty
+    %flat_subgroup_reduce = memref.subview %lhs_collapse_shape [0] [4096] [1]
+      : !flattened_lhs_shared_ty to !flattened_sg_reduce_ty
+
+    %subgroup_reduce = memref.expand_shape %flat_subgroup_reduce [[0, 1, 2]]
+    output_shape [2, 8, 256] : !flattened_sg_reduce_ty into !flat_sg_reduce_ty
     %subgroup_reduce_expand = memref.expand_shape %subgroup_reduce [[0], [1], [2, 3, 4, 5]]
-    output_shape [2, 8, 2, 2, 4, 4] : !flat_sg_reduce_ty into !sg_reduce_ty
+    output_shape [2, 8, 2, 2, 4, 16] : !flat_sg_reduce_ty into !sg_reduce_ty
     %reduce_ids:5 = affine.delinearize_index %id into (2, 2, 4, 2, 8) : index, index, index, index, index
-    vector.transfer_write %i3, %subgroup_reduce_expand[%reduce_ids#1, %reduce_ids#4, %reduce_ids#3, %reduce_ids#0, %reduce_ids#2, %c0] {in_bounds = [true, true, true, true]} : !acc_ty, !sg_reduce_ty
+    vector.transfer_write %i3_bc, %subgroup_reduce_expand[%reduce_ids#1, %reduce_ids#4, %reduce_ids#3, %reduce_ids#0, %reduce_ids#2, %c0]
+      {in_bounds = [true, true, true, true]} : !bc_acc_ty, !sg_reduce_ty
     amdgpu.lds_barrier
 
     %store_ids:2 = affine.delinearize_index %id into (8, 32) : index, index
-    %inner_id = arith.muli %store_ids#1, %c2 : index
+    %inner_id = arith.muli %store_ids#1, %c8 : index
     %outer_id = arith.muli %store_ids#0, %c1 : index
-    %left = vector.transfer_read %subgroup_reduce[%c0, %outer_id, %inner_id],
-      %cst_acc {in_bounds = [true, true]} : !flat_sg_reduce_ty, !reduce_ty
-    %right = vector.transfer_read %subgroup_reduce[%c1, %outer_id, %inner_id],
-      %cst_acc {in_bounds = [true, true]} : !flat_sg_reduce_ty, !reduce_ty
+    %left_i8 = vector.transfer_read %subgroup_reduce[%c0, %outer_id, %inner_id],
+      %cst_acc {in_bounds = [true, true]} : !flat_sg_reduce_ty, !bc_reduce_ty
+    %right_i8 = vector.transfer_read %subgroup_reduce[%c1, %outer_id, %inner_id],
+      %cst_acc {in_bounds = [true, true]} : !flat_sg_reduce_ty, !bc_reduce_ty
+    %left = vector.bitcast %left_i8 : !bc_reduce_ty to !reduce_ty
+    %right = vector.bitcast %right_i8 : !bc_reduce_ty to !reduce_ty
     %reduce = arith.addf %left, %right : !reduce_ty
 
     %empty = tensor.empty() : !tensor_store_ty
