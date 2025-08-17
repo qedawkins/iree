@@ -1675,4 +1675,33 @@ def Util_StoredModuleAttrInterface : AttrInterface<"StoredModuleAttrInterface"> 
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// IREE::Util::CostEstimate interface
+//===----------------------------------------------------------------------===//
+
+def Util_CostEstimateOp : OpInterface<"CostEstimateOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Util";
+
+  let description = [{
+    An operation that is able to provide an estimate of its execution cost
+    in terms of number of operations. For example, a loop-like op would require
+    its trip count times the number of ops within its body, counted
+    recursively.
+
+    TODO: In the future this interface may be modified to allow taking a target
+    description for device specific cost calculation (i.e. cycles instead of
+    ops).
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      [{Returns a value representing the estimated number of ops for this operation.}],
+      "OpFoldResult", "getEstimatedCost",
+      /*args=*/(ins
+        "OpBuilder&":$builder
+      )
+    >,
+  ];
+}
+
 #endif  // IREE_DIALECT_UTIL_IR_UTIL_INTERFACES

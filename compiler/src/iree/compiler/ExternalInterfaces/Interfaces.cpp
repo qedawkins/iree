@@ -11,6 +11,7 @@
 #include "iree/compiler/ExternalInterfaces/LinalgExtExternalModels.h"
 #include "iree/compiler/ExternalInterfaces/StreamExternalModels.h"
 #include "iree/compiler/ExternalInterfaces/TensorExtExternalModels.h"
+#include "iree/compiler/ExternalInterfaces/UtilCostExternalModels.h"
 #include "iree/compiler/ExternalInterfaces/UtilExternalModels.h"
 
 namespace mlir::iree_compiler {
@@ -21,6 +22,7 @@ void registerExternalInterfaces(DialectRegistry &registry) {
   registerLinalgExtExternalModels(registry);
   registerStreamExternalModels(registry);
   registerUtilExternalModels(registry);
+  registerUtilCostExternalModels(registry);
   registerEncodingExternalModels(registry);
 }
 
