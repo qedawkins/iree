@@ -7,7 +7,6 @@
 #include "iree/compiler/ExternalInterfaces/UtilCostExternalModels.h"
 
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtDialect.h"
-#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/Dialect/LinalgExt/Utils/Utils.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
@@ -16,48 +15,34 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Transforms/RegionUtils.h"
 
 namespace mlir::iree_compiler {
 
 namespace {
 
 //===----------------------------------------------------------------------===//
-// InferIntDivisibilityOpInterface
+// Helpers
 //===----------------------------------------------------------------------===//
 
-struct ArithDivUIInferIntDivisibilityOpInterface
-    : public IREE::Util::InferIntDivisibilityOpInterface::ExternalModel<
-          ArithDivUIInferIntDivisibilityOpInterface, arith::DivUIOp> {
-
-  void inferResultDivisibility(
-      Operation *op, ArrayRef<IREE::Util::IntegerDivisibility> argDivs,
-      IREE::Util::SetIntDivisibilityFn setResultDivs) const {
-    auto divOp = cast<arith::DivUIOp>(op);
-
-    APInt intVal;
-    if (!matchPattern(divOp.getRhs(), m_ConstantInt(&intVal))) {
-      return;
-    }
-
-    auto lhsDivisibility = getDivisibilityOfOperand(divOp.getLhs(), argDivs[0]);
-
-    uint64_t divUDiv = lhsDivisibility.udiv() / intVal.getZExtValue();
-    uint64_t divSDiv = lhsDivisibility.sdiv() / std::abs(intVal.getSExtValue());
-
-    setResultDivs(divOp, IREE::Util::ConstantIntDivisibility(divUDiv, divSDiv));
+static Value resolveAndHoist(RewriterBase &rewriter, Value v,
+                             Operation *parent) {
+  if (failed(moveValueDefinitions(rewriter, {v}, parent))) {
+    return Value();
   }
-};
+  return v;
+}
 
 //===----------------------------------------------------------------------===//
-// HoistableOpInterface
+// CostEstimateOpInterface
 //===----------------------------------------------------------------------===//
 
 template <typename OpTy, int64_t cost>
 struct StaticCostOpInterface
     : public IREE::Util::CostEstimateOpInterface::ExternalModel<
           StaticCostOpInterface<OpTy, cost>, OpTy> {
-  OpFoldResult getEstimatedCost(Operation *op, OpBuilder &builder) const {
-    return builder.getIndexAttr(cost);
+  OpFoldResult getEstimatedCost(Operation *op, RewriterBase &rewriter) const {
+    return rewriter.getIndexAttr(cost);
   }
 };
 
@@ -65,7 +50,7 @@ template <typename OpTy>
 struct LinalgCostOpInterface
     : public IREE::Util::CostEstimateOpInterface::ExternalModel<
           LinalgCostOpInterface<OpTy>, OpTy> {
-  Value getEstimatedCost(Operation *op, OpBuilder &builder) const {
+  OpFoldResult getEstimatedCost(Operation *op, RewriterBase &rewriter) const {
     auto linalgOp = cast<linalg::LinalgOp>(op);
 
     // Get the body to count the total cost of one iteration.
@@ -74,9 +59,9 @@ struct LinalgCostOpInterface
       return Value();
     }
 
-    OpBuilder::InsertionGuard g(builder);
+    OpBuilder::InsertionGuard g(rewriter);
 
-    OpFoldResult singleIterCost = builder.getIndexAttr(0);
+    OpFoldResult singleIterCost = rewriter.getIndexAttr(0);
     for (Operation &containedOp : body->getOperations()) {
       auto costEstimateOp =
           dyn_cast<IREE::Util::CostEstimateOpInterface>(&containedOp);
@@ -84,91 +69,49 @@ struct LinalgCostOpInterface
         return Value();
       }
 
-      builder.setInsertionPoint(&containedOp);
+      rewriter.setInsertionPoint(&containedOp);
+      OpFoldResult estimatedCost = costEstimateOp.getEstimatedCost();
+      if (auto v = dyn_cast<Value>(estimatedCost)) {
+        Value movedValue = resolveAndHoist(rewriter, v, op);
+        if (!movedValue) {
+          return Value();
+        }
+        estimatedCost = movedValue;
+      }
+
+      rewriter.setInsertionPoint(op);
+      singleIterCost = IREE::LinalgExt::addOfrs(rewriter, op->getLoc(),
+                                                singleIterCost, estimatedCost);
     }
+
+    rewriter.setInsertionPoint(op);
+    SmallVector<Range> iterationDomain =
+        cast<TilingInterface>(linalgOp).getIterationDomain(rewriter);
+    OpFoldResult numIters = rewriter.getIndexAttr(1);
+    for (Range range : iterationDomain) {
+      numIters = IREE::LinalgExt::mulOfrs(rewriter, op->getLoc(), numIters,
+                                          range.size);
+    }
+
+    return IREE::LinalgExt::mulOfrs(rewriter, op->getLoc(), singleIterCost,
+                                    numIters);
   }
-};
-
-// The default interface is always hoistable. This acts as an override
-// for other default hoistability checks as the interface is checked
-// first.
-template <typename OpTy>
-struct AlwaysHoistableOpInterface
-    : public IREE::Util::HoistableOpInterface::ExternalModel<
-          AlwaysHoistableOpInterface<OpTy>, OpTy> {};
-
-template <typename OpTy>
-struct HoistableLinalgOpInterface
-    : public IREE::Util::HoistableOpInterface::ExternalModel<
-          HoistableLinalgOpInterface<OpTy>, OpTy> {
-  bool isHoistableOp(Operation *) const { return true; }
-
-  // Determines if a linalg op is a hoistable leaf, based on heuristics.
-  bool isHoistableLeafOp(Operation *op) const {
-    // Don't hoist bit extend ops because fusing them with their
-    // consumers prevents materializing the high bit-width tensor and they
-    // preform very little real computation.
-    if (IREE::LinalgExt::isBitExtendOp(op)) {
-      return false;
-    }
-
-    // Hoist all non-generic linalg ops except for fill ops which should be
-    // fused with their consumers.
-    auto genericOp = llvm::dyn_cast<linalg::GenericOp>(op);
-    if (!genericOp) {
-      return !isa<linalg::FillOp>(op);
-    }
-
-    // Don't hoist ops with no tensor inputs. They are likely to be fill-like
-    // or sequences (from `linalg.index`) which can be fused with their
-    // consumers.
-    if (IREE::LinalgExt::hasOnlyScalarInputs(genericOp)) {
-      return false;
-    }
-
-    // Don't hoist broadcast-like ops because fusing them makes the new
-    // op cheaper.
-    if (linalg::isaBroadcastOpInterface(genericOp).has_value()) {
-      return false;
-    }
-
-    // Hoist all other ops.
-    return true;
-  }
-  bool isAtomicallyHoistableOp(Operation *) const { return true; }
-  bool isOperandHoistable(Operation *, OpOperand *) const { return true; }
 };
 
 /// Helper structures that iterates over all Op types in `OpTys` and registers
-/// the associated Hoistable___OpInterface.
-template <typename... Ops>
-struct UnhoistableOpInterfaceHelper {
+/// them with the given static cost.
+template <int64_t cost, typename... Ops>
+struct StaticCostOpInterfaceHelper {
   static void registerOpInterface(MLIRContext *context) {
-    (Ops::template attachInterface<UnhoistableOpInterface<Ops>>(*context), ...);
-  }
-};
-
-template <typename... Ops>
-struct HoistableNonLeafOpInterfaceHelper {
-  static void registerOpInterface(MLIRContext *context) {
-    (Ops::template attachInterface<HoistableNonLeafOpInterface<Ops>>(*context),
+    (Ops::template attachInterface<StaticCostOpInterface<Ops, cost>>(*context),
      ...);
   }
 };
 
 template <typename... Ops>
-struct AlwaysHoistableOpInterfaceHelper {
+struct LinalgCostOpInterfaceHelper {
   static void registerOpInterface(MLIRContext *context) {
-    (Ops::template attachInterface<AlwaysHoistableOpInterface<Ops>>(*context),
-     ...);
-  }
-};
-
-template <typename... Ops>
-struct HoistableLinalgOpInterfaceHelper {
-  static void registerOpInterface(MLIRContext *context) {
-    (Ops::template attachInterface<HoistableLinalgOpInterface<Ops>>(*context),
-     ...);
+    (Ops::template attachInterface<LinalgCostOpInterface<Ops>>(*context), ...);
   }
 };
 
@@ -182,41 +125,16 @@ void registerUtilExternalModels(DialectRegistry &registry) {
   registry.insert<tensor::TensorDialect>();
 
   registry.addExtension(
-      +[](MLIRContext *context, ml_program::MLProgramDialect *dialect) {
-        ml_program::GlobalOp::attachInterface<GlobalOpInterfaceExternalModel>(
-            *context);
-      });
-
-  registry.addExtension(+[](MLIRContext *context,
-                            arith::ArithDialect *dialect) {
-    GenericNumericCastExternalModel::add<
-        arith::BitcastOp, arith::ExtFOp, arith::ExtUIOp, arith::ExtSIOp,
-        arith::FPToSIOp, arith::FPToUIOp, arith::IndexCastOp, arith::TruncFOp,
-        arith::TruncIOp, arith::SIToFPOp, arith::UIToFPOp>(context);
-    arith::ConstantOp::attachInterface<
-        ArithConstantInferIntDivisibilityOpInterface>(*context);
-    arith::MulIOp::attachInterface<ArithMulIInferIntDivisibilityOpInterface>(
-        *context);
-    arith::DivUIOp::attachInterface<ArithDivUIInferIntDivisibilityOpInterface>(
-        *context);
-  });
-
-  registry.addExtension(
-      +[](MLIRContext *context, tensor::TensorDialect *dialect) {
-        tensor::InsertSliceOp::attachInterface<InsertSliceOpTiedOpInterface>(
-            *context);
-      });
-
-  registry.addExtension(
-      +[](MLIRContext *context, linalg::LinalgDialect *dialect) {
-        // Register all Linalg structured ops. `LinalgOp` is an interface and it
-        // is not possible to attach an external interface to an existing
-        // interface. Therefore, attach the `TiedOpInterface` to all ops
-        // one-by-one.
-        LinalgOpTiedOpInterfaceHelper<
-#define GET_OP_LIST
-#include "mlir/Dialect/Linalg/IR/LinalgStructuredOps.cpp.inc"
-            >::registerOpInterface(context);
+      +[](MLIRContext *context, arith::ArithDialect *dialect) {
+        // (inaccurately) mark all arith ops as cost 1.
+        StaticCostOpInterfaceHelper<
+            1, arith::BitcastOp, arith::ExtFOp, arith::ExtUIOp, arith::ExtSIOp,
+            arith::FPToSIOp, arith::FPToUIOp, arith::IndexCastOp,
+            arith::TruncFOp, arith::TruncIOp, arith::SIToFPOp, arith::UIToFPOp,
+            arith::MulIOp, arith::DivUIOp>::registerOpInterface(context);
+        // Bitcasts should be free.
+        StaticCostOpInterfaceHelper<0, arith::BitcastOp>::registerOpInterface(
+            context);
       });
 
   // Hoistable Op Interface registration.
@@ -224,46 +142,22 @@ void registerUtilExternalModels(DialectRegistry &registry) {
   // Register hoistable op interfaces for linalg ops.
   // We have a specific allow-list for Linalg ops because we want to consider
   // new additions carefully.
-  registry.addExtension(
-      +[](MLIRContext *context, linalg::LinalgDialect *dialect) {
-        // Structured op implementations and a handful of pure ops are included.
-        // Notably: IndexOp is not included because it establishes a hidden
-        // dependency to the iterator and is non-const.
+  registry.addExtension(+[](MLIRContext *context,
+                            linalg::LinalgDialect *dialect) {
+    // Structured op implementations and other auxiliary ops.
 
-        // Register all LinalgOps ops. `LinalgOp` is an interface and it is
-        // not possible to attach an external interface to an existing
-        // interface. Therefore, attach the `HoistableLinalgOpInterface` to all
-        // ops one-by-one.
-        HoistableLinalgOpInterfaceHelper<
+    // Register all LinalgOps ops. `LinalgOp` is an interface and it is
+    // not possible to attach an external interface to an existing
+    // interface. Therefore, attach the `LinalgCostOpInterface` to all
+    // ops one-by-one.
+    LinalgCostOpInterfaceHelper<
 #define GET_OP_LIST
 #include "mlir/Dialect/Linalg/IR/LinalgStructuredOps.cpp.inc"
-            >::registerOpInterface(context);
-        UnhoistableOpInterfaceHelper<
-#define GET_OP_LIST
-#include "mlir/Dialect/Linalg/IR/LinalgOps.cpp.inc"
-            >::registerOpInterface(context);
-
-        AlwaysHoistableOpInterfaceHelper<
-            linalg::PackOp, linalg::UnPackOp>::registerOpInterface(context);
-      });
-  // Register hoistable op interfaces for tensor ops.
-  registry.addExtension(
-      +[](MLIRContext *context, tensor::TensorDialect *dialect) {
-        // Never hoist empty and other pure metadata ops as a leaf. It's fine to
-        // hoist them as a part of a larger constant tree that does actual work.
-        HoistableNonLeafOpInterfaceHelper<
-            tensor::EmptyOp, tensor::ExpandShapeOp, tensor::CollapseShapeOp,
-            tensor::ExtractSliceOp>::registerOpInterface(context);
-        // Cases of trivial pack/unpack should be handled as canonicalizations
-        // before we get here, thus we're safe to always hoist.
-        AlwaysHoistableOpInterfaceHelper<tensor::PadOp>::registerOpInterface(
-            context);
-      });
-  registry.addExtension(
-      +[](MLIRContext *context, IREE::Util::UtilDialect *dialect) {
-        IREE::Util::AssumeIntOp::attachInterface<
-            UtilAssumeIntValueBoundsOpInterface>(*context);
-      });
+        >::registerOpInterface(context);
+    // Index ops are ostensibly fake, and yields are for control flow.
+    StaticCostOpInterfaceHelper<0, linalg::IndexOp,
+                                linalg::YieldOp>::registerOpInterface(context);
+  });
 }
 
 } // namespace mlir::iree_compiler

@@ -21,6 +21,7 @@ iree_compiler_cc_library(
         "LinalgExtExternalModels.cpp",
         "StreamExternalModels.cpp",
         "TensorExtExternalModels.cpp",
+        "UtilCostExternalModels.cpp",
         "UtilExternalModels.cpp",
     ],
     hdrs = [
@@ -30,6 +31,7 @@ iree_compiler_cc_library(
         "LinalgExtExternalModels.h",
         "StreamExternalModels.h",
         "TensorExtExternalModels.h",
+        "UtilCostExternalModels.h",
         "UtilExternalModels.h",
     ],
     deps = [

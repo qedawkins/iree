@@ -20,6 +20,7 @@ iree_cc_library(
     "LinalgExtExternalModels.h"
     "StreamExternalModels.h"
     "TensorExtExternalModels.h"
+    "UtilCostExternalModels.h"
     "UtilExternalModels.h"
   SRCS
     "EncodingExternalModels.cpp"
@@ -28,6 +29,7 @@ iree_cc_library(
     "LinalgExtExternalModels.cpp"
     "StreamExternalModels.cpp"
     "TensorExtExternalModels.cpp"
+    "UtilCostExternalModels.cpp"
     "UtilExternalModels.cpp"
   DEPS
     LLVMSupport

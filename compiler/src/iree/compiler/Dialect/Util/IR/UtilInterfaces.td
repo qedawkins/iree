@@ -1698,7 +1698,7 @@ def Util_CostEstimateOp : OpInterface<"CostEstimateOpInterface"> {
       [{Returns a value representing the estimated number of ops for this operation.}],
       "OpFoldResult", "getEstimatedCost",
       /*args=*/(ins
-        "OpBuilder&":$builder
+        "RewriterBase&":$rewriter
       )
     >,
   ];
