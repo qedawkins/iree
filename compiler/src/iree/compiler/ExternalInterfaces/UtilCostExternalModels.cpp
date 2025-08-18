@@ -117,7 +117,7 @@ struct LinalgCostOpInterfaceHelper {
 
 } // namespace
 
-void registerUtilExternalModels(DialectRegistry &registry) {
+void registerUtilCostExternalModels(DialectRegistry &registry) {
   // Must ensure that any dependent dialects are registered.
   registry.insert<arith::ArithDialect>();
   registry.insert<scf::SCFDialect>();
