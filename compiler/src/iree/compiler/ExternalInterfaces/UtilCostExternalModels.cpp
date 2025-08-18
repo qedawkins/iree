@@ -70,7 +70,7 @@ struct LinalgCostOpInterface
       }
 
       rewriter.setInsertionPoint(&containedOp);
-      OpFoldResult estimatedCost = costEstimateOp.getEstimatedCost();
+      OpFoldResult estimatedCost = costEstimateOp.getEstimatedCost(rewriter);
       if (auto v = dyn_cast<Value>(estimatedCost)) {
         Value movedValue = resolveAndHoist(rewriter, v, op);
         if (!movedValue) {
@@ -86,7 +86,7 @@ struct LinalgCostOpInterface
 
     rewriter.setInsertionPoint(op);
     SmallVector<Range> iterationDomain =
-        cast<TilingInterface>(linalgOp).getIterationDomain(rewriter);
+        cast<TilingInterface>(op).getIterationDomain(rewriter);
     OpFoldResult numIters = rewriter.getIndexAttr(1);
     for (Range range : iterationDomain) {
       numIters = IREE::LinalgExt::mulOfrs(rewriter, op->getLoc(), numIters,
