@@ -44,6 +44,7 @@ def PCF_ScopeAttr : AttrInterface<"ScopeAttr"> {
       /*methodName=*/"getWorkerIDs",
       /*args=*/(ins
         "OpBuilder&":$builder,
+        "Location":$loc,
         "ArrayRef<OpFoldResult>":$basis)
     >,
     InterfaceMethod<

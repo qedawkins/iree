@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
 
 #define GET_ATTRDEF_CLASSES
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.cpp.inc" // IWYU pragma: keep

@@ -8,6 +8,9 @@
 #define IREE_COMPILER_CODEGEN_DIALECT_PCF_IR_PCFATTRS_H_
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFDialect.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
+#include "llvm/ADT/TypeSwitch.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Attributes.h"
 
 #define GET_ATTRDEF_CLASSES

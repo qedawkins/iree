@@ -144,6 +144,32 @@ def PCF_ShapedRef : TypeDef<PCF_Dialect, "ShapedRef", [
 }
 
 //===----------------------------------------------------------------------===//
+// Base pcf attributes
+//===----------------------------------------------------------------------===//
+
+def PCF_SequentialAttr :
+    AttrDef<PCF_Dialect, "Sequential", [
+      DeclareAttrInterfaceMethods<PCF_ScopeAttr>
+    ]> {
+  let mnemonic = "sequential";
+  let summary = [{Attribute representing sequential execution}];
+  let description = [{
+    Scope that reuses the current process as the sole executor of a parallel
+    region.
+  }];
+  let parameters = (ins);
+  let assemblyFormat = [{}];
+
+  let extraClassDeclaration = [{
+    SmallVector<Value> getWorkerIDs(OpBuilder& builder, Location loc, ArrayRef<OpFoldResult> basis) {
+      Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+      SmallVector<Value> ids(basis.size(), zero);
+      return ids;
+    }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // Misc aliases
 //===----------------------------------------------------------------------===//
 
