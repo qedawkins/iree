@@ -175,6 +175,8 @@ def PCF_SequentialAttr :
 
 def PCF_AnyToken: AnyTypeOf<[PCF_Token]>;
 def PCF_AnyRef: AnyTypeOf<[PCF_ShapedRef, AnyMemRef]>;
+def PCF_AnyShapedRef: AnyTypeOf<[PCF_ShapedRef]>;
 def PCF_AnyTensorOrMemRef: AnyTypeOf<[AnyRankedTensor, AnyMemRef]>;
+def PCF_AnyTensorVectorOrMemRef: AnyTypeOf<[AnyRankedTensor, AnyVectorOfAnyRank, AnyMemRef]>;
 
 #endif  // IREE_CODEGEN_DIALECT_PCF_DIALECT

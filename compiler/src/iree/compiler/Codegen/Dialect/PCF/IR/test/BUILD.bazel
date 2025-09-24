@@ -17,6 +17,7 @@ iree_lit_test_suite(
     srcs = enforce_glob(
         [
             "parallel_ops.mlir",
+            "write_ops.mlir",
         ],
         include = ["*.mlir"],
     ),

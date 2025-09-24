@@ -15,6 +15,7 @@ iree_lit_test_suite(
     lit
   SRCS
     "parallel_ops.mlir"
+    "write_ops.mlir"
   TOOLS
     FileCheck
     iree-opt

@@ -5,9 +5,16 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
+#include "mlir/Dialect/Utils/IndexingUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/TypeUtilities.h"
 
 namespace mlir::iree_compiler::IREE::PCF {
+
+//===----------------------------------------------------------------------===//
+// StructuralOps
+//===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
 // GenericOp
@@ -262,6 +269,54 @@ void GenericOp::getSuccessorRegions(RegionBranchPoint point,
 
   // Otherwise, the region branches back to the parent operation.
   regions.push_back(RegionSuccessor(getResults()));
+}
+
+//===----------------------------------------------------------------------===//
+// WriteOps
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// ParallelInsertSliceOp
+//===----------------------------------------------------------------------===//
+
+// Build a WriteSliceOp with mixed static and dynamic entries.
+void WriteSliceOp::build(OpBuilder &b, OperationState &result, Value source,
+                         Value dest, ArrayRef<OpFoldResult> offsets,
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<OpFoldResult> strides,
+                         ArrayRef<NamedAttribute> attrs) {
+  SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
+  SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
+  dispatchIndexOpFoldResults(offsets, dynamicOffsets, staticOffsets);
+  dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+  dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides);
+  result.addAttributes(attrs);
+  build(b, result, {}, source, dest, dynamicOffsets, dynamicSizes,
+        dynamicStrides, b.getDenseI64ArrayAttr(staticOffsets),
+        b.getDenseI64ArrayAttr(staticSizes),
+        b.getDenseI64ArrayAttr(staticStrides));
+}
+
+/// Build an WriteSliceOp with mixed static and dynamic entries
+/// packed into a Range vector.
+void WriteSliceOp::build(OpBuilder &b, OperationState &result, Value source,
+                         Value dest, ArrayRef<Range> ranges,
+                         ArrayRef<NamedAttribute> attrs) {
+  auto [offsets, sizes, strides] = getOffsetsSizesAndStrides(ranges);
+  build(b, result, source, dest, offsets, sizes, strides, attrs);
+}
+
+// Build a WriteSliceOp with dynamic entries.
+void WriteSliceOp::build(OpBuilder &b, OperationState &result, Value source,
+                         Value dest, ValueRange offsets, ValueRange sizes,
+                         ValueRange strides, ArrayRef<NamedAttribute> attrs) {
+  SmallVector<OpFoldResult> offsetValues = llvm::to_vector<4>(
+      llvm::map_range(offsets, [](Value v) -> OpFoldResult { return v; }));
+  SmallVector<OpFoldResult> sizeValues = llvm::to_vector<4>(
+      llvm::map_range(sizes, [](Value v) -> OpFoldResult { return v; }));
+  SmallVector<OpFoldResult> strideValues = llvm::to_vector<4>(
+      llvm::map_range(strides, [](Value v) -> OpFoldResult { return v; }));
+  build(b, result, source, dest, offsetValues, sizeValues, strideValues);
 }
 
 //===----------------------------------------------------------------------===//

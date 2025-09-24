@@ -43,6 +43,7 @@ iree_cc_library(
     MLIRSideEffectInterfaces
     MLIRSupport
     MLIRTransformUtils
+    MLIRViewLikeInterface
   PUBLIC
 )
 

@@ -15,6 +15,7 @@ include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/ViewLikeInterface.td"
 
 //===----------------------------------------------------------------------===//
 // Alloc
@@ -135,6 +136,90 @@ def OpGroupWriteOps : OpDocGroup {
 }
 
 let opDocGroup = OpGroupWriteOps in {
+
+//===----------------------------------------------------------------------===//
+// ParallelInsertSliceOp
+//===----------------------------------------------------------------------===//
+
+def PCF_WriteSliceOp : PCF_Op<"write_slice", [
+       AttrSizedOperandSegments,
+       OffsetSizeAndStrideOpInterface,
+       AllRanksMatch<["source", "dest"]>,
+       AllElementTypesMatch<["source", "dest"]>,
+  ]> {
+  let summary = [{
+    Submit a write of a tensor, vector, or memref to a slice of a `pcf.shaped_ref`.
+  }];
+  let description = [{
+    The `pcf.write_slice` operation supports the following arguments:
+
+    * source: the shaped value that is written.
+    * dest: the shaped_ref into which the source is written.
+    * offsets: shaped-rank number of offsets into the `dest` into which
+               the slice is inserted.
+    * sizes: shaped-rank number of sizes which specify the sizes of the source
+             tensor type.
+    * strides: shaped-rank number of strides that specify subsampling in each
+               dimension.
+  }];
+
+  let arguments = (ins
+    PCF_AnyTensorVectorOrMemRef:$source,
+    PCF_AnyShapedRef:$dest,
+    Variadic<Index>:$offsets,
+    Variadic<Index>:$sizes,
+    Variadic<Index>:$strides,
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides
+  );
+  let assemblyFormat = [{
+    $source `into` $dest ``
+    custom<DynamicIndexList>($offsets, $static_offsets)
+    custom<DynamicIndexList>($sizes, $static_sizes)
+    custom<DynamicIndexList>($strides, $static_strides)
+    attr-dict `:` type($source) `into` type($dest)
+  }];
+
+  let extraClassDeclaration = [{
+    ShapedType getSourceType() {
+      return ::llvm::cast<ShapedType>(getSource().getType());
+    }
+
+    PCF::ShapedRefType getDestType() {
+      return ::llvm::cast<PCF::ShapedRefType>(getDest().getType());
+    }
+
+    /// Return the expected rank of each of the `static_offsets`, `static_sizes`
+    /// and `static_strides` attributes.
+    std::array<unsigned, 3> getArrayAttrMaxRanks() {
+      unsigned rank = getDestType().getRank();
+      return {rank, rank, rank};
+    }
+
+    /// Return the number of leading operands before `offsets`, `sizes` and
+    /// `strides` operands.
+    static unsigned getOffsetSizeAndStrideStartOperandIndex() { return 2; }
+  }];
+
+  let builders = [
+    // Build a WriteSliceOp with mixed static and dynamic entries.
+    OpBuilder<(ins "Value":$source, "Value":$dest,
+      "ArrayRef<OpFoldResult>":$offsets, "ArrayRef<OpFoldResult>":$sizes,
+      "ArrayRef<OpFoldResult>":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+    // Build a WriteSliceOp with mixed static and dynamic entries
+    // packed into a Range vector.
+    OpBuilder<(ins "Value":$source, "Value":$dest,
+      "ArrayRef<Range>":$ranges,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+    // Build a WriteSliceOp with dynamic entries.
+    OpBuilder<(ins "Value":$source, "Value":$dest,
+      "ValueRange":$offsets, "ValueRange":$sizes, "ValueRange":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>
+  ];
+}
+
 } // OpGroupWriteOps
 
 //===----------------------------------------------------------------------===//
