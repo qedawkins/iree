@@ -147,6 +147,27 @@ def PCF_ShapedRef : TypeDef<PCF_Dialect, "ShapedRef", [
 // Base pcf attributes
 //===----------------------------------------------------------------------===//
 
+def PCF_DummyScopeAttr :
+    AttrDef<PCF_Dialect, "DummyScope", [
+      DeclareAttrInterfaceMethods<PCF_ScopeAttr>
+    ]> {
+  let mnemonic = "dummy_scope";
+  let summary = [{Dummy scope attribute used for testing }];
+  let description = [{
+    Scope that fails on all interface uses to use in testing where the scope
+    is not relevant.
+  }];
+  let parameters = (ins);
+  let assemblyFormat = [{}];
+
+  let extraClassDeclaration = [{
+    SmallVector<Value> getWorkerIDs(OpBuilder&, Location, ArrayRef<OpFoldResult>) {
+      assert(false && "how did you get here?");
+      return {};
+    }
+  }];
+}
+
 def PCF_SequentialAttr :
     AttrDef<PCF_Dialect, "Sequential", [
       DeclareAttrInterfaceMethods<PCF_ScopeAttr>

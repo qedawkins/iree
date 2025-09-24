@@ -14,6 +14,7 @@ iree_lit_test_suite(
   NAME
     lit
   SRCS
+    "invalid.mlir"
     "parallel_ops.mlir"
     "write_ops.mlir"
   TOOLS

@@ -121,6 +121,26 @@ def GenericOp : PCF_Op<"generic", [
       // tokens where each result has a single associated ref.
       return getRegion().getArguments().drop_front(1 + getNumResults());
     }
+
+    SmallVector<int64_t> getTiedResults() {
+      SmallVector<int64_t> tiedResults;
+      for (auto [i, isTied] : llvm::enumerate(getIsTied())) {
+        if (isTied) {
+          tiedResults.push_back(i);
+        }
+      }
+      return tiedResults;
+    }
+
+    SmallVector<int64_t> getRegionRefBlockArgIndicesWithToken() {
+      SmallVector<int64_t> tokenIndices;
+      for (auto [i, hasToken] : llvm::enumerate(getHasToken())) {
+        if (hasToken) {
+          tokenIndices.push_back(i);
+        }
+      }
+      return tokenIndices;
+    }
   }];
 }
 

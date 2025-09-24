@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
+#include <numeric>
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/OpImplementation.h"
@@ -257,7 +259,97 @@ void GenericOp::getAsmBlockArgumentNames(Region &region,
   }
 }
 
-LogicalResult GenericOp::verify() { return success(); }
+LogicalResult verifyParallelBodyArgs() { return success(); }
+
+LogicalResult GenericOp::verify() {
+  // Verify tied/token array lengths.
+  ArrayRef<bool> isTied = getIsTied();
+  ArrayRef<bool> hasToken = getHasToken();
+  int64_t numResults = getNumResults();
+  if (isTied.size() != numResults) {
+    return emitOpError(
+               "`is_tied` mask length expected to match number of results ")
+           << numResults;
+  }
+
+  int64_t numInits =
+      std::accumulate(getIsTied().begin(), getIsTied().end(), (int64_t)(0));
+  if (getInits().size() != numInits) {
+    return emitOpError("number of inits ")
+           << getInits().size()
+           << " does not match the number of results marked as tied "
+           << numInits;
+  }
+
+  if (hasToken.size() != numResults) {
+    return emitOpError(
+               "`has_token` mask length expected to match number of results ")
+           << numResults;
+  }
+
+  int64_t numTokens =
+      std::accumulate(getHasToken().begin(), getHasToken().end(), (int64_t)(0));
+
+  if (getRegion().getArguments().size() != numResults + 1 + numTokens) {
+    return emitOpError("expected region to have |numResults| + 1 + |numTokens| "
+                       "total arguments");
+  }
+
+  if (!getNumThreadsArg().getType().isIndex()) {
+    return emitOpError(
+        "expected index type for first (thread count) region argument");
+  }
+
+  PCF::ScopeAttr scope = getScope();
+  int64_t currIsTiedIndex = 0;
+  int64_t currResultIndex = 0;
+  for (auto [resultType, refArg, isTied] :
+       llvm::zip_equal(getResultTypes(), getRegionRefArgs(), getIsTied())) {
+    auto srefType = dyn_cast<PCF::ShapedRefType>(refArg.getType());
+    if (!srefType || srefType.getScope() != scope) {
+      return emitOpError("expected region ref argument to be of type !pcf.sref "
+                         "with scope ")
+             << scope;
+    }
+
+    // Traits guarantee this cast to be valid.
+    auto shapedResultType = cast<ShapedType>(resultType);
+    if (shapedResultType.getShape() != srefType.getShape()) {
+      return emitOpError("region arg at index ")
+             << currResultIndex << " with type " << srefType
+             << " shape mismatch with tied result of type " << resultType;
+    }
+
+    if (shapedResultType.getElementType() != srefType.getElementType()) {
+      return emitOpError("region arg at index ")
+             << currResultIndex << " element type mismatch of "
+             << srefType.getElementType() << " vs "
+             << shapedResultType.getElementType();
+    }
+
+    if (isTied) {
+      Value init = getInits()[currIsTiedIndex];
+      if (init.getType() != resultType) {
+        return emitOpError("tied init at index ")
+               << currIsTiedIndex << " does not match the type " << resultType
+               << " at result index " << currResultIndex;
+      }
+      ++currIsTiedIndex;
+    }
+    ++currResultIndex;
+  }
+
+  // Verify token types and scopes.
+  for (auto tokenArg : getRegionTokenArgs()) {
+    auto tokenType = dyn_cast<PCF::TokenType>(tokenArg.getType());
+    if (!tokenType || tokenType.getScope() != scope) {
+      return emitOpError("expected region token argument to be of type "
+                         "!pcf.token with scope ")
+             << scope;
+    }
+  }
+  return success();
+}
 
 void GenericOp::getSuccessorRegions(RegionBranchPoint point,
                                     SmallVectorImpl<RegionSuccessor> &regions) {
