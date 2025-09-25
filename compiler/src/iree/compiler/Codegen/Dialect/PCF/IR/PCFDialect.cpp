@@ -8,6 +8,7 @@
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "llvm/Support/SourceMgr.h"
+#include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
@@ -50,6 +51,10 @@ PCFDialect::PCFDialect(MLIRContext *context)
   registerOperations();
 
   addInterfaces<PCFInlinerInterface>();
+
+  declarePromisedInterface<bufferization::BufferizableOpInterface, GenericOp>();
+  // declarePromisedInterface<bufferization::BufferizableOpInterface,
+  // WriteSliceOp>();
 }
 
 } // namespace mlir::iree_compiler::IREE::PCF

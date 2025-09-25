@@ -7,6 +7,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include <numeric>
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
+#include "llvm/ADT/SmallVectorExtras.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/OpImplementation.h"
@@ -349,6 +350,79 @@ LogicalResult GenericOp::verify() {
     }
   }
   return success();
+}
+
+void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
+                      ScopeAttr scope, std::optional<Value> tripcount,
+                      ArrayRef<Value> inits, bool addTokens) {
+  SmallVector<bool> hasToken(inits.size(), addTokens);
+  SmallVector<bool> isTied(inits.size(), true);
+  SmallVector<Type> resultTypes =
+      llvm::map_to_vector(inits, [](Value v) -> Type { return v.getType(); });
+  GenericOp::build(b, result, resultTypes, scope, tripcount, inits,
+                   ArrayRef<Value>{}, isTied, hasToken);
+}
+
+void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
+                      TypeRange resultTypes, ScopeAttr scope,
+                      std::optional<Value> tripcount,
+                      ArrayRef<Value> dynamicSizes, bool addTokens) {
+  SmallVector<bool> hasToken(resultTypes.size(), addTokens);
+  SmallVector<bool> isTied(resultTypes.size(), false);
+  GenericOp::build(b, result, resultTypes, scope, tripcount, ArrayRef<Value>{},
+                   dynamicSizes, isTied, hasToken);
+}
+
+void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
+                      TypeRange resultTypes, ScopeAttr scope,
+                      std::optional<Value> tripcount, ArrayRef<Value> inits,
+                      ArrayRef<Value> dynamicSizes, ArrayRef<bool> isTied,
+                      ArrayRef<bool> hasToken) {
+
+  result.addAttribute(GenericOp::getScopeAttrName(result.name), scope);
+  if (tripcount) {
+    result.addOperands(*tripcount);
+  }
+  result.addOperands(inits);
+  result.addOperands(dynamicSizes);
+  result.addTypes(resultTypes);
+
+  result.addAttribute(
+      "operandSegmentSizes",
+      b.getDenseI32ArrayAttr({tripcount ? 1 : 0,
+                              static_cast<int32_t>(inits.size()),
+                              static_cast<int32_t>(dynamicSizes.size())}));
+
+  Properties &inherentAttrs = result.getOrAddProperties<Properties>();
+  inherentAttrs.setIsTied(isTied);
+  inherentAttrs.setHasToken(hasToken);
+
+  Region *region = result.addRegion();
+  OpBuilder::InsertionGuard g(b);
+  b.createBlock(region);
+  Block &entryBlock = region->front();
+
+  // Add block arguments.
+
+  // Thread count arg.
+  entryBlock.addArgument(b.getIndexType(), result.location);
+
+  // sref args.
+  for (Type resultType : resultTypes) {
+    auto shapedType = cast<ShapedType>(resultType);
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope),
+        result.location);
+  }
+
+  // token args.
+  for (bool argHasToken : hasToken) {
+    if (argHasToken) {
+      entryBlock.addArgument(PCF::TokenType::get(b.getContext(), scope),
+                             result.location);
+    }
+  }
 }
 
 void GenericOp::getSuccessorRegions(RegionBranchPoint point,

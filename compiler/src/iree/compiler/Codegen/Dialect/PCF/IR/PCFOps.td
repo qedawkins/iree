@@ -89,25 +89,22 @@ def GenericOp : PCF_Op<"generic", [
   }];
   let hasVerifier = 1;
 
-  // // The default builder does not add the proper body BBargs, roll our own.
-  // // let skipDefaultBuilders = 1;
-  // let builders = [
-  //   // Builder with tripcount.
-  //   OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope, "Value":$tripcount,
-  //      "ArrayRef<Value>":$inits, "ArrayRef<Value>":$dynamic_sizes)>,
-  //   // Builder without tripcount.
-  //   OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
-  //      "ArrayRef<Value>":$inits, "ArrayRef<Value>":$dynamic_sizes)>,
-  //   // Builder with inferred result types from inits.
-  //   OpBuilder<(ins "ScopeAttr":$scope, "ArrayRef<Value>":$inits)>,
-  //   // Builder with no inits.
-  //   OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
-  //       "ArrayRef<Value>":$dynamic_sizes)>,
-  //   // Same builders with tripcount.
-  //   OpBuilder<(ins "ScopeAttr":$scope, "Value":$tripcount, "ArrayRef<Value>":$inits)>,
-  //   OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope, "Value":$tripcount,
-  //       "ArrayRef<Value>":$dynamic_sizes)>,
-  // ];
+  // The default builder does not add the proper body BBargs, roll our own.
+  // let skipDefaultBuilders = 1;
+  let builders = [
+    // Builder with return types inferred from inits.
+    OpBuilder<(ins "ScopeAttr":$scope, "std::optional<Value>":$tripcount,
+                   "ArrayRef<Value>":$inits, "bool":$addTokens)>,
+    // Builder with no inits.
+    OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
+                   "std::optional<Value>":$tripcount,
+                   "ArrayRef<Value>":$dynamic_sizes, "bool":$addTokens)>,
+    // Builder with everything.
+    OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
+                   "std::optional<Value>":$tripcount, "ArrayRef<Value>":$inits,
+                   "ArrayRef<Value>":$dynamic_sizes, "ArrayRef<bool>":$is_tied,
+                   "ArrayRef<bool>":$has_token)>,
+  ];
 
   let extraClassDeclaration = [{
     BlockArgument getNumThreadsArg() {
@@ -122,7 +119,7 @@ def GenericOp : PCF_Op<"generic", [
       return getRegion().getArguments().drop_front(1 + getNumResults());
     }
 
-    SmallVector<int64_t> getTiedResults() {
+    SmallVector<int64_t> getInitTiedResultIndices() {
       SmallVector<int64_t> tiedResults;
       for (auto [i, isTied] : llvm::enumerate(getIsTied())) {
         if (isTied) {
@@ -130,6 +127,35 @@ def GenericOp : PCF_Op<"generic", [
         }
       }
       return tiedResults;
+    }
+
+    OpResult getTiedResult(OpOperand &operand) {
+      int64_t beginIndex = getInits().getBeginOperandIndex();
+      int64_t operandIndex = operand.getOperandNumber();
+      if (operandIndex < beginIndex || operandIndex >= getInits().size() + beginIndex) {
+        return OpResult();
+      }
+
+      int64_t initIndex = operandIndex - beginIndex;
+      for (auto [i, isTied] : llvm::enumerate(getIsTied())) {
+        if (isTied) {
+          if (initIndex == 0) {
+            return (*this)->getOpResult(i);
+          }
+          --initIndex;
+        }
+      }
+
+      return OpResult();
+    }
+
+    OpOperand *getTiedInit(int64_t i) {
+      if (i < 0 || i >= getNumResults() || !getIsTied()[i]) {
+        return nullptr;
+      }
+
+      int64_t initIndex = llvm::count(getIsTied().take_front(i), true);
+      return &getInitsMutable()[initIndex];
     }
 
     SmallVector<int64_t> getRegionRefBlockArgIndicesWithToken() {

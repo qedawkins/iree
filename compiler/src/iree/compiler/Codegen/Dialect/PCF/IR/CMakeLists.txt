@@ -14,6 +14,7 @@ iree_cc_library(
   NAME
     IR
   HDRS
+    "PCFAttrInterfaces.h.inc"
     "PCFAttrs.h"
     "PCFAttrs.h.inc"
     "PCFDialect.h"
@@ -24,9 +25,11 @@ iree_cc_library(
     "PCFTypes.h"
     "PCFTypes.h.inc"
   SRCS
+    "PCFAttrInterfaces.cpp.inc"
     "PCFAttrs.cpp"
     "PCFAttrs.cpp.inc"
     "PCFDialect.cpp"
+    "PCFInterfaces.cpp"
     "PCFOpInterfaces.cpp.inc"
     "PCFOps.cpp"
     "PCFOps.cpp.inc"
