@@ -88,3 +88,26 @@ util.func private @bufferize_generic_mixed(%d0: index, %d1: index, %d2: index, %
 //  CHECK-NEXT:            -> (memref<?xi32>, memref<?xi32>{%[[D1]]}, memref<?xi32>{%[[D2]]}, memref<?xi32, "foo">) {
 //       CHECK:       pcf.join_yield %[[TOKEN]], %[[TOKEN1]]
 //  CHECK-NEXT:     }
+
+// -----
+
+util.func private @write_tensor(%dst: !pcf.sref<?xi32, #pcf.dummy_scope>) {
+  %src = bufferization.alloc_tensor() : tensor<2xi32>
+  pcf.write_slice %src into %dst[1] [2] [1] : tensor<2xi32> into !pcf.sref<?xi32, #pcf.dummy_scope>
+  util.return
+}
+
+// CHECK-LABEL: @write_tensor
+//  CHECK-SAME:   %[[DST:[A-Za-z0-9]+]]: !pcf.sref<?xi32, #pcf.dummy_scope>
+//       CHECK:   %[[SRC:.+]] = memref.alloc() {alignment = 64 : i64} : memref<2xi32>
+//  CHECK-NEXT:   pcf.write_slice %[[SRC]] into %[[DST]][1] [2] [1] : memref<2xi32> into !pcf.sref<?xi32, #pcf.dummy_scope>
+
+// -----
+
+util.func private @replay_write_tensor_bufferize(%src: memref<2xi32>, %dst: !pcf.sref<?xi32, #pcf.dummy_scope>) {
+  pcf.write_slice %src into %dst[1] [2] [1] : memref<2xi32> into !pcf.sref<?xi32, #pcf.dummy_scope>
+  util.return
+}
+
+// CHECK-LABEL: @replay_write_tensor_bufferize
+//  CHECK-NEXT:   pcf.write_slice %{{.*}} into %{{.*}}[1] [2] [1] : memref<2xi32> into !pcf.sref<?xi32, #pcf.dummy_scope>

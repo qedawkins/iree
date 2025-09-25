@@ -121,11 +121,49 @@ struct GenericOpInterface
   }
 };
 
+struct WriteSliceOpInterface
+    : public BufferizableOpInterface::ExternalModel<WriteSliceOpInterface,
+                                                    PCF::WriteSliceOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
+                              const AnalysisState &state) const {
+    // The only valid tensor operand is the source which is always read.
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                               const AnalysisState &state) const {
+    // The only valid tensor operand is the source which is only read.
+    return false;
+  }
+
+  AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
+                                      const AnalysisState &state) const {
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options,
+                          BufferizationState &state) const {
+    auto writeOp = cast<PCF::WriteSliceOp>(op);
+
+    if (isa<RankedTensorType>(writeOp.getSourceType())) {
+      FailureOr<Value> newSrc =
+          getBuffer(rewriter, writeOp.getSource(), options, state);
+      if (failed(newSrc)) {
+        return failure();
+      }
+      writeOp.getSourceMutable().assign(*newSrc);
+    }
+    return success();
+  }
+};
+
 } // namespace
 
 void registerBufferizationExternalModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, PCF::PCFDialect *dialect) {
     GenericOp::attachInterface<GenericOpInterface>(*ctx);
+    WriteSliceOp::attachInterface<WriteSliceOpInterface>(*ctx);
   });
 }
 
