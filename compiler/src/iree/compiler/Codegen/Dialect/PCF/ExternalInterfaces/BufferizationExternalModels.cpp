@@ -114,10 +114,13 @@ struct GenericOpInterface
     auto resultType = cast<RankedTensorType>(result.getType());
 
     // Else query the scope for the memory space to allocate for.
-    Attribute memSpace =
+    FailureOr<Attribute> memSpace =
         genericOp.getScope().getAllocMemSpace(op->getContext());
+    if (failed(memSpace)) {
+      return failure();
+    }
     return cast<BufferLikeType>(
-        getMemRefTypeWithStaticIdentityLayout(resultType, memSpace));
+        getMemRefTypeWithStaticIdentityLayout(resultType, *memSpace));
   }
 };
 

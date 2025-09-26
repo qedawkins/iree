@@ -61,9 +61,11 @@ def PCF_ScopeAttr : AttrInterface<"ScopeAttr"> {
     >,
     InterfaceMethod<
       /*desc=*/[{
-        Returns the memory space at which to allocate for this scope.
+        Returns the memory space at which to allocate for this scope. Defaults
+        to empty address space, however can be overridden to return failure if
+        allocations are illegal at this scope.
       }],
-      /*retTy=*/"Attribute",
+      /*retTy=*/"FailureOr<Attribute>",
       /*methodName=*/"getAllocMemSpace",
       /*args=*/(ins "MLIRContext*":$context),
       /*methodBody=*/"",
