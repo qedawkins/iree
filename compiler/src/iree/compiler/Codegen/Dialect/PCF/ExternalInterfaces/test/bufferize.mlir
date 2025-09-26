@@ -38,7 +38,7 @@ util.func private @bufferize_generic(%d0: index, %d1: index, %d2: index, %d3: in
 // -----
 
 util.func private @replay_bufferize_generic(%0: memref<?xi32>, %1: memref<?xi32>, %d0: index, %d1: index, %n: index) {
-  %2:4 = pcf.generic scope(#pcf.dummy_scope) tripcount(%n)
+  %2:4 = pcf.generic scope(#pcf.dummy_scope) count(%n)
     initialize(%ref = %0, %ref_1[%token: !pcf.token<#pcf.dummy_scope>], %ref_2, %ref_3[%token_1: !pcf.token<#pcf.dummy_scope>] = %1)[%num_threads: index]
             : (!pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>)
            -> (memref<?xi32>, memref<?xi32>{%d0}, memref<?xi32>{%d1}, memref<?xi32>) {
@@ -51,7 +51,7 @@ util.func private @replay_bufferize_generic(%0: memref<?xi32>, %1: memref<?xi32>
 
 // Verify that replaying bufferization works.
 // CHECK-LABEL: @replay_bufferize_generic(
-//       CHECK:   pcf.generic scope(#pcf.dummy_scope) tripcount
+//       CHECK:   pcf.generic scope(#pcf.dummy_scope) count
 //       CHECK:            -> (memref<?xi32>, memref<?xi32>{%{{.*}}}, memref<?xi32>{%{{.*}}}, memref<?xi32>) {
 
 // -----

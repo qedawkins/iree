@@ -17,6 +17,7 @@ namespace mlir::iree_compiler::IREE::PCF {
 
 namespace {
 
+// DO NOT SUBMIT
 struct ConvertSRefToMemRefPass final
     : impl::ConvertSRefToMemRefPassBase<ConvertSRefToMemRefPass> {
   void runOnOperation() override;

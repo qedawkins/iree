@@ -74,13 +74,14 @@ static ParseResult parseParallelBody(
     }
   }
 
-  OpAsmParser::Argument numThreadsArg;
+  SmallVector<OpAsmParser::Argument> threadCountArgs;
   if (failed(parser.parseLSquare())) {
     return failure();
   }
 
-  if (failed(parser.parseArgument(numThreadsArg,
-                                  /*allowType=*/true, /*allowAttrs=*/true))) {
+  if (failed(parser.parseArgumentList(
+          threadCountArgs, /*delimiter=*/OpAsmParser::Delimiter::None,
+          /*allowType=*/true, /*allowAttrs=*/true))) {
     return failure();
   }
 
@@ -158,7 +159,8 @@ static ParseResult parseParallelBody(
   // The printed argument order is for readability. The stored argument order
   // (num threads) (result tied refs) (tokens) to optimize for the common
   // pattern of requesting the ref tied to a result.
-  SmallVector<OpAsmParser::Argument> args = {numThreadsArg};
+  SmallVector<OpAsmParser::Argument> args;
+  args.append(threadCountArgs);
   args.append(regionRefArgs);
   args.append(regionTokenArgs);
   return parser.parseRegion(body, args, /*enableNameShadowing=*/false);
@@ -173,8 +175,11 @@ static void printParallelBody(OpAsmPrinter &p, Operation *op,
   p << "  initialize";
 
   int64_t numResults = resultTypes.size();
+  int64_t numTokens = llvm::count(hasToken, true);
+  int64_t numCountArgs = body.getNumArguments() - numResults - numTokens;
 
-  BlockArgument numThreadsArg = body.getArguments().front();
+  MutableArrayRef<BlockArgument> threadCountArgRange =
+      body.getArguments().take_front(numCountArgs);
   MutableArrayRef<BlockArgument> refArgRange =
       body.getArguments().drop_front().take_front(numResults);
   // 1 for the thread count. The rest is split between shaped refs and tokens
@@ -207,7 +212,10 @@ static void printParallelBody(OpAsmPrinter &p, Operation *op,
     }
     p << ")";
   }
-  p << "[" << numThreadsArg << ": " << numThreadsArg.getType() << "]";
+  p << "[";
+  llvm::interleaveComma(threadCountArgRange, p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
+  p << "]";
 
   // Now print the function type.
   if (numResults != 0) {
@@ -251,7 +259,9 @@ static void printParallelBody(OpAsmPrinter &p, Operation *op,
 
 void GenericOp::getAsmBlockArgumentNames(Region &region,
                                          OpAsmSetValueNameFn setNameFn) {
-  setNameFn(getNumThreadsArg(), "count");
+  for (Value v : getCountArgs()) {
+    setNameFn(v, "count");
+  }
   for (Value v : getRegionRefArgs()) {
     setNameFn(v, "ref");
   }
@@ -291,14 +301,18 @@ LogicalResult GenericOp::verify() {
   int64_t numTokens =
       std::accumulate(getHasToken().begin(), getHasToken().end(), (int64_t)(0));
 
-  if (getRegion().getArguments().size() != numResults + 1 + numTokens) {
-    return emitOpError("expected region to have |numResults| + 1 + |numTokens| "
-                       "total arguments");
+  if (getRegion().getArguments().size() !=
+      numResults + getNumCountArgs() + numTokens) {
+    return emitOpError(
+        "expected region to have |numCountArgs| + |numResults| + |numTokens| "
+        "total arguments");
   }
 
-  if (!getNumThreadsArg().getType().isIndex()) {
-    return emitOpError(
-        "expected index type for first (thread count) region argument");
+  for (BlockArgument countArg : getCountArgs()) {
+    if (!countArg.getType().isIndex()) {
+      return emitOpError(
+          "expected index type for thread count region arguments");
+    }
   }
 
   PCF::ScopeAttr scope = getScope();
@@ -353,43 +367,41 @@ LogicalResult GenericOp::verify() {
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
-                      ScopeAttr scope, std::optional<Value> tripcount,
+                      ScopeAttr scope, ArrayRef<Value> count,
                       ArrayRef<Value> inits, bool addTokens) {
   SmallVector<bool> hasToken(inits.size(), addTokens);
   SmallVector<bool> isTied(inits.size(), true);
   SmallVector<Type> resultTypes =
       llvm::map_to_vector(inits, [](Value v) -> Type { return v.getType(); });
-  GenericOp::build(b, result, resultTypes, scope, tripcount, inits,
+  GenericOp::build(b, result, resultTypes, scope, count, inits,
                    ArrayRef<Value>{}, isTied, hasToken);
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
                       TypeRange resultTypes, ScopeAttr scope,
-                      std::optional<Value> tripcount,
-                      ArrayRef<Value> dynamicSizes, bool addTokens) {
+                      ArrayRef<Value> count, ArrayRef<Value> dynamicSizes,
+                      bool addTokens) {
   SmallVector<bool> hasToken(resultTypes.size(), addTokens);
   SmallVector<bool> isTied(resultTypes.size(), false);
-  GenericOp::build(b, result, resultTypes, scope, tripcount, ArrayRef<Value>{},
+  GenericOp::build(b, result, resultTypes, scope, count, ArrayRef<Value>{},
                    dynamicSizes, isTied, hasToken);
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
                       TypeRange resultTypes, ScopeAttr scope,
-                      std::optional<Value> tripcount, ArrayRef<Value> inits,
+                      ArrayRef<Value> count, ArrayRef<Value> inits,
                       ArrayRef<Value> dynamicSizes, ArrayRef<bool> isTied,
                       ArrayRef<bool> hasToken) {
 
   result.addAttribute(GenericOp::getScopeAttrName(result.name), scope);
-  if (tripcount) {
-    result.addOperands(*tripcount);
-  }
+  result.addOperands(count);
   result.addOperands(inits);
   result.addOperands(dynamicSizes);
   result.addTypes(resultTypes);
 
   result.addAttribute(
       "operandSegmentSizes",
-      b.getDenseI32ArrayAttr({tripcount ? 1 : 0,
+      b.getDenseI32ArrayAttr({static_cast<int32_t>(count.size()),
                               static_cast<int32_t>(inits.size()),
                               static_cast<int32_t>(dynamicSizes.size())}));
 
@@ -404,8 +416,12 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
 
   // Add block arguments.
 
-  // Thread count arg.
-  entryBlock.addArgument(b.getIndexType(), result.location);
+  // Thread count args.
+  Type indexType = b.getIndexType();
+  int64_t numCountArgs = count.size() == 0 ? 1 : count.size();
+  for (int64_t i = 0; i < numCountArgs; ++i) {
+    entryBlock.addArgument(indexType, result.location);
+  }
 
   // sref args.
   for (Type resultType : resultTypes) {
@@ -435,6 +451,28 @@ void GenericOp::getSuccessorRegions(RegionBranchPoint point,
 
   // Otherwise, the region branches back to the parent operation.
   regions.push_back(RegionSuccessor(getResults()));
+}
+
+//===----------------------------------------------------------------------===//
+// Control Flow Ops
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// BranchIdOp
+//===----------------------------------------------------------------------===//
+
+void BranchIdOp::setDest(Block *block) { return setSuccessor(block); }
+
+void BranchIdOp::eraseOperand(unsigned index) { (*this)->eraseOperand(index); }
+
+SuccessorOperands BranchIdOp::getSuccessorOperands(unsigned index) {
+  assert(index == 0 && "invalid successor index");
+  // Single index operand produced by this op.
+  return SuccessorOperands(1, getDestOperandsMutable());
+}
+
+Block *BranchIdOp::getSuccessorForOperands(ArrayRef<Attribute>) {
+  return getDest();
 }
 
 //===----------------------------------------------------------------------===//

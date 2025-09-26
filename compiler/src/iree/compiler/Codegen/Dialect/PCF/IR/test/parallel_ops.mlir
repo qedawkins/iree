@@ -1,7 +1,7 @@
 // RUN: iree-opt --split-input-file %s | iree-opt --split-input-file | FileCheck %s
 
 util.func private @generic(%0: tensor<?xi32>, %1: tensor<?xi32>, %d0: index, %d1: index, %n: index) {
-  %2:4 = pcf.generic scope(#pcf.dummy_scope) tripcount(%n)
+  %2:4 = pcf.generic scope(#pcf.dummy_scope) count(%n)
     initialize(%ref = %0, %ref_1[%token: !pcf.token<#pcf.dummy_scope>], %ref_2, %ref_3[%token_1: !pcf.token<#pcf.dummy_scope>] = %1)[%num_threads: index]
             : (!pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>)
            -> (tensor<?xi32>, tensor<?xi32>{%d0}, tensor<?xi32>{%d1}, tensor<?xi32>) {
@@ -19,7 +19,7 @@ util.func private @generic(%0: tensor<?xi32>, %1: tensor<?xi32>, %d0: index, %d1
 //  CHECK-SAME:   %[[D1:[A-Za-z0-9]+]]: index
 //  CHECK-SAME:   %[[N:[A-Za-z0-9]+]]: index
 
-//       CHECK:   pcf.generic scope(#pcf.dummy_scope) tripcount(%[[N]])
+//       CHECK:   pcf.generic scope(#pcf.dummy_scope) count(%[[N]])
 //  CHECK-NEXT:     initialize(%[[REF:.+]] = %[[ARG0]],
 //  CHECK-SAME:                %[[REF1:.+]][%[[TOKEN:.+]]: !pcf.token<#pcf.dummy_scope>],
 //  CHECK-SAME:                %[[REF2:.+]],
@@ -56,7 +56,7 @@ util.func private @generic_no_inits() {
 // -----
 
 util.func private @generic_memref(%0: memref<?xi32>, %1: memref<?xi32>, %d0: index, %d1: index, %n: index) {
-  %2:4 = pcf.generic scope(#pcf.dummy_scope) tripcount(%n)
+  %2:4 = pcf.generic scope(#pcf.dummy_scope) count(%n)
     initialize(%ref = %0, %ref_1[%token: !pcf.token<#pcf.dummy_scope>], %ref_2, %ref_3[%token_1: !pcf.token<#pcf.dummy_scope>] = %1)[%num_threads: index]
             : (!pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>)
            -> (memref<?xi32>, memref<?xi32>{%d0}, memref<?xi32>{%d1}, memref<?xi32>) {
@@ -74,7 +74,7 @@ util.func private @generic_memref(%0: memref<?xi32>, %1: memref<?xi32>, %d0: ind
 //  CHECK-SAME:   %[[D1:[A-Za-z0-9]+]]: index
 //  CHECK-SAME:   %[[N:[A-Za-z0-9]+]]: index
 
-//       CHECK:   pcf.generic scope(#pcf.dummy_scope) tripcount(%[[N]])
+//       CHECK:   pcf.generic scope(#pcf.dummy_scope) count(%[[N]])
 //  CHECK-NEXT:     initialize(%[[REF:.+]] = %[[ARG0]],
 //  CHECK-SAME:                %[[REF1:.+]][%[[TOKEN:.+]]: !pcf.token<#pcf.dummy_scope>],
 //  CHECK-SAME:                %[[REF2:.+]],

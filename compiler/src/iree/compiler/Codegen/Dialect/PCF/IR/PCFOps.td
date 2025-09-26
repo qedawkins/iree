@@ -47,15 +47,24 @@ def GenericOp : PCF_Op<"generic", [
        DeclareOpInterfaceMethods<RegionBranchOpInterface>,
        // DestinationStyleOpInterface
      ]> {
-  let summary = "evaluate a region multiple times in parallel";
+  let summary = [{
+    Execute a set of workers in parallel on a region.
+  }];
   let description = [{
+    Executes a region across a set of workers at a specified scope. The scope
+    is given by an attribute implementing the `ScopeAttr` interface and is
+    responsible for the semantics of all pcf primitives at the same scope.
+    Further details about scopes are included in the docs for the interface.
+
+// DO NOT SUBMIT
+
     Example:
     ```mlir
       %0 = ... : tensor<?>
       %1 = ... : tensor<?>
       %d0, %d1 = ... : index
       %n = ... : index
-      %2:4 = pcf.generic scope(#foo.scope) tripcount(%n) {attr-dict-with-keyword}
+      %2:4 = pcf.generic scope(#foo.scope) count(%n) {attr-dict-with-keyword}
         initialize(%ref = %0, %ref_1[%token: !pcf.token<#foo.scope>], %ref_2, %ref_3[%token: !pcf.token<#foo.scope>] = %1)[%num_threads: index]
                 : (!pcf.tensor<?>, !pcf.tensor<?>, !pcf.tensor<?>, !pcf.tensor<?>)
                -> (tensor<?>, tensor<?>{%d0}, tensor<?>{%d1}, tensor<?>) {
@@ -65,7 +74,7 @@ def GenericOp : PCF_Op<"generic", [
   }];
   let arguments = (ins
     PCF_ScopeAttr:$scope,
-    Optional<Index>:$tripcount,
+    Variadic<Index>:$count,
     Variadic<PCF_AnyTensorOrMemRef>:$inits,
     Variadic<Index>:$dynamic_sizes,
     ArrayProp<BoolProp>:$is_tied,
@@ -77,7 +86,7 @@ def GenericOp : PCF_Op<"generic", [
 
   let assemblyFormat = [{
     `scope` `(` $scope `)`
-    (`tripcount` `(` $tripcount^ `)`)?
+    (`count` `(` $count^ `)`)?
     custom<ParallelBody>($inits,
                          type($inits),
                          $dynamic_sizes,
@@ -93,30 +102,34 @@ def GenericOp : PCF_Op<"generic", [
   // let skipDefaultBuilders = 1;
   let builders = [
     // Builder with return types inferred from inits.
-    OpBuilder<(ins "ScopeAttr":$scope, "std::optional<Value>":$tripcount,
+    OpBuilder<(ins "ScopeAttr":$scope, "ArrayRef<Value>":$count,
                    "ArrayRef<Value>":$inits, "bool":$addTokens)>,
     // Builder with no inits.
     OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
-                   "std::optional<Value>":$tripcount,
+                   "ArrayRef<Value>":$count,
                    "ArrayRef<Value>":$dynamic_sizes, "bool":$addTokens)>,
     // Builder with everything.
     OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
-                   "std::optional<Value>":$tripcount, "ArrayRef<Value>":$inits,
+                   "ArrayRef<Value>":$count, "ArrayRef<Value>":$inits,
                    "ArrayRef<Value>":$dynamic_sizes, "ArrayRef<bool>":$is_tied,
                    "ArrayRef<bool>":$has_token)>,
   ];
 
   let extraClassDeclaration = [{
-    BlockArgument getNumThreadsArg() {
-      return getRegion().getArguments().front();
+    int64_t getNumCountArgs() {
+      int64_t numCountArgs = getCount().size();
+      return numCountArgs == 0 ? 1 : numCountArgs;
+    }
+    MutableArrayRef<BlockArgument> getCountArgs() {
+      return getRegion().getArguments().take_front(getNumCountArgs());
     }
     MutableArrayRef<BlockArgument> getRegionRefArgs() {
-      return getRegion().getArguments().drop_front().take_front(getNumResults());
+      return getRegion().getArguments().drop_front(getNumCountArgs()).take_front(getNumResults());
     }
     MutableArrayRef<BlockArgument> getRegionTokenArgs() {
       // 1 for the thread count. The rest is split between shaped refs and
       // tokens where each result has a single associated ref.
-      return getRegion().getArguments().drop_front(1 + getNumResults());
+      return getRegion().getArguments().drop_front(getNumCountArgs() + getNumResults());
     }
 
     SmallVector<int64_t> getInitTiedResultIndices() {
@@ -171,6 +184,134 @@ def GenericOp : PCF_Op<"generic", [
 }
 
 } // OpGroupParallelOps
+
+
+//===----------------------------------------------------------------------===//
+// Control Flow Ops
+//===----------------------------------------------------------------------===//
+
+def OpGroupControlFlowOps : OpDocGroup {
+  let summary = "Parallel execution ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupControlFlowOps in {
+
+//===----------------------------------------------------------------------===//
+// BranchOp
+//===----------------------------------------------------------------------===//
+
+def BranchIdOp : PCF_Op<"br.id", [
+    ParentOneOf<[
+      "IREE::PCF::GenericOp",
+      // "IREE::PCF::ConcurrentOp",
+    ]>,
+    DeclareOpInterfaceMethods<BranchOpInterface, ["getSuccessorForOperands"]>,
+    Pure, Terminator
+  ]> {
+  let summary = "Branch operation with worker id";
+  let description = [{
+    The `pcf.br.id` operation represents a direct branch operation to a given
+    block, providing the current worker's id as the first successor operand.
+
+    Example:
+
+    ```mlir
+    pcf.<scoped op> #foo.scope {
+      ^entry_block:
+        %0 = ... : !foo.type
+        pcf.br.id ^bb1(%0 : !foo.type)
+      ^bb1(%id: index, %arg0: !foo.type):
+    }
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$destOperands);
+  let successors = (successor AnySuccessor:$dest);
+
+  let builders = [
+    OpBuilder<(ins "Block *":$dest,
+                   CArg<"ValueRange", "{}">:$destOperands), [{
+      $_state.addSuccessors(dest);
+      $_state.addOperands(destOperands);
+    }]>];
+
+  let extraClassDeclaration = [{
+    void setDest(Block *block);
+
+    /// Erase the operand at 'index' from the operand list.
+    void eraseOperand(unsigned index);
+  }];
+
+  let assemblyFormat = [{
+    $dest (`(` $destOperands^ `:` type($destOperands) `)`)? attr-dict
+  }];
+}
+
+// DO NOT SUBMIT
+// def BranchNextIdOp : PCF_Op<"br.next_id", [
+//     ParentOneOf<[
+//       "IREE::PCF::GenericOp",
+//       // "IREE::PCF::ConcurrentOp",
+//     ]>,
+//     DeclareOpInterfaceMethods<BranchOpInterface, ["getSuccessorForOperands"]>,
+//     Pure, Terminator
+//   ]> {
+//   let summary = "Branch operation with worker id";
+//   let description = [{
+//     The `pcf.br.next_id` operation represents a conditional branch with the next
+//     tile id owned by the current worker. If the current id is the final
+// 
+//     Example:
+// 
+//     ```mlir
+//     pcf.<scoped op> #foo.scope {
+//       ^entry_block:
+//         pcf.br.id ^bb1
+//       ^bb1(%id: index):
+//         pcf.br.next_id %id ^bb1
+//       ^bb1(%id: index):
+//     }
+//     ```
+// 
+//     This operation also includes a returning mode if the successor block is
+//     omitted.
+// 
+//     Example:
+// 
+//     ```mlir
+//     pcf.<scoped op> #foo.scope {
+//       ^entry_block:
+//         pcf.br.id ^bb1
+//       ^bb1(%id: index):
+//         pcf.br.id ^bb1
+//     }
+//     ```
+//   }];
+// 
+//   let arguments = (ins Variadic<AnyType>:$destOperands);
+//   let successors = (successor AnySuccessor:$dest);
+// 
+//   let builders = [
+//     OpBuilder<(ins "Block *":$dest,
+//                    CArg<"ValueRange", "{}">:$destOperands), [{
+//       $_state.addSuccessors(dest);
+//       $_state.addOperands(destOperands);
+//     }]>];
+// 
+//   let extraClassDeclaration = [{
+//     void setDest(Block *block);
+// 
+//     /// Erase the operand at 'index' from the operand list.
+//     void eraseOperand(unsigned index);
+//   }];
+// 
+//   let assemblyFormat = [{
+//     $dest (`(` $destOperands^ `:` type($destOperands) `)`)? attr-dict
+//   }];
+// }
+
+} // OpGroupControlFlowOps
 
 //===----------------------------------------------------------------------===//
 // WriteOps
@@ -273,6 +414,7 @@ def PCF_WriteSliceOp : PCF_Op<"write_slice", [
 //===----------------------------------------------------------------------===//
 
 def PCF_YieldOp : PCF_Op<"yield", [
+// DO NOT SUBMIT
   // ParentOneOf<[]>,
   Pure,
   ReturnLike,
@@ -296,6 +438,7 @@ def PCF_YieldOp : PCF_Op<"yield", [
 def PCF_JoinYieldOp : PCF_Op<"join_yield", [
   ParentOneOf<[
     "IREE::PCF::GenericOp",
+// DO NOT SUBMIT
     // "IREE::PCF::ConcurrentOp",
   ]>,
   Terminator,
@@ -318,6 +461,7 @@ def PCF_JoinYieldOp : PCF_Op<"join_yield", [
 def PCF_ReturnOp : PCF_Op<"return", [
   ParentOneOf<[
     "IREE::PCF::GenericOp",
+// DO NOT SUBMIT
     // "IREE::PCF::ConcurrentOp",
   ]>,
   Pure,
