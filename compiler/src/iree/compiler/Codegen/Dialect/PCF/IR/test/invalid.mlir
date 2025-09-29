@@ -13,19 +13,6 @@ util.func private @scope_mismatch() {
 
 // -----
 
-util.func private @token_scope_mismatch(%0: tensor<?xi32>) {
-// expected-error@+1 {{expected region token argument to be of type !pcf.token with scope #pcf.sequential}}
-  pcf.generic scope(#pcf.sequential)
-    initialize(%ref[%token: !pcf.token<#pcf.dummy_scope>])[%num_threads: index]
-            : (!pcf.sref<?xi32, #pcf.sequential>)
-           -> (tensor<?xi32>) {
-    pcf.return
-  }
-  util.return
-}
-
-// -----
-
 // expected-note@+1 {{prior use here}}
 util.func private @init_type_mismatch(%0: tensor<3xi32>) {
   pcf.generic scope(#pcf.dummy_scope)

@@ -56,13 +56,22 @@ Type ShapedRefType::parse(AsmParser &parser) {
     return {};
   }
 
+  Type syncScope;
+  if (mlir::succeeded(parser.parseOptionalComma())) {
+    auto syncLoc = parser.getCurrentLocation();
+    if (mlir::failed(parser.parseType(syncScope))) {
+      parser.emitError(syncLoc, "failed to parse parameter 'sync_scope'");
+      return {};
+    }
+  }
+
   // Parse literal '>'
   if (parser.parseGreater())
     return {};
 
   MLIRContext *context = parser.getContext();
-  return ShapedRefType::get(context, shape, elementType,
-                            cast<ScopeAttr>(scope));
+  return ShapedRefType::get(context, shape, elementType, cast<ScopeAttr>(scope),
+                            syncScope);
 }
 
 void ShapedRefType::print(AsmPrinter &printer) const {
@@ -79,7 +88,15 @@ void ShapedRefType::print(AsmPrinter &printer) const {
 
   printer << getElementType();
   printer << ", " << getScope();
+  if (getSyncScope()) {
+    printer << ", " << getSyncScope();
+  }
   printer << ">";
+}
+
+ShapedRefType ShapedRefType::get(MLIRContext *context, ArrayRef<int64_t> shape,
+                                 Type elementType, ScopeAttr scope) {
+  return ShapedRefType::get(context, shape, elementType, scope, Type());
 }
 
 //===----------------------------------------------------------------------===//

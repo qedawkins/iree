@@ -23,16 +23,16 @@ namespace mlir::iree_compiler::IREE::PCF {
 // GenericOp
 //===----------------------------------------------------------------------===//
 
-static ParseResult parseParallelBody(
-    OpAsmParser &parser, SmallVectorImpl<OpAsmParser::UnresolvedOperand> &inits,
-    SmallVectorImpl<Type> &initTypes,
-    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dynamicSizes,
-    SmallVectorImpl<Type> &resultTypes, SmallVectorImpl<bool> &isTied,
-    SmallVectorImpl<bool> &hasToken, Region &body) {
+static ParseResult
+parseParallelBody(OpAsmParser &parser,
+                  SmallVectorImpl<OpAsmParser::UnresolvedOperand> &inits,
+                  SmallVectorImpl<Type> &initTypes,
+                  SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dynamicSizes,
+                  SmallVectorImpl<Type> &resultTypes,
+                  SmallVectorImpl<bool> &isTied, Region &body) {
   if (failed(parser.parseKeyword("initialize")))
     return failure();
   SmallVector<OpAsmParser::Argument> regionRefArgs;
-  SmallVector<OpAsmParser::Argument> regionTokenArgs;
   if (succeeded(parser.parseOptionalLParen())) {
     do {
       // Reserve entries in the lists.
@@ -41,21 +41,6 @@ static ParseResult parseParallelBody(
                                       /*allowType=*/false,
                                       /*allowAttrs=*/true))) {
         return failure();
-      }
-
-      if (succeeded(parser.parseOptionalLSquare())) {
-        regionTokenArgs.emplace_back();
-        if (failed(parser.parseArgument(regionTokenArgs.back(),
-                                        /*allowType=*/true,
-                                        /*allowAttrs=*/true))) {
-          return failure();
-        }
-        if (failed(parser.parseOptionalRSquare())) {
-          return failure();
-        }
-        hasToken.push_back(true);
-      } else {
-        hasToken.push_back(false);
       }
 
       // Parse the tied init if present.
@@ -162,45 +147,29 @@ static ParseResult parseParallelBody(
   SmallVector<OpAsmParser::Argument> args;
   args.append(threadCountArgs);
   args.append(regionRefArgs);
-  args.append(regionTokenArgs);
   return parser.parseRegion(body, args, /*enableNameShadowing=*/false);
 }
 
 static void printParallelBody(OpAsmPrinter &p, Operation *op,
                               OperandRange inits, TypeRange initTypes,
                               OperandRange dynamicSizes, TypeRange resultTypes,
-                              ArrayRef<bool> isTied, ArrayRef<bool> hasToken,
-                              Region &body) {
+                              ArrayRef<bool> isTied, Region &body) {
   p.printNewline();
   p << "  initialize";
 
   int64_t numResults = resultTypes.size();
-  int64_t numTokens = llvm::count(hasToken, true);
-  int64_t numCountArgs = body.getNumArguments() - numResults - numTokens;
+  int64_t numCountArgs = body.getNumArguments() - numResults;
 
   MutableArrayRef<BlockArgument> threadCountArgRange =
       body.getArguments().take_front(numCountArgs);
   MutableArrayRef<BlockArgument> refArgRange =
-      body.getArguments().drop_front().take_front(numResults);
-  // 1 for the thread count. The rest is split between shaped refs and tokens
-  // where each result has a single associated ref.
-  MutableArrayRef<BlockArgument> tokenArgRange =
-      body.getArguments().drop_front(1 + numResults);
+      body.getArguments().take_back(numResults);
 
   if (numResults != 0) {
     p << "(";
     int64_t currInitIndex = 0;
-    int64_t currTokenIndex = 0;
     for (int64_t i = 0, e = numResults; i < e; ++i) {
       p << refArgRange[i];
-      if (hasToken[i]) {
-        p << "[";
-        p << tokenArgRange[currTokenIndex];
-        p << ": ";
-        p << tokenArgRange[currTokenIndex].getType();
-        p << "]";
-        ++currTokenIndex;
-      }
       if (isTied[i]) {
         p << " = ";
         p << inits[currInitIndex];
@@ -265,17 +234,11 @@ void GenericOp::getAsmBlockArgumentNames(Region &region,
   for (Value v : getRegionRefArgs()) {
     setNameFn(v, "ref");
   }
-  for (Value v : getRegionTokenArgs()) {
-    setNameFn(v, "token");
-  }
 }
-
-LogicalResult verifyParallelBodyArgs() { return success(); }
 
 LogicalResult GenericOp::verify() {
   // Verify tied/token array lengths.
   ArrayRef<bool> isTied = getIsTied();
-  ArrayRef<bool> hasToken = getHasToken();
   int64_t numResults = getNumResults();
   if (isTied.size() != numResults) {
     return emitOpError(
@@ -292,20 +255,9 @@ LogicalResult GenericOp::verify() {
            << numInits;
   }
 
-  if (hasToken.size() != numResults) {
-    return emitOpError(
-               "`has_token` mask length expected to match number of results ")
-           << numResults;
-  }
-
-  int64_t numTokens =
-      std::accumulate(getHasToken().begin(), getHasToken().end(), (int64_t)(0));
-
-  if (getRegion().getArguments().size() !=
-      numResults + getNumCountArgs() + numTokens) {
-    return emitOpError(
-        "expected region to have |numCountArgs| + |numResults| + |numTokens| "
-        "total arguments");
+  if (getRegion().getArguments().size() != numResults + getNumCountArgs()) {
+    return emitOpError("expected region to have |numCountArgs| + |numResults| "
+                       "total arguments");
   }
 
   for (BlockArgument countArg : getCountArgs()) {
@@ -353,45 +305,31 @@ LogicalResult GenericOp::verify() {
     }
     ++currResultIndex;
   }
-
-  // Verify token types and scopes.
-  for (auto tokenArg : getRegionTokenArgs()) {
-    auto tokenType = dyn_cast<PCF::TokenType>(tokenArg.getType());
-    if (!tokenType || tokenType.getScope() != scope) {
-      return emitOpError("expected region token argument to be of type "
-                         "!pcf.token with scope ")
-             << scope;
-    }
-  }
   return success();
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
                       ScopeAttr scope, ArrayRef<Value> count,
-                      ArrayRef<Value> inits, bool addTokens) {
-  SmallVector<bool> hasToken(inits.size(), addTokens);
+                      ArrayRef<Value> inits) {
   SmallVector<bool> isTied(inits.size(), true);
   SmallVector<Type> resultTypes =
       llvm::map_to_vector(inits, [](Value v) -> Type { return v.getType(); });
   GenericOp::build(b, result, resultTypes, scope, count, inits,
-                   ArrayRef<Value>{}, isTied, hasToken);
+                   ArrayRef<Value>{}, isTied);
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
                       TypeRange resultTypes, ScopeAttr scope,
-                      ArrayRef<Value> count, ArrayRef<Value> dynamicSizes,
-                      bool addTokens) {
-  SmallVector<bool> hasToken(resultTypes.size(), addTokens);
+                      ArrayRef<Value> count, ArrayRef<Value> dynamicSizes) {
   SmallVector<bool> isTied(resultTypes.size(), false);
   GenericOp::build(b, result, resultTypes, scope, count, ArrayRef<Value>{},
-                   dynamicSizes, isTied, hasToken);
+                   dynamicSizes, isTied);
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
                       TypeRange resultTypes, ScopeAttr scope,
                       ArrayRef<Value> count, ArrayRef<Value> inits,
-                      ArrayRef<Value> dynamicSizes, ArrayRef<bool> isTied,
-                      ArrayRef<bool> hasToken) {
+                      ArrayRef<Value> dynamicSizes, ArrayRef<bool> isTied) {
 
   result.addAttribute(GenericOp::getScopeAttrName(result.name), scope);
   result.addOperands(count);
@@ -407,7 +345,6 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
 
   Properties &inherentAttrs = result.getOrAddProperties<Properties>();
   inherentAttrs.setIsTied(isTied);
-  inherentAttrs.setHasToken(hasToken);
 
   Region *region = result.addRegion();
   OpBuilder::InsertionGuard g(b);
@@ -430,14 +367,6 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
         PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
                                 shapedType.getElementType(), scope),
         result.location);
-  }
-
-  // token args.
-  for (bool argHasToken : hasToken) {
-    if (argHasToken) {
-      entryBlock.addArgument(PCF::TokenType::get(b.getContext(), scope),
-                             result.location);
-    }
   }
 }
 

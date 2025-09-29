@@ -61,13 +61,13 @@ def GenericOp : PCF_Op<"generic", [
     Example:
     ```mlir
       %0 = ... : tensor<?>
-      %1 = ... : tensor<?>
+      %1 = ... : tensor<?x?>
       %d0, %d1 = ... : index
       %n = ... : index
       %2:4 = pcf.generic scope(#foo.scope) count(%n) {attr-dict-with-keyword}
-        initialize(%ref = %0, %ref_1[%token: !pcf.token<#foo.scope>], %ref_2, %ref_3[%token: !pcf.token<#foo.scope>] = %1)[%num_threads: index]
-                : (!pcf.tensor<?>, !pcf.tensor<?>, !pcf.tensor<?>, !pcf.tensor<?>)
-               -> (tensor<?>, tensor<?>{%d0}, tensor<?>{%d1}, tensor<?>) {
+        initialize(%ref = %0, %ref_1, %ref_2, %ref_3 = %1)[%num_threads: index]
+                : (!pcf.sref<?, #foo.scope>, !pcf.sref<?, #foo.scope>, !pcf.sref<?x?, #foo.scope>, !pcf.sref<?x?, #foo.scope>)
+               -> (tensor<?>, tensor<?>{%d0}, tensor<?x?>{%d0, %d1}, tensor<?x?>) {
         ...
       }
     ```
@@ -77,8 +77,7 @@ def GenericOp : PCF_Op<"generic", [
     Variadic<Index>:$count,
     Variadic<PCF_AnyTensorOrMemRef>:$inits,
     Variadic<Index>:$dynamic_sizes,
-    ArrayProp<BoolProp>:$is_tied,
-    ArrayProp<BoolProp>:$has_token
+    ArrayProp<BoolProp>:$is_tied
   );
 
   let results = (outs Variadic<PCF_AnyTensorOrMemRef>:$results);
@@ -92,7 +91,6 @@ def GenericOp : PCF_Op<"generic", [
                          $dynamic_sizes,
                          type($results),
                          $is_tied,
-                         $has_token,
                          $region)
     prop-dict attr-dict
   }];
@@ -103,16 +101,15 @@ def GenericOp : PCF_Op<"generic", [
   let builders = [
     // Builder with return types inferred from inits.
     OpBuilder<(ins "ScopeAttr":$scope, "ArrayRef<Value>":$count,
-                   "ArrayRef<Value>":$inits, "bool":$addTokens)>,
+                   "ArrayRef<Value>":$inits)>,
     // Builder with no inits.
     OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
                    "ArrayRef<Value>":$count,
-                   "ArrayRef<Value>":$dynamic_sizes, "bool":$addTokens)>,
+                   "ArrayRef<Value>":$dynamic_sizes)>,
     // Builder with everything.
     OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
                    "ArrayRef<Value>":$count, "ArrayRef<Value>":$inits,
-                   "ArrayRef<Value>":$dynamic_sizes, "ArrayRef<bool>":$is_tied,
-                   "ArrayRef<bool>":$has_token)>,
+                   "ArrayRef<Value>":$dynamic_sizes, "ArrayRef<bool>":$is_tied)>,
   ];
 
   let extraClassDeclaration = [{
@@ -125,11 +122,6 @@ def GenericOp : PCF_Op<"generic", [
     }
     MutableArrayRef<BlockArgument> getRegionRefArgs() {
       return getRegion().getArguments().drop_front(getNumCountArgs()).take_front(getNumResults());
-    }
-    MutableArrayRef<BlockArgument> getRegionTokenArgs() {
-      // 1 for the thread count. The rest is split between shaped refs and
-      // tokens where each result has a single associated ref.
-      return getRegion().getArguments().drop_front(getNumCountArgs() + getNumResults());
     }
 
     SmallVector<int64_t> getInitTiedResultIndices() {
@@ -169,16 +161,6 @@ def GenericOp : PCF_Op<"generic", [
 
       int64_t initIndex = llvm::count(getIsTied().take_front(i), true);
       return &getInitsMutable()[initIndex];
-    }
-
-    SmallVector<int64_t> getRegionRefBlockArgIndicesWithToken() {
-      SmallVector<int64_t> tokenIndices;
-      for (auto [i, hasToken] : llvm::enumerate(getHasToken())) {
-        if (hasToken) {
-          tokenIndices.push_back(i);
-        }
-      }
-      return tokenIndices;
     }
   }];
 }
@@ -435,28 +417,28 @@ def PCF_YieldOp : PCF_Op<"yield", [
   }];
 }
 
-def PCF_JoinYieldOp : PCF_Op<"join_yield", [
-  ParentOneOf<[
-    "IREE::PCF::GenericOp",
-// DO NOT SUBMIT
-    // "IREE::PCF::ConcurrentOp",
-  ]>,
-  Terminator,
-]> {
-  let summary = [{Joins and yields values from a parallel execution region.}];
-  let description = [{
-    Joins workers on the specified tokens and yields from the parallel
-    execution region.
-  }];
-
-  let arguments = (ins
-    Variadic<PCF_AnyToken>:$tokens
-  );
-
-  let assemblyFormat = [{
-    attr-dict ($tokens^ `:` type($tokens))?
-  }];
-}
+// def PCF_JoinYieldOp : PCF_Op<"join_yield", [
+//   ParentOneOf<[
+//     "IREE::PCF::GenericOp",
+// // DO NOT SUBMIT
+//     // "IREE::PCF::ConcurrentOp",
+//   ]>,
+//   Terminator,
+// ]> {
+//   let summary = [{Joins and yields values from a parallel execution region.}];
+//   let description = [{
+//     Joins workers on the specified tokens and yields from the parallel
+//     execution region.
+//   }];
+// 
+//   let arguments = (ins
+//     Variadic<PCF_AnyToken>:$tokens
+//   );
+// 
+//   let assemblyFormat = [{
+//     attr-dict ($tokens^ `:` type($tokens))?
+//   }];
+// }
 
 def PCF_ReturnOp : PCF_Op<"return", [
   ParentOneOf<[

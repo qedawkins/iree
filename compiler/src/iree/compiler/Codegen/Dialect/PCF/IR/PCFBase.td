@@ -32,8 +32,16 @@ def PCF_Dialect : Dialect {
     work.
 
     In contrast with scf whose scope is purely focused on representing common
-    control flow, the pcf dialect includes types and operations that represent
-    dataflow across parallel workers.
+    control flow, the pcf dialect includes type, interfaces, and operations that
+    represent dataflow across parallel workers. This comprises two key
+    conceptual types:
+
+    1. Scoped memory. This is a reference to memory that carries information
+       about its allocation scope as well as how to synchronize it. This allows
+       for fencing at fine granularities (e.g. allocation).
+    2. Tokens. Types capable of managing synchronization of resources between
+       threads. This could be anything ranging from fences + (named) barriers to
+       producer/consumer queues implemented with ringbuffers.
 
     This diagram illustrates where the dialect fits in to executable
     lowering pipelines for typical GPUs. For CPUs and other accelerators, the
@@ -97,12 +105,75 @@ class PCF_Op<string mnemonic, list<Trait> traits = []> :
 // Base pcf types
 //===----------------------------------------------------------------------===//
 
-def PCF_Token : TypeDef<PCF_Dialect, "Token", []> {
-  let mnemonic = "token";
+def PCF_UniqueToken : TypeDef<PCF_Dialect, "UniqueToken", []> {
+  let mnemonic = "unique_token";
 
-  let summary = [{A token handle used for synchronizing workers in the parent matching scope.}];
+  let summary = [{
+    A barrier that resets on copy.
+  }];
   let description = [{
-    A token with a scope used to synchronize a resource.
+    A barrier that resets on copy. Supports two operations, signal and wait.
+    Signal increments a shared counter and wait yields until the counter reaches
+    the size of the barrier. The copying this token allocates a new counter and
+    sets it to zero. The following pseudocode described the semantics:
+
+    ```c++
+    class UniqueToken {
+      void UniqueToken(UniqueToken other) {
+        counter = 0;
+        size = other.size;
+      }
+      void signal() {
+        ++counter;
+      }
+      void wait() {
+        while (count < size) {
+          sleep();
+        }
+      }
+     private:
+      std::atomic<int> counter;
+      int size;
+    }
+    ```
+
+    The scope for this token determines the memory space for the atomic.
+  }];
+
+  let parameters = (ins
+    "PCF::ScopeAttr":$scope
+  );
+  let assemblyFormat = "`<` $scope `>`";
+}
+
+def PCF_SingleUseToken : TypeDef<PCF_Dialect, "SingleUseToken", []> {
+  let mnemonic = "single_use_token";
+
+  let summary = [{
+    A single use barrier with size and scope.
+  }];
+  let description = [{
+    A single use barrier. Supports two operations, signal and wait. Signal
+    increments a shared counter and wait yields until the counter reaches the
+    size of the barrier. The following pseudocode described the semantics:
+
+    ```c++
+    class SingleUseToken {
+      void signal() {
+        ++(*counter);
+      }
+      void wait() {
+        while (*count < size) {
+          sleep();
+        }
+      }
+     private:
+      std::atomic<int> *counter;
+      int size;
+    }
+    ```
+
+    The scope for this token determines the memory space for the atomic.
   }];
 
   let parameters = (ins
@@ -123,18 +194,39 @@ def PCF_ShapedRef : TypeDef<PCF_Dialect, "ShapedRef", [
     be accessed by index, though no assumptions about the physical relation
     between two coordinates can be made. Elements referenced by an `sref` may
     not internally alias.
+
+    ```
+    template<size_t rank, typename eltype, typename alloc_scope_ty, sync_scope>
+    class ShapedRef {
+      // Access is pointwise within the coordinate space implied by the shape.
+      // Element type determines the minimum access bitwidth.
+      eltype *getElementPtr(int a, ...) // |rank| operands.
+      int shape[rank];
+
+      // Scope this referenced memory was allocated at. Defines memory space.
+      alloc_scope_ty alloc_scope;
+      // Class defining synchronization for this reference.
+      token_ty sync_scope;
+    }
+    ```
   }];
 
   let parameters = (ins
     ArrayRefParameter<"int64_t">:$shape,
     "Type":$elementType,
-    "PCF::ScopeAttr":$scope
+    "PCF::ScopeAttr":$scope,
+    "Type":$sync_scope
   );
   let hasCustomAssemblyFormat = 1;
+  let builders = [
+    // Builder with no sync scope.
+    AttrOrTypeBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$element_type, "PCF::ScopeAttr":$scope)>,
+  ];
 
   let extraClassDeclaration = [{
     ShapedRefType cloneWith(std::optional<llvm::ArrayRef<int64_t>> shape, Type elementType) const {
-      return ShapedRefType::get(getContext(), shape.value_or(getShape()), elementType, getScope());
+      return ShapedRefType::get(getContext(), shape.value_or(getShape()), elementType,
+        getScope(), getSyncScope());
     }
 
     bool hasRank() const {
@@ -194,7 +286,6 @@ def PCF_SequentialAttr :
 // Misc aliases
 //===----------------------------------------------------------------------===//
 
-def PCF_AnyToken: AnyTypeOf<[PCF_Token]>;
 def PCF_AnyRef: AnyTypeOf<[PCF_ShapedRef, AnyMemRef]>;
 def PCF_AnyShapedRef: AnyTypeOf<[PCF_ShapedRef]>;
 def PCF_AnyTensorOrMemRef: AnyTypeOf<[AnyRankedTensor, AnyMemRef]>;

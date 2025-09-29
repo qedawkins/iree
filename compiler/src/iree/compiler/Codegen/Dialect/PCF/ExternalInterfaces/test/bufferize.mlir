@@ -4,11 +4,11 @@ util.func private @bufferize_generic(%d0: index, %d1: index, %d2: index, %d3: in
   %0 = bufferization.alloc_tensor(%d0) : tensor<?xi32>
   %1 = bufferization.alloc_tensor(%d3) {memory_space = "foo"} : tensor<?xi32>
   %2:4 = pcf.generic scope(#pcf.dummy_scope)
-    initialize(%ref = %0, %ref_1[%token: !pcf.token<#pcf.dummy_scope>], %ref_2, %ref_3[%token_1: !pcf.token<#pcf.dummy_scope>] = %1)[%num_threads: index]
+    initialize(%ref = %0, %ref_1, %ref_2, %ref_3 = %1)[%num_threads: index]
             : (!pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>)
            -> (tensor<?xi32>, tensor<?xi32>{%d1}, tensor<?xi32>{%d2}, tensor<?xi32>) {
     util.optimization_barrier %num_threads, %ref, %ref_1, %ref_2, %ref_3 : index, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>
-    pcf.join_yield %token, %token_1 : !pcf.token<#pcf.dummy_scope>, !pcf.token<#pcf.dummy_scope>
+    pcf.return
   }
   util.return
 }
@@ -22,28 +22,28 @@ util.func private @bufferize_generic(%d0: index, %d1: index, %d2: index, %d3: in
 //   CHECK-DAG:   %[[ALLOC:.+]] = memref.alloc(%[[D0]]) {alignment = 64 : i64} : memref<?xi32>
 //   CHECK-DAG:   %[[ALLOC1:.+]] = memref.alloc(%[[D3]]) {alignment = 64 : i64} : memref<?xi32, "foo">
 //       CHECK:   pcf.generic scope(#pcf.dummy_scope)
-//  CHECK-NEXT:     initialize(%[[REF:.+]] = %[[ALLOC]],
-//  CHECK-SAME:                %[[REF1:.+]][%[[TOKEN:.+]]: !pcf.token<#pcf.dummy_scope>],
-//  CHECK-SAME:                %[[REF2:.+]],
-//  CHECK-SAME:                %[[REF3:.+]][%[[TOKEN1:.+]]: !pcf.token<#pcf.dummy_scope>] = %[[ALLOC1]])
+//  CHECK-NEXT:     initialize(%[[REF:[A-Za-z0-9_]+]] = %[[ALLOC]],
+//  CHECK-SAME:                %[[REF1:[A-Za-z0-9_]+]],
+//  CHECK-SAME:                %[[REF2:[A-Za-z0-9_]+]],
+//  CHECK-SAME:                %[[REF3:[A-Za-z0-9_]+]] = %[[ALLOC1]]
 //  CHECK-SAME:                [%[[NUM_THREADS:.+]]: index]
 //  CHECK-NEXT:             : (!pcf.sref<?xi32, #pcf.dummy_scope>,
 //  CHECK-SAME:                !pcf.sref<?xi32, #pcf.dummy_scope>,
 //  CHECK-SAME:                !pcf.sref<?xi32, #pcf.dummy_scope>,
 //  CHECK-SAME:                !pcf.sref<?xi32, #pcf.dummy_scope>)
 //  CHECK-NEXT:            -> (memref<?xi32>, memref<?xi32>{%[[D1]]}, memref<?xi32>{%[[D2]]}, memref<?xi32, "foo">) {
-//       CHECK:       pcf.join_yield %[[TOKEN]], %[[TOKEN1]]
+//       CHECK:       pcf.return
 //  CHECK-NEXT:     }
 
 // -----
 
 util.func private @replay_bufferize_generic(%0: memref<?xi32>, %1: memref<?xi32>, %d0: index, %d1: index, %n: index) {
   %2:4 = pcf.generic scope(#pcf.dummy_scope) count(%n)
-    initialize(%ref = %0, %ref_1[%token: !pcf.token<#pcf.dummy_scope>], %ref_2, %ref_3[%token_1: !pcf.token<#pcf.dummy_scope>] = %1)[%num_threads: index]
+    initialize(%ref = %0, %ref_1, %ref_2, %ref_3 = %1)[%num_threads: index]
             : (!pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>)
            -> (memref<?xi32>, memref<?xi32>{%d0}, memref<?xi32>{%d1}, memref<?xi32>) {
     util.optimization_barrier %num_threads, %ref, %ref_1, %ref_2, %ref_3 : index, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>
-    pcf.join_yield %token, %token_1 : !pcf.token<#pcf.dummy_scope>, !pcf.token<#pcf.dummy_scope>
+    pcf.return
   }
   util.optimization_barrier %2#0, %2#1, %2#2, %2#3 : memref<?xi32>, memref<?xi32>, memref<?xi32>, memref<?xi32>
   util.return
@@ -59,11 +59,11 @@ util.func private @replay_bufferize_generic(%0: memref<?xi32>, %1: memref<?xi32>
 util.func private @bufferize_generic_mixed(%d0: index, %d1: index, %d2: index, %1: memref<?xi32, "foo">) {
   %0 = bufferization.alloc_tensor(%d0) : tensor<?xi32>
   %2:4 = pcf.generic scope(#pcf.dummy_scope)
-    initialize(%ref = %0, %ref_1[%token: !pcf.token<#pcf.dummy_scope>], %ref_2, %ref_3[%token_1: !pcf.token<#pcf.dummy_scope>] = %1)[%num_threads: index]
+    initialize(%ref = %0, %ref_1, %ref_2, %ref_3 = %1)[%num_threads: index]
             : (!pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>)
            -> (tensor<?xi32>, memref<?xi32>{%d1}, tensor<?xi32>{%d2}, memref<?xi32, "foo">) {
     util.optimization_barrier %num_threads, %ref, %ref_1, %ref_2, %ref_3 : index, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>, !pcf.sref<?xi32, #pcf.dummy_scope>
-    pcf.join_yield %token, %token_1 : !pcf.token<#pcf.dummy_scope>, !pcf.token<#pcf.dummy_scope>
+    pcf.return
   }
   util.return
 }
@@ -76,17 +76,17 @@ util.func private @bufferize_generic_mixed(%d0: index, %d1: index, %d2: index, %
 
 //       CHECK:   %[[ALLOC:.+]] = memref.alloc(%[[D0]]) {alignment = 64 : i64} : memref<?xi32>
 //       CHECK:   pcf.generic scope(#pcf.dummy_scope)
-//  CHECK-NEXT:     initialize(%[[REF:.+]] = %[[ALLOC]],
-//  CHECK-SAME:                %[[REF1:.+]][%[[TOKEN:.+]]: !pcf.token<#pcf.dummy_scope>],
-//  CHECK-SAME:                %[[REF2:.+]],
-//  CHECK-SAME:                %[[REF3:.+]][%[[TOKEN1:.+]]: !pcf.token<#pcf.dummy_scope>] = %[[INIT1]])
+//  CHECK-NEXT:     initialize(%[[REF:[A-Za-z0-9_]+]] = %[[ALLOC]],
+//  CHECK-SAME:                %[[REF1:[A-Za-z0-9_]+]],
+//  CHECK-SAME:                %[[REF2:[A-Za-z0-9_]+]],
+//  CHECK-SAME:                %[[REF3:[A-Za-z0-9_]+]] = %[[INIT1]]
 //  CHECK-SAME:                [%[[NUM_THREADS:.+]]: index]
 //  CHECK-NEXT:             : (!pcf.sref<?xi32, #pcf.dummy_scope>,
 //  CHECK-SAME:                !pcf.sref<?xi32, #pcf.dummy_scope>,
 //  CHECK-SAME:                !pcf.sref<?xi32, #pcf.dummy_scope>,
 //  CHECK-SAME:                !pcf.sref<?xi32, #pcf.dummy_scope>)
 //  CHECK-NEXT:            -> (memref<?xi32>, memref<?xi32>{%[[D1]]}, memref<?xi32>{%[[D2]]}, memref<?xi32, "foo">) {
-//       CHECK:       pcf.join_yield %[[TOKEN]], %[[TOKEN1]]
+//       CHECK:       pcf.return
 //  CHECK-NEXT:     }
 
 // -----

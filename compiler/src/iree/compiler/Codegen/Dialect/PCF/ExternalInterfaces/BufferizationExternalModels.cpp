@@ -88,7 +88,7 @@ struct GenericOpInterface
     auto newGenericOp = PCF::GenericOp::create(
         rewriter, loc, newResultTypes, genericOp.getScope(),
         genericOp.getCount(), newInits, genericOp.getDynamicSizes(),
-        genericOp.getIsTied(), genericOp.getHasToken());
+        genericOp.getIsTied());
     newGenericOp.getRegion().takeBody(genericOp.getRegion());
     replaceOpWithBufferizedValues(rewriter, op, newGenericOp.getResults());
     return success();
