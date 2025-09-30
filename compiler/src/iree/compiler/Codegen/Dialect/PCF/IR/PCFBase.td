@@ -43,6 +43,18 @@ def PCF_Dialect : Dialect {
        threads. This could be anything ranging from fences + (named) barriers to
        producer/consumer queues implemented with ringbuffers.
 
+    PCF ops + types are designed to be lowered in three phases, starting from
+    structural ops on scoped memory infused with synchronization tokens. Prior
+    to each phase a different level of scheduling is implied.
+
+    1. Tokens tied to resources are split and lowered to separate ops. Before
+       this the compiler can perform coarse grain scheduling around resources
+       according to their tied synchronization.
+    2. Generic scoped memory is converted to memref. Since all tokens have been
+       resolved by this point, this is just a matter of propagating layout and
+       memory space.
+    3. Wrapping structured ops are lowered to control flow (scf and/or cf).
+
     This diagram illustrates where the dialect fits in to executable
     lowering pipelines for typical GPUs. For CPUs and other accelerators, the
     same flow is intended to work modulo different levels of physical
@@ -75,9 +87,12 @@ def PCF_Dialect : Dialect {
                        |
              Vectorize | // WriteOps vectorize
                        |
-             Bufferize | // PCF on Memref
+             Bufferize | // PCF tensor -> pcf.sref
+                       | // becomes memref -> sref
                        |
-            ResolvePCF |
+         ResolveTokens |
+          SRefToMemRef | // pcf.sref -> memref
+              LowerPCF | // pcf -> scf/cf
                        |
            v-----------+-----------v
            | SCF+GPU+vector+memref |
@@ -134,6 +149,7 @@ def PCF_UniqueToken : TypeDef<PCF_Dialect, "UniqueToken", []> {
      private:
       std::atomic<int> counter;
       int size;
+      bool sentSignal = false;
     }
     ```
 
@@ -160,16 +176,24 @@ def PCF_SingleUseToken : TypeDef<PCF_Dialect, "SingleUseToken", []> {
     ```c++
     class SingleUseToken {
       void signal() {
-        ++(*counter);
+        if (!sentSignal) {
+          ++(*counter);
+          sentSignal = true;
+        }
       }
       void wait() {
         while (*count < size) {
           sleep();
         }
       }
+      void barrier() {
+        signal();
+        wait();
+      }
      private:
       std::atomic<int> *counter;
       int size;
+      bool sentSignal = false;
     }
     ```
 
@@ -254,7 +278,7 @@ def PCF_DummyScopeAttr :
 
   let extraClassDeclaration = [{
     SmallVector<Value> getWorkerIDs(OpBuilder&, Location, ArrayRef<OpFoldResult>) {
-      assert(false && "how did you get here?");
+      assert(false && "why are you here?");
       return {};
     }
   }];
