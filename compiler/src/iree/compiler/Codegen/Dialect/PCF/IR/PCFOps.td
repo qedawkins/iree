@@ -64,12 +64,12 @@ def GenericOp : PCF_Op<"generic", [
       %1 = ... : tensor<?x?>
       %d0, %d1 = ... : index
       %n = ... : index
-      %2:4 = pcf.generic scope(#foo.scope) count(%n) {attr-dict-with-keyword}
+      %2:4 = pcf.generic scope(#foo.scope) count(%n)
         initialize(%ref = %0, %ref_1, %ref_2, %ref_3 = %1)[%num_threads: index]
                 : (!pcf.sref<?, #foo.scope>, !pcf.sref<?, #foo.scope>, !pcf.sref<?x?, #foo.scope>, !pcf.sref<?x?, #foo.scope>)
                -> (tensor<?>, tensor<?>{%d0}, tensor<?x?>{%d0, %d1}, tensor<?x?>) {
         ...
-      }
+      } {attr-dict-with-keyword}
     ```
   }];
   let arguments = (ins
@@ -97,19 +97,21 @@ def GenericOp : PCF_Op<"generic", [
   let hasVerifier = 1;
 
   // The default builder does not add the proper body BBargs, roll our own.
-  // let skipDefaultBuilders = 1;
+  let skipDefaultBuilders = 1;
   let builders = [
+    // Builder with no return values.
+    OpBuilder<(ins "ScopeAttr":$scope, "ValueRange":$count)>,
     // Builder with return types inferred from inits.
-    OpBuilder<(ins "ScopeAttr":$scope, "ArrayRef<Value>":$count,
-                   "ArrayRef<Value>":$inits)>,
+    OpBuilder<(ins "ScopeAttr":$scope, "ValueRange":$count,
+                   "ValueRange":$inits)>,
     // Builder with no inits.
     OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
-                   "ArrayRef<Value>":$count,
-                   "ArrayRef<Value>":$dynamic_sizes)>,
+                   "ValueRange":$count,
+                   "ValueRange":$dynamic_sizes)>,
     // Builder with everything.
     OpBuilder<(ins "TypeRange":$result_types, "ScopeAttr":$scope,
-                   "ArrayRef<Value>":$count, "ArrayRef<Value>":$inits,
-                   "ArrayRef<Value>":$dynamic_sizes, "ArrayRef<bool>":$is_tied)>,
+                   "ValueRange":$count, "ValueRange":$inits,
+                   "ValueRange":$dynamic_sizes, "ArrayRef<bool>":$is_tied)>,
   ];
 
   let extraClassDeclaration = [{

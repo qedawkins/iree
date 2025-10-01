@@ -309,8 +309,13 @@ LogicalResult GenericOp::verify() {
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
-                      ScopeAttr scope, ArrayRef<Value> count,
-                      ArrayRef<Value> inits) {
+                      ScopeAttr scope, ValueRange count) {
+  GenericOp::build(b, result, TypeRange(), scope, count, ArrayRef<Value>{},
+                   ArrayRef<Value>{}, ArrayRef<bool>{});
+}
+
+void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
+                      ScopeAttr scope, ValueRange count, ValueRange inits) {
   SmallVector<bool> isTied(inits.size(), true);
   SmallVector<Type> resultTypes =
       llvm::map_to_vector(inits, [](Value v) -> Type { return v.getType(); });
@@ -319,17 +324,17 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
-                      TypeRange resultTypes, ScopeAttr scope,
-                      ArrayRef<Value> count, ArrayRef<Value> dynamicSizes) {
+                      TypeRange resultTypes, ScopeAttr scope, ValueRange count,
+                      ValueRange dynamicSizes) {
   SmallVector<bool> isTied(resultTypes.size(), false);
   GenericOp::build(b, result, resultTypes, scope, count, ArrayRef<Value>{},
                    dynamicSizes, isTied);
 }
 
 void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
-                      TypeRange resultTypes, ScopeAttr scope,
-                      ArrayRef<Value> count, ArrayRef<Value> inits,
-                      ArrayRef<Value> dynamicSizes, ArrayRef<bool> isTied) {
+                      TypeRange resultTypes, ScopeAttr scope, ValueRange count,
+                      ValueRange inits, ValueRange dynamicSizes,
+                      ArrayRef<bool> isTied) {
 
   result.addAttribute(GenericOp::getScopeAttrName(result.name), scope);
   result.addOperands(count);

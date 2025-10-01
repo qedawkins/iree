@@ -41,6 +41,7 @@ iree_cc_library(
     MLIRPass
     MLIRSCFDialect
     MLIRSupport
+    MLIRTransforms
     iree::compiler::Codegen::Dialect::PCF::IR
   PUBLIC
 )
