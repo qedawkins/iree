@@ -4,10 +4,15 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCF.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #define DEBUG_TYPE "iree-pcf-convert-sref-to-memref"
@@ -80,7 +85,37 @@ struct ConvertWriteSliceOp : public OpConversionPattern<PCF::WriteSliceOp> {
   LogicalResult
   matchAndRewrite(PCF::WriteSliceOp writeOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    return failure();
+    Value destSlice = memref::SubViewOp::create(
+        rewriter, writeOp.getLoc(), adaptor.getDest(),
+        writeOp.getMixedOffsets(), writeOp.getMixedSizes(),
+        writeOp.getMixedStrides());
+    return llvm::TypeSwitch<Type, LogicalResult>(writeOp.getSourceType())
+        .Case<RankedTensorType>([&](RankedTensorType tensor) {
+          rewriter.replaceOpWithNewOp<IREE::Codegen::StoreToBufferOp>(
+              writeOp, writeOp.getSource(), destSlice);
+          return success();
+        })
+        .Case<MemRefType>([&](MemRefType memref) {
+          rewriter.replaceOpWithNewOp<memref::CopyOp>(
+              writeOp, writeOp.getSource(), destSlice);
+          return success();
+        })
+        .Case<VectorType>([&](VectorType vector) {
+          SmallVector<bool> inBounds(vector.getRank(), true);
+          for (auto [inBound, vecSize, storeSize] : llvm::zip_equal(
+                   inBounds, vector.getShape(), writeOp.getStaticSizes())) {
+            // Since vectors must be statically sized we can just check for
+            // equality here.
+            inBound = vecSize == storeSize;
+          }
+          SmallVector<Value> offsets(
+              vector.getRank(),
+              arith::ConstantIndexOp::create(rewriter, writeOp.getLoc(), 0));
+          rewriter.replaceOpWithNewOp<vector::TransferWriteOp>(
+              writeOp, writeOp.getSource(), destSlice, offsets, inBounds);
+          return success();
+        })
+        .Default([](Type) { return failure(); });
   }
 };
 
