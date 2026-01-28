@@ -294,6 +294,40 @@ static LogicalResult bufferizeLinalgExtOp(RewriterBase &rewriter,
     return success();
   }
 
+  // MapScatterOp supports mixed semantics (tensor input with memref output).
+  // In this case, we just need to bufferize the input tensor.
+  if (auto mapScatterOp = dyn_cast<IREE::LinalgExt::MapScatterOp>(*op)) {
+    if (!dspOp.hasPureTensorSemantics()) {
+      // Mixed semantics: tensor input, memref output.
+      Value input = mapScatterOp.getInput();
+      if (!isa<TensorType>(input.getType())) {
+        // Input is already a memref, nothing to do.
+        return success();
+      }
+      // Bufferize the input tensor.
+      FailureOr<Value> maybeInputBuffer =
+          getBuffer(rewriter, input, options, state);
+      if (failed(maybeInputBuffer)) {
+        return failure();
+      }
+      // Create a new map_scatter with the bufferized input.
+      auto newOp = IREE::LinalgExt::MapScatterOp::create(
+          rewriter, op->getLoc(), TypeRange{}, *maybeInputBuffer,
+          mapScatterOp.getOutput());
+      rewriter.inlineRegionBefore(mapScatterOp.getTransformationRegion(),
+                                  newOp.getTransformationRegion(),
+                                  newOp.getTransformationRegion().end());
+      rewriter.eraseOp(op);
+      return success();
+    }
+  }
+
+  // Ensure op has only tensors. Allow mixed tensor-buffer mode on a per-need
+  // basis.
+  if (!dspOp.hasPureTensorSemantics()) {
+    return op->emitError() << "op does not have tensor semantics";
+  }
+
   // New input operands for the cloned op.
   SmallVector<Value> newOperands, newOutputBuffers;
   AnalysisState analysisState(options);

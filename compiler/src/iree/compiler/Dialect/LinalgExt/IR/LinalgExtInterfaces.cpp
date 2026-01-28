@@ -25,7 +25,8 @@ IREE::LinalgExt::detail::verifyLinalgExtOpInterface(Operation *op) {
         "implement DestinationStyleOpInterface");
   }
   // MapScatterOp allows mixed semantics (tensor input with memref output, or
-  // memref input with tensor output).
+  // memref input with tensor output) to enable fusion with store_to_buffer
+  // and load_from_buffer without allocating intermediate buffers.
   if (!isa<MapScatterOp>(op)) {
     if (!dpsOp.hasPureBufferSemantics() && !dpsOp.hasPureTensorSemantics()) {
       return op->emitOpError(
