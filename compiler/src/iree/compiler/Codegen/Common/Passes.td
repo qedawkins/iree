@@ -591,10 +591,11 @@ def FusePCFStoresPass
     : Pass<"iree-codegen-fuse-pcf-stores", ""> {
   let summary = "Fuse store operations into PCF parallel ops";
   let description = [{
-    Fuses `iree_codegen.store_to_buffer` and `iree_tensor_ext.dispatch_tensor_store`
-    operations with their producer `pcf.loop` or `pcf.generic` ops. The pattern
-    converts `pcf.write_slice` operations inside the PCF region to direct buffer
-    writes or dispatch tensor stores.
+    Fuses `iree_codegen.store_to_buffer`, `iree_tensor_ext.dispatch_tensor_store`,
+    and `iree_linalg_ext.map_scatter` operations with their producer `pcf.loop`
+    or `pcf.generic` ops. The pattern converts `pcf.write_slice` operations
+    inside the PCF region to direct buffer writes, scatter operations, or
+    dispatch tensor stores.
 
     This eliminates unnecessary tensor materializations by writing directly to
     the final destination buffer inside the parallel loop body.
@@ -603,6 +604,7 @@ def FusePCFStoresPass
     "iree_compiler::IREE::PCF::PCFDialect",
     "iree_compiler::IREE::Codegen::IREECodegenDialect",
     "iree_compiler::IREE::TensorExt::IREETensorExtDialect",
+    "iree_compiler::IREE::LinalgExt::IREELinalgExtDialect",
     "memref::MemRefDialect",
     "vector::VectorDialect",
     "affine::AffineDialect"
