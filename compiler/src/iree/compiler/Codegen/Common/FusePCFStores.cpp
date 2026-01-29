@@ -9,6 +9,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
+#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/ViewLikeInterfaceUtils.h"
@@ -241,6 +242,119 @@ struct FuseDispatchTensorStore
   }
 };
 
+/// Clone a map_scatter operation with a new input (tile) and output (buffer),
+/// adjusting the transformation body to add the given offsets to the block
+/// arguments. This transforms:
+///   map_scatter %full_tensor into %buffer { ^bb(%i, %j): ... yield %out_i, %out_j, %mask }
+/// Into:
+///   map_scatter %tile into %buffer { ^bb(%i, %j): %adj_i = %i + off_i, %adj_j = %j + off_j, ... }
+static IREE::LinalgExt::MapScatterOp
+cloneMapScatterWithOffsets(IREE::LinalgExt::MapScatterOp origOp,
+                           Value newInput, Value newOutput,
+                           ArrayRef<OpFoldResult> offsets,
+                           PatternRewriter &rewriter) {
+  Location loc = origOp.getLoc();
+
+  // Create the new map_scatter with no results (buffer semantics).
+  auto newMapScatter = IREE::LinalgExt::MapScatterOp::create(
+      rewriter, loc, /*resultTypes=*/TypeRange{}, newInput, newOutput);
+
+  // Clone the transformation region from the original.
+  IRMapping mapping;
+  origOp.getTransformationRegion().cloneInto(&newMapScatter.getTransformationRegion(),
+                                              mapping);
+
+  // Insert offset adjustments at the start of the transformation body.
+  // The new block args represent indices in the tile, we need to add offsets
+  // to get indices in the full tensor (which the original body expects).
+  int64_t numIndices = origOp.getInputRank();
+  newMapScatter.insertTransformationAtStart(
+      rewriter,
+      [&](ArrayRef<BlockArgument> tileIndices) -> SmallVector<Value> {
+        // insertTransformationAtStart sets the insertion point to the start of
+        // the transformation body before calling this lambda.
+        SmallVector<Value> adjustedIndices;
+        for (auto [tileIdx, offset] :
+             llvm::zip_equal(tileIndices, offsets)) {
+          Value offsetVal = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                            offset);
+          Value adjusted =
+              arith::AddIOp::create(rewriter, loc, tileIdx, offsetVal);
+          adjustedIndices.push_back(adjusted);
+        }
+        return adjustedIndices;
+      },
+      numIndices);
+
+  return newMapScatter;
+}
+
+struct FuseMapScatterIntoPCF
+    : public OpRewritePattern<IREE::LinalgExt::MapScatterOp> {
+  using OpRewritePattern<IREE::LinalgExt::MapScatterOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(IREE::LinalgExt::MapScatterOp mapScatterOp,
+                                PatternRewriter &rewriter) const override {
+    // Check map_scatter has mixed semantics: tensor input, memref output.
+    if (!isa<RankedTensorType>(mapScatterOp.getInputType()) ||
+        !isa<MemRefType>(mapScatterOp.getOutputType())) {
+      return failure();
+    }
+
+    // Get producer PCF op.
+    Value tensorInput = mapScatterOp.getInput();
+    Operation *definingOp = tensorInput.getDefiningOp();
+    auto producerLoop = dyn_cast_if_present<IREE::PCF::LoopOp>(definingOp);
+    auto producerGeneric =
+        dyn_cast_if_present<IREE::PCF::GenericOp>(definingOp);
+    if (!producerLoop && !producerGeneric) {
+      return failure();
+    }
+
+    // Check that the buffer operand dominates the producer.
+    DominanceInfo domInfo(definingOp);
+    Value buffer = mapScatterOp.getOutput();
+    if (!domInfo.dominates(buffer, definingOp)) {
+      return failure();
+    }
+
+    // Get the write_slice ops that produce the result consumed by map_scatter.
+    OpResult result = cast<OpResult>(tensorInput);
+    FailureOr<SmallVector<IREE::PCF::WriteSliceOp>> maybeSlices = failure();
+    if (producerLoop) {
+      maybeSlices = getProducerSlices(producerLoop, result);
+    } else {
+      assert(producerGeneric && "unexpected undefined generic");
+      maybeSlices = getProducerSlices(producerGeneric, result);
+    }
+    if (failed(maybeSlices)) {
+      return failure();
+    }
+
+    SmallVector<IREE::PCF::WriteSliceOp> writeSlices = *maybeSlices;
+    if (writeSlices.empty()) {
+      return failure();
+    }
+
+    // For each write_slice, clone map_scatter with offset adjustment.
+    for (IREE::PCF::WriteSliceOp writeSlice : writeSlices) {
+      rewriter.setInsertionPoint(writeSlice);
+
+      // Get the tile being written and its offsets.
+      Value tile = writeSlice.getSource();
+      SmallVector<OpFoldResult> offsets = writeSlice.getMixedOffsets();
+
+      // Clone the map_scatter with the tile as input and buffer as output,
+      // adjusting the transformation body to account for tile offsets.
+      cloneMapScatterWithOffsets(mapScatterOp, tile, buffer, offsets, rewriter);
+    }
+
+    // Erase the original map_scatter.
+    rewriter.eraseOp(mapScatterOp);
+    return success();
+  }
+};
+
 struct FusePCFStoresPass final
     : impl::FusePCFStoresPassBase<FusePCFStoresPass> {
   void runOnOperation() override {
@@ -248,7 +362,7 @@ struct FusePCFStoresPass final
     MLIRContext *context = &getContext();
 
     RewritePatternSet patterns(context);
-    patterns.add<FuseStoreToBuffer, FuseDispatchTensorStore>(context);
+    patterns.add<FuseStoreToBuffer, FuseDispatchTensorStore, FuseMapScatterIntoPCF>(context);
     IREE::PCF::populatePCFDropUnusedResultPatterns(patterns);
     if (failed(applyPatternsGreedily(op, std::move(patterns)))) {
       return signalPassFailure();
