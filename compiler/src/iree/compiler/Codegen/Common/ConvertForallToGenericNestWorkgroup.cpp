@@ -13,42 +13,41 @@
 
 namespace mlir::iree_compiler {
 
-#define GEN_PASS_DEF_TESTCONVERTFORALLTOGENERICNESTWORKGROUPPASS
+#define GEN_PASS_DEF_CONVERTFORALLTOGENERICNESTWORKGROUPPASS
 #include "iree/compiler/Codegen/Common/Passes.h.inc"
 
 namespace {
 
-/// Returns true if the forall op has LocalMappingAttr mapping attributes,
-/// or the mapping is empty/not present.
-static bool hasEmptyOrLocalMapping(scf::ForallOp forallOp) {
+/// Returns true if the forall op has WorkgroupMappingAttr mapping attributes.
+static bool hasWorkgroupMapping(scf::ForallOp forallOp) {
   std::optional<ArrayAttr> mapping = forallOp.getMapping();
   if (!mapping || mapping->empty()) {
-    return true;
+    return false;
   }
   return llvm::all_of(mapping.value(),
-                      llvm::IsaPred<IREE::Codegen::LocalMappingAttr>);
+                      llvm::IsaPred<IREE::Codegen::WorkgroupMappingAttr>);
 }
 
-struct TestConvertForallToGenericNestWorkgroupPass final
-    : public impl::TestConvertForallToGenericNestWorkgroupPassBase<
-          TestConvertForallToGenericNestWorkgroupPass> {
+struct ConvertForallToGenericNestWorkgroupPass final
+    : public impl::ConvertForallToGenericNestWorkgroupPassBase<
+          ConvertForallToGenericNestWorkgroupPass> {
   using Base::Base;
 
   void runOnOperation() override {
     MLIRContext *ctx = &getContext();
 
-    // Create workgroup scope with the specified linearization setting.
+    // Always use linearized workgroup scope (1 id).
     // Interface is implemented via external models hence the cast.
     auto scope = cast<IREE::PCF::ScopeAttrInterface>(
-        IREE::Codegen::WorkgroupScopeAttr::get(ctx, linearize));
+        IREE::Codegen::WorkgroupScopeAttr::get(ctx, /*linearize=*/true));
 
     SmallVector<IREE::PCF::ScopeAttrInterface> scopes = {scope};
 
     IRRewriter rewriter(ctx);
     SmallVector<scf::ForallOp> forallOps;
     getOperation()->walk([&](scf::ForallOp forallOp) {
-      // Only convert foralls with empty mapping or local_mapping attributes.
-      if (hasEmptyOrLocalMapping(forallOp)) {
+      // Only convert foralls with workgroup mapping attributes.
+      if (hasWorkgroupMapping(forallOp)) {
         forallOps.push_back(forallOp);
       }
     });

@@ -16,7 +16,7 @@
 
 namespace mlir::iree_compiler::IREE::GPU {
 
-#define GEN_PASS_DEF_TESTCONVERTFORALLTOGENERICNESTGPUPASS
+#define GEN_PASS_DEF_CONVERTFORALLTOGENERICNESTGPUPASS
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h.inc"
 
 namespace {
@@ -32,9 +32,9 @@ static bool hasThreadMapping(scf::ForallOp forallOp) {
                       llvm::IsaPred<gpu::GPUThreadMappingAttr>);
 }
 
-struct TestConvertForallToGenericNestGPUPass final
-    : public impl::TestConvertForallToGenericNestGPUPassBase<
-          TestConvertForallToGenericNestGPUPass> {
+struct ConvertForallToGenericNestGPUPass final
+    : public impl::ConvertForallToGenericNestGPUPassBase<
+          ConvertForallToGenericNestGPUPass> {
   using Base::Base;
 
   void runOnOperation() override {

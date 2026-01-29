@@ -122,7 +122,7 @@ def PCF_ScopeAttrInterface : AttrInterface<"ScopeAttrInterface"> {
         in potentially duplicated execution over the unaccounted for
         dimension(s).
 
-        For example, a GPU thread scope typically returns 3 (x, y, z), while
+        For example, a workgroup scope typically returns 3 (x, y, z), while
         a sequential scope returns 1.
       }],
       /*retTy=*/"int64_t",

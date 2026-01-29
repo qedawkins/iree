@@ -10,7 +10,7 @@
 include "mlir/Pass/PassBase.td"
 
 def TestConvertForallToLoopsPass : Pass<"iree-pcf-test-convert-forall-to-loops", ""> {
-  let summary = "Test pass for convertForallToPCF transform";
+  let summary = "Test pass for convertForallToPCFLoop transform";
   let description = [{
     Test pass for converting `scf.forall` ops without mapping attributes or
     with `iree_codegen.local_mapping` attributes to `pcf.loop` ops with
@@ -21,13 +21,13 @@ def TestConvertForallToLoopsPass : Pass<"iree-pcf-test-convert-forall-to-loops",
     mapping attributes or with local_mapping attributes are converted.
 
     The output replaces each matching `scf.forall` with a `pcf.loop`:
-    - Iteration bounds come from the forall's upper/lower bounds and steps
-    - `tensor.parallel_insert_slice` ops become `pcf.write_slice` ops
-    - Shared output tensors become tied `pcf.sref` region arguments
-    - The scope is set to `#pcf.sequential` for sequential execution
+    - Iteration bounds come from the forall's upper/lower bounds and steps.
+    - `tensor.parallel_insert_slice` ops become `pcf.write_slice` ops.
+    - Shared output tensors become tied `pcf.sref` region arguments.
+    - The scope is set to `#pcf.sequential` for sequential execution.
 
     The underlying conversion pattern is exposed separately via
-    `convertForallToPCF()` with callbacks for mapping processor IDs to custom
+    `convertForallToPCFLoop()` with callbacks for mapping processor IDs to custom
     execution scopes.
   }];
   let dependentDialects = ["::mlir::iree_compiler::IREE::PCF::PCFDialect"];
@@ -161,13 +161,14 @@ def TestConvertForallToGenericNestPass :
   let description = [{
     Test pass that converts `scf.forall` ops to a nest of `pcf.generic` ops
     with an inner `scf.forall` handling spillover iterations. Each scope
-    in the provided list generates one `pcf.generic` op (outermost first).
-    Worker IDs are linearized, chunk bounds computed for work distribution,
-    and delinearized back to multi-dimensional forall bounds.
+    generates one `pcf.generic` op (outermost first). Worker IDs are
+    linearized, chunk bounds computed for work distribution, and
+    delinearized back to multi-dimensional forall bounds.
   }];
   let options = [
-    ListOption<"scopes", "scopes", "std::string",
-               "Comma-separated list of scope names (e.g., 'sequential')">
+    Option<"numSequentialScopes", "num-sequential-scopes", "int64_t",
+           /*default=*/"1",
+           "Number of pcf.sequential scopes to use">
   ];
   let dependentDialects = [
     "::mlir::iree_compiler::IREE::PCF::PCFDialect",
