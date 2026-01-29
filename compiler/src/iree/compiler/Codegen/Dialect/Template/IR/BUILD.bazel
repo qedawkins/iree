@@ -1,0 +1,137 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+load("//build_tools/bazel:build_defs.oss.bzl", "iree_compiler_cc_library", "iree_gentbl_cc_library", "iree_tablegen_doc", "iree_td_library")
+load("//build_tools/bazel:enforce_glob.bzl", "enforce_glob")
+
+package(
+    default_visibility = ["//visibility:public"],
+    features = ["layering_check"],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+iree_td_library(
+    name = "td_files",
+    srcs = enforce_glob(
+        # keep sorted
+        [
+            "TemplateBase.td",
+            "TemplateOps.td",
+        ],
+        include = ["*.td"],
+    ),
+    deps = [
+        "@llvm-project//mlir:BuiltinDialectTdFiles",
+        "@llvm-project//mlir:ControlFlowInterfacesTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+iree_compiler_cc_library(
+    name = "IR",
+    srcs = [
+        "TemplateAttrs.cpp",
+        "TemplateAttrs.cpp.inc",
+        "TemplateDialect.cpp",
+        "TemplateOps.cpp",
+        "TemplateOps.cpp.inc",
+        "TemplateTypes.cpp",
+        "TemplateTypes.cpp.inc",
+    ],
+    hdrs = [
+        "Template.h",
+        "TemplateAttrs.h",
+        "TemplateAttrs.h.inc",
+        "TemplateDialect.h",
+        "TemplateOps.h",
+        "TemplateOps.h.inc",
+        "TemplateTypes.h",
+        "TemplateTypes.h.inc",
+    ],
+    deps = [
+        ":TemplateOpsGen",
+        ":TemplateTypesGen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InliningUtils",
+        "@llvm-project//mlir:Parser",
+        "@llvm-project//mlir:SideEffectInterfaces",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+    ],
+)
+
+iree_gentbl_cc_library(
+    name = "TemplateOpsGen",
+    tbl_outs = [
+        (
+            ["--gen-op-decls"],
+            "TemplateOps.h.inc",
+        ),
+        (
+            ["--gen-op-defs"],
+            "TemplateOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "TemplateOps.td",
+    deps = [":td_files"],
+)
+
+iree_gentbl_cc_library(
+    name = "TemplateTypesGen",
+    tbl_outs = [
+        (
+            [
+                "--gen-attrdef-decls",
+                "--attrdefs-dialect=template",
+            ],
+            "TemplateAttrs.h.inc",
+        ),
+        (
+            [
+                "--gen-attrdef-defs",
+                "--attrdefs-dialect=template",
+            ],
+            "TemplateAttrs.cpp.inc",
+        ),
+        (
+            [
+                "--gen-typedef-decls",
+                "--typedefs-dialect=template",
+            ],
+            "TemplateTypes.h.inc",
+        ),
+        (
+            [
+                "--gen-typedef-defs",
+                "--typedefs-dialect=template",
+            ],
+            "TemplateTypes.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "TemplateBase.td",
+    deps = [":td_files"],
+)
+
+iree_tablegen_doc(
+    name = "TemplateDialectDocGen",
+    category = "Dialects",
+    tbl_outs = [
+        (
+            [
+                "--gen-dialect-doc",
+                "--dialect=template",
+            ],
+            "TemplateDialect.md",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "TemplateOps.td",
+    deps = [":td_files"],
+)
