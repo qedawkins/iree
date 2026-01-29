@@ -138,13 +138,13 @@ static LogicalResult matchForallConversion(scf::ForallOp forallOp) {
 }
 
 //===----------------------------------------------------------------------===//
-// scf.forall -> pcf.loop
+// scf.forall -> pcf.loop Implementation
 //===----------------------------------------------------------------------===//
 
-static PCF::LoopOp convertForallToPCFImpl(RewriterBase &rewriter,
-                                          scf::ForallOp forallOp,
-                                          PCF::ScopeAttrInterface scope,
-                                          int64_t numIds) {
+static PCF::LoopOp convertForallToPCFLoopImpl(RewriterBase &rewriter,
+                                              scf::ForallOp forallOp,
+                                              PCF::ScopeAttrInterface scope,
+                                              int64_t numIds) {
   assert(succeeded(matchForallConversion(forallOp)) &&
          "converting unsupported forall op");
 
@@ -289,114 +289,16 @@ static PCF::LoopOp convertForallToPCFImpl(RewriterBase &rewriter,
   return loopOp;
 }
 
-struct TestConvertForallToLoopsPass final
-    : impl::TestConvertForallToLoopsPassBase<TestConvertForallToLoopsPass> {
-  void runOnOperation() override {
-    SmallVector<scf::ForallOp> opsToConvert;
-    getOperation()->walk([&](scf::ForallOp forallOp) {
-      // Empty mapping, no mapping, and local mapping all map to
-      // `pcf.sequential`. If it is a local mapping, then the lowering pattern
-      // will automatically handle any mapping permutation based on the mapping
-      // attribute's relative id.
-      if (hasEmptyOrLocalMapping(forallOp)) {
-        opsToConvert.push_back(forallOp);
-      }
-    });
-
-    IRRewriter rewriter(getOperation());
-    PCF::ScopeAttrInterface sequentialScope =
-        PCF::SequentialAttr::get(&getContext());
-    for (auto forallOp : opsToConvert) {
-      rewriter.setInsertionPoint(forallOp);
-      if (failed(convertForallToPCF(rewriter, forallOp, sequentialScope))) {
-        forallOp->emitOpError("failed to convert forall");
-        return signalPassFailure();
-      }
-    }
-  }
-};
-
 //===----------------------------------------------------------------------===//
-// scf.forall -> pcf.generic nest
+// scf.forall -> pcf.generic nest Implementation
 //===----------------------------------------------------------------------===//
 
-struct TestConvertForallToGenericNestPass final
-    : impl::TestConvertForallToGenericNestPassBase<
-          TestConvertForallToGenericNestPass> {
-  using Base::Base;
-
-  void runOnOperation() override {
-    MLIRContext *ctx = &getContext();
-
-    // Parse scope names to attributes.
-    SmallVector<PCF::ScopeAttrInterface> scopeAttrs;
-    for (const std::string &scopeName : scopes) {
-      if (scopeName == "sequential") {
-        scopeAttrs.push_back(PCF::SequentialAttr::get(ctx));
-      } else {
-        emitError(getOperation()->getLoc()) << "unknown scope: " << scopeName;
-        return signalPassFailure();
-      }
-    }
-
-    if (scopeAttrs.empty()) {
-      emitError(getOperation()->getLoc()) << "no scopes specified";
-      return signalPassFailure();
-    }
-
-    IRRewriter rewriter(ctx);
-    SmallVector<scf::ForallOp> forallOps;
-    getOperation()->walk([&](scf::ForallOp forallOp) {
-      // Only convert foralls with empty mapping or local_mapping attributes.
-      if (hasEmptyOrLocalMapping(forallOp)) {
-        forallOps.push_back(forallOp);
-      }
-    });
-
-    for (scf::ForallOp forallOp : forallOps) {
-      rewriter.setInsertionPoint(forallOp);
-      FailureOr<PCF::GenericOp> result =
-          convertForallToGenericNest(rewriter, forallOp, scopeAttrs);
-      if (failed(result)) {
-        forallOp.emitError("failed to convert forall to generic nest");
-        return signalPassFailure();
-      }
-      // Replace forall results with generic results.
-      rewriter.replaceOp(forallOp, result->getResults());
-    }
-  }
-};
-
-} // namespace
-
-//===----------------------------------------------------------------------===//
-// Public API: scf.forall -> pcf.loop
-//===----------------------------------------------------------------------===//
-
-FailureOr<PCF::LoopOp> convertForallToPCF(RewriterBase &rewriter,
-                                          scf::ForallOp forallOp,
-                                          PCF::ScopeAttrInterface scope,
-                                          int64_t numIds) {
-  if (failed(matchForallConversion(forallOp))) {
-    return failure();
-  }
-  return convertForallToPCFImpl(rewriter, forallOp, scope, numIds);
-}
-
-//===----------------------------------------------------------------------===//
-// Public API: scf.forall -> pcf.generic nest
-//===----------------------------------------------------------------------===//
-
-FailureOr<PCF::GenericOp>
-convertForallToGenericNest(RewriterBase &rewriter, scf::ForallOp forallOp,
-                           ArrayRef<PCF::ScopeAttrInterface> scopes) {
-  if (scopes.empty()) {
-    return forallOp.emitError("at least one scope required");
-  }
-
-  if (failed(matchForallConversion(forallOp))) {
-    return failure();
-  }
+static PCF::GenericOp
+convertForallToGenericNestImpl(RewriterBase &rewriter, scf::ForallOp forallOp,
+                               ArrayRef<PCF::ScopeAttrInterface> scopes) {
+  assert(succeeded(matchForallConversion(forallOp)) &&
+         "converting unsupported forall op");
+  assert(!scopes.empty() && "at least one scope required");
 
   Location loc = forallOp.getLoc();
   MLIRContext *ctx = rewriter.getContext();
@@ -637,13 +539,124 @@ convertForallToGenericNest(RewriterBase &rewriter, scf::ForallOp forallOp,
       PCF::ReturnOp::create(rewriter, loc);
       current = generic.getOperation();
     } else {
-      // break on the first non-generic (should be the parent of all the IR we
+      // Break on the first non-generic (should be the parent of all the IR we
       // just created).
       break;
     }
   }
 
   return outermostGeneric;
+}
+
+//===----------------------------------------------------------------------===//
+// scf.forall -> pcf.loop Pass
+//===----------------------------------------------------------------------===//
+
+struct TestConvertForallToLoopsPass final
+    : impl::TestConvertForallToLoopsPassBase<TestConvertForallToLoopsPass> {
+  void runOnOperation() override {
+    SmallVector<scf::ForallOp> opsToConvert;
+    getOperation()->walk([&](scf::ForallOp forallOp) {
+      // Empty mapping, no mapping, and local mapping all map to
+      // `pcf.sequential`. If it is a local mapping, then the lowering pattern
+      // will automatically handle any mapping permutation based on the mapping
+      // attribute's relative id.
+      if (hasEmptyOrLocalMapping(forallOp)) {
+        opsToConvert.push_back(forallOp);
+      }
+    });
+
+    IRRewriter rewriter(getOperation());
+    PCF::ScopeAttrInterface sequentialScope =
+        PCF::SequentialAttr::get(&getContext());
+    for (auto forallOp : opsToConvert) {
+      rewriter.setInsertionPoint(forallOp);
+      if (failed(convertForallToPCFLoop(rewriter, forallOp, sequentialScope))) {
+        forallOp->emitOpError("failed to convert forall");
+        return signalPassFailure();
+      }
+    }
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// scf.forall -> pcf.generic nest Pass
+//===----------------------------------------------------------------------===//
+
+struct TestConvertForallToGenericNestPass final
+    : impl::TestConvertForallToGenericNestPassBase<
+          TestConvertForallToGenericNestPass> {
+  using Base::Base;
+
+  void runOnOperation() override {
+    MLIRContext *ctx = &getContext();
+
+    // Build scope list based on numSequentialScopes.
+    SmallVector<PCF::ScopeAttrInterface> scopeAttrs;
+    for (int64_t i = 0; i < numSequentialScopes; ++i) {
+      scopeAttrs.push_back(PCF::SequentialAttr::get(ctx));
+    }
+
+    if (scopeAttrs.empty()) {
+      emitError(getOperation()->getLoc()) << "no scopes specified";
+      return signalPassFailure();
+    }
+
+    IRRewriter rewriter(ctx);
+    SmallVector<scf::ForallOp> forallOps;
+    getOperation()->walk([&](scf::ForallOp forallOp) {
+      // Only convert foralls with empty mapping or local_mapping attributes.
+      if (hasEmptyOrLocalMapping(forallOp)) {
+        forallOps.push_back(forallOp);
+      }
+    });
+
+    for (scf::ForallOp forallOp : forallOps) {
+      rewriter.setInsertionPoint(forallOp);
+      FailureOr<PCF::GenericOp> result =
+          convertForallToGenericNest(rewriter, forallOp, scopeAttrs);
+      if (failed(result)) {
+        forallOp.emitError("failed to convert forall to generic nest");
+        return signalPassFailure();
+      }
+      // Replace forall results with generic results.
+      rewriter.replaceOp(forallOp, result->getResults());
+    }
+  }
+};
+
+} // namespace
+
+//===----------------------------------------------------------------------===//
+// Public API: scf.forall -> pcf.loop
+//===----------------------------------------------------------------------===//
+
+FailureOr<PCF::LoopOp> convertForallToPCFLoop(RewriterBase &rewriter,
+                                              scf::ForallOp forallOp,
+                                              PCF::ScopeAttrInterface scope,
+                                              int64_t numIds) {
+  if (failed(matchForallConversion(forallOp))) {
+    return failure();
+  }
+  return convertForallToPCFLoopImpl(rewriter, forallOp, scope, numIds);
+}
+
+//===----------------------------------------------------------------------===//
+// Public API: scf.forall -> pcf.generic nest
+//===----------------------------------------------------------------------===//
+
+FailureOr<PCF::GenericOp>
+convertForallToGenericNest(RewriterBase &rewriter, scf::ForallOp forallOp,
+                           ArrayRef<PCF::ScopeAttrInterface> scopes) {
+  if (scopes.empty()) {
+    return forallOp.emitError("at least one scope required");
+  }
+
+  if (failed(matchForallConversion(forallOp))) {
+    return failure();
+  }
+
+  return convertForallToGenericNestImpl(rewriter, forallOp, scopes);
 }
 
 } // namespace mlir::iree_compiler::IREE::PCF

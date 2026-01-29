@@ -53,7 +53,7 @@ iree_cc_library(
     "ExpandUndistributedInnerTiles.cpp"
     "LowerIREEGPUOps.cpp"
     "Passes.cpp"
-    "TestConvertForallToGenericNestGPU.cpp"
+    "ConvertForallToGenericNestGPU.cpp"
     "Transforms.cpp"
     "UnrollToIntrinsics.cpp"
     "VectorizeIREEGPUOps.cpp"

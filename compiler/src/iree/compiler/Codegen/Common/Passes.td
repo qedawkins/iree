@@ -155,20 +155,15 @@ def ConvertWorkgroupForallToPCFPass
   let dependentDialects = ["iree_compiler::IREE::PCF::PCFDialect"];
 }
 
-def TestConvertForallToGenericNestWorkgroupPass
-    : InterfacePass<"iree-codegen-test-convert-forall-to-generic-nest-workgroup",
+def ConvertForallToGenericNestWorkgroupPass
+    : InterfacePass<"iree-codegen-convert-forall-to-generic-nest-workgroup",
                     "mlir::FunctionOpInterface"> {
-  let summary = "Test pass for convertForallToGenericNest with workgroup scope";
+  let summary = "Converts scf.forall ops with workgroup mapping to pcf.generic";
   let description = [{
-    Test pass that converts `scf.forall` ops with local_mapping attributes to a
-    `pcf.generic` op using workgroup scope. This tests the `getNativeNumProcessorIds`
-    interface method which returns 3 for non-linearized workgroup scope and 1 for
-    linearized workgroup scope.
+    Converts `scf.forall` ops with `#iree_codegen.workgroup_mapping` attributes
+    to a `pcf.generic` op using workgroup scope. The pass always linearizes
+    workgroup IDs to a single dimension.
   }];
-  let options = [
-    Option<"linearize", "linearize", "bool", /*default=*/"false",
-           "Use linearized workgroup scope (1 id) instead of 3 ids">
-  ];
   let dependentDialects = [
     "iree_compiler::IREE::PCF::PCFDialect",
     "arith::ArithDialect",
