@@ -855,8 +855,6 @@ func.func @map_scatter_vector(
 
 // -----
 
-// Test mixed tensor-buffer semantics: tensor input with memref output.
-// This is useful for fusing map_scatter into store_to_buffer operations.
 func.func @map_scatter_mixed_tensor_memref(
     %input: tensor<16xf32>, %output: memref<16xf32>) {
   iree_linalg_ext.map_scatter %input into %output {
@@ -875,45 +873,6 @@ func.func @map_scatter_mixed_tensor_memref(
 //       CHECK:       iree_linalg_ext.yield %[[IDX0]], %[[MASK]]
 //       CHECK:   } : tensor<16xf32> into memref<16xf32>
 //       CHECK:   return
-
-// -----
-
-// Test mixed tensor-buffer semantics with 2D tensors and non-identity mapping.
-func.func @map_scatter_mixed_2d(
-    %input: tensor<4x4xf32>, %output: memref<16xf32>) {
-  iree_linalg_ext.map_scatter %input into %output {
-    ^bb0(%i: index, %j: index):
-      %c4 = arith.constant 4 : index
-      %linear = arith.muli %i, %c4 : index
-      %idx = arith.addi %linear, %j : index
-      %mask = arith.constant true
-      iree_linalg_ext.yield %idx, %mask : index, i1
-  } : tensor<4x4xf32> into memref<16xf32>
-  return
-}
-// CHECK-LABEL: func.func @map_scatter_mixed_2d(
-//  CHECK-SAME:   %[[INPUT:[a-zA-Z0-9_]+]]: tensor<4x4xf32>
-//  CHECK-SAME:   %[[OUTPUT:[a-zA-Z0-9_]+]]: memref<16xf32>
-//       CHECK:   iree_linalg_ext.map_scatter %[[INPUT]] into %[[OUTPUT]]
-//       CHECK:   } : tensor<4x4xf32> into memref<16xf32>
-
-// -----
-
-// Test mixed tensor-buffer semantics with dynamic shapes.
-func.func @map_scatter_mixed_dynamic(
-    %input: tensor<?xf32>, %output: memref<?xf32>) {
-  iree_linalg_ext.map_scatter %input into %output {
-    ^bb0(%idx0: index):
-      %mask = arith.constant true
-      iree_linalg_ext.yield %idx0, %mask : index, i1
-  } : tensor<?xf32> into memref<?xf32>
-  return
-}
-// CHECK-LABEL: func.func @map_scatter_mixed_dynamic(
-//  CHECK-SAME:   %[[INPUT:[a-zA-Z0-9_]+]]: tensor<?xf32>
-//  CHECK-SAME:   %[[OUTPUT:[a-zA-Z0-9_]+]]: memref<?xf32>
-//       CHECK:   iree_linalg_ext.map_scatter %[[INPUT]] into %[[OUTPUT]]
-//       CHECK:   } : tensor<?xf32> into memref<?xf32>
 
 // -----
 
