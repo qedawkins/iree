@@ -507,3 +507,259 @@ func.func @no_fuse_dispatch_tensor_store_write_slice_non_unit_stride(%init: tens
 //       CHECK:   %[[RESULT:.+]] = pcf.loop
 //       CHECK:   iree_tensor_ext.dispatch.tensor.store %[[RESULT]]
 //       CHECK:   return
+
+// -----
+
+// =============================================================================
+// FuseMapScatterIntoPCF pattern tests
+// =============================================================================
+
+// Test fusing identity map_scatter with pcf.loop.
+// The map_scatter has tensor input and memref output, and passes indices
+// through unchanged with mask always true.
+func.func @fuse_map_scatter_identity(%init: tensor<32x64xf32>, %buffer: memref<32x64xf32>, %n: index) {
+  %result = pcf.loop scope(#pcf.sequential) count(%n)
+    execute(%ref = %init)[%i: index]
+         : (!pcf.sref<32x64xf32, sync(#pcf.sequential)>)
+        -> (tensor<32x64xf32>) {
+    %c0 = arith.constant 0.0 : f32
+    %tile = tensor.generate {
+    ^bb0(%ii: index, %jj: index):
+      tensor.yield %c0 : f32
+    } : tensor<8x8xf32>
+    pcf.write_slice %tile into %ref[%i, 0] [8, 8] [1, 1] : tensor<8x8xf32> into !pcf.sref<32x64xf32, sync(#pcf.sequential)>
+    pcf.return
+  }
+  // Identity map_scatter: indices pass through unchanged, mask always true.
+  iree_linalg_ext.map_scatter %result into %buffer {
+  ^bb0(%idx0: index, %idx1: index):
+    %true = arith.constant true
+    iree_linalg_ext.yield %idx0, %idx1, %true : index, index, i1
+  } : tensor<32x64xf32> into memref<32x64xf32>
+  return
+}
+
+// CHECK-LABEL: @fuse_map_scatter_identity(
+//  CHECK-SAME:   %[[INIT:[A-Za-z0-9_]+]]: tensor<32x64xf32>
+//  CHECK-SAME:   %[[BUFFER:[A-Za-z0-9_]+]]: memref<32x64xf32>
+//  CHECK-SAME:   %[[N:[A-Za-z0-9_]+]]: index
+
+//       CHECK:   pcf.loop scope(#pcf.sequential) count(%[[N]])
+//       CHECK:     execute[%[[I:[A-Za-z0-9_]+]]: index] {
+//       CHECK:     %[[TILE:.+]] = tensor.generate
+//       CHECK:     iree_linalg_ext.map_scatter %[[TILE]] into %[[BUFFER]] {
+//       CHECK:     ^bb0(%[[TI:[A-Za-z0-9_]+]]: index, %[[TJ:[A-Za-z0-9_]+]]: index):
+//       CHECK:       %[[ADJ_I:.+]] = arith.addi %[[TI]], %[[I]]
+//       CHECK:       iree_linalg_ext.yield %[[ADJ_I]], %[[TJ]],
+//       CHECK:     } : tensor<8x8xf32> into memref<32x64xf32>
+//       CHECK:     pcf.return
+//   CHECK-NOT:   iree_linalg_ext.map_scatter {{.*}} tensor<32x64xf32>
+//       CHECK:   return
+
+// -----
+
+// Test fusing map_scatter with non-identity transformation (transpose).
+func.func @fuse_map_scatter_transpose(
+    %init: tensor<64x32xf32>,
+    %buffer: memref<32x64xf32>,
+    %n: index) {
+  %result = pcf.loop scope(#pcf.sequential) count(%n)
+    execute(%ref = %init)[%i: index]
+         : (!pcf.sref<64x32xf32, sync(#pcf.sequential)>)
+        -> (tensor<64x32xf32>) {
+    %c0 = arith.constant 0.0 : f32
+    %tile = tensor.generate {
+    ^bb0(%ii: index, %jj: index):
+      tensor.yield %c0 : f32
+    } : tensor<8x8xf32>
+    pcf.write_slice %tile into %ref[%i, 0] [8, 8] [1, 1] : tensor<8x8xf32> into !pcf.sref<64x32xf32, sync(#pcf.sequential)>
+    pcf.return
+  }
+  // Transpose: swap indices, mask always true.
+  iree_linalg_ext.map_scatter %result into %buffer {
+  ^bb0(%idx0: index, %idx1: index):
+    %true = arith.constant true
+    iree_linalg_ext.yield %idx1, %idx0, %true : index, index, i1
+  } : tensor<64x32xf32> into memref<32x64xf32>
+  return
+}
+
+// CHECK-LABEL: @fuse_map_scatter_transpose
+//       CHECK:   pcf.loop scope(#pcf.sequential) count(%{{.+}})
+//       CHECK:     execute[%[[ID:[A-Za-z0-9_]+]]: index] {
+//       CHECK:     %[[TILE:.+]] = tensor.generate
+//       CHECK:     iree_linalg_ext.map_scatter %[[TILE]] into %{{.+}} {
+//       CHECK:     ^bb0(%[[TI:[A-Za-z0-9_]+]]: index, %[[TJ:[A-Za-z0-9_]+]]: index):
+// The first index (%TI) gets adjusted by the loop index.
+//       CHECK:       %[[ADJ:.+]] = arith.addi %[[TI]], %[[ID]]
+// Yield has transposed order: second tile index first, then adjusted first index.
+//       CHECK:       iree_linalg_ext.yield %[[TJ]], %[[ADJ]],
+//       CHECK:     } : tensor<8x8xf32> into memref<32x64xf32>
+//       CHECK:     pcf.return
+//   CHECK-NOT:   iree_linalg_ext.map_scatter {{.*}} tensor<64x32xf32>
+
+// -----
+
+// Test fusing map_scatter with pcf.generic producer.
+func.func @fuse_map_scatter_into_generic(
+    %init: tensor<32x64xf32>,
+    %buffer: memref<32x64xf32>) {
+  %result = pcf.generic scope(#pcf.sequential)
+    execute(%ref = %init)[%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<32x64xf32, sync(#pcf.sequential)>)
+        -> (tensor<32x64xf32>) {
+    %c0 = arith.constant 0.0 : f32
+    %tile = tensor.generate {
+    ^bb0(%ii: index, %jj: index):
+      tensor.yield %c0 : f32
+    } : tensor<8x8xf32>
+    pcf.write_slice %tile into %ref[%id0, %id1] [8, 8] [1, 1]
+        : tensor<8x8xf32> into !pcf.sref<32x64xf32, sync(#pcf.sequential)>
+    pcf.return
+  }
+  iree_linalg_ext.map_scatter %result into %buffer {
+  ^bb0(%idx0: index, %idx1: index):
+    %true = arith.constant true
+    iree_linalg_ext.yield %idx0, %idx1, %true : index, index, i1
+  } : tensor<32x64xf32> into memref<32x64xf32>
+  return
+}
+
+// CHECK-LABEL: @fuse_map_scatter_into_generic(
+//  CHECK-SAME:   %[[INIT:[A-Za-z0-9_]+]]: tensor<32x64xf32>
+//  CHECK-SAME:   %[[BUFFER:[A-Za-z0-9_]+]]: memref<32x64xf32>
+
+//       CHECK:   pcf.generic scope(#pcf.sequential)
+//       CHECK:     execute[%[[ID0:[A-Za-z0-9_]+]]: index, %[[ID1:[A-Za-z0-9_]+]]: index
+//       CHECK:     %[[TILE:.+]] = tensor.generate
+//       CHECK:     iree_linalg_ext.map_scatter %[[TILE]] into %[[BUFFER]] {
+//       CHECK:     ^bb0(%[[TI:[A-Za-z0-9_]+]]: index, %[[TJ:[A-Za-z0-9_]+]]: index):
+//       CHECK:       %[[ADJ_I:.+]] = arith.addi %[[TI]], %[[ID0]]
+//       CHECK:       %[[ADJ_J:.+]] = arith.addi %[[TJ]], %[[ID1]]
+//       CHECK:       iree_linalg_ext.yield %[[ADJ_I]], %[[ADJ_J]],
+//       CHECK:     } : tensor<8x8xf32> into memref<32x64xf32>
+//       CHECK:     pcf.return
+//   CHECK-NOT:   iree_linalg_ext.map_scatter {{.*}} tensor<32x64xf32>
+//       CHECK:   return
+
+// -----
+
+// Negative test: map_scatter with tensor input not from PCF op should not fuse.
+func.func @no_fuse_map_scatter_non_pcf_source(
+    %tensor: tensor<32x64xf32>,
+    %buffer: memref<32x64xf32>) {
+  iree_linalg_ext.map_scatter %tensor into %buffer {
+  ^bb0(%idx0: index, %idx1: index):
+    %true = arith.constant true
+    iree_linalg_ext.yield %idx0, %idx1, %true : index, index, i1
+  } : tensor<32x64xf32> into memref<32x64xf32>
+  return
+}
+
+// CHECK-LABEL: @no_fuse_map_scatter_non_pcf_source(
+//       CHECK:   iree_linalg_ext.map_scatter %{{.+}} into %{{.+}}
+//       CHECK:     : tensor<32x64xf32> into memref<32x64xf32>
+//       CHECK:   return
+
+// -----
+
+// Negative test: map_scatter with buffer not dominating producer should not fuse.
+func.func @no_fuse_map_scatter_buffer_not_dominating(
+    %init: tensor<32x64xf32>, %n: index) {
+  %result = pcf.loop scope(#pcf.sequential) count(%n)
+      execute(%ref = %init)[%i: index]
+           : (!pcf.sref<32x64xf32, sync(#pcf.sequential)>)
+          -> (tensor<32x64xf32>) {
+    %c0 = arith.constant 0.0 : f32
+    %tile = tensor.generate {
+    ^bb0(%ii: index, %jj: index):
+      tensor.yield %c0 : f32
+    } : tensor<8x8xf32>
+    pcf.write_slice %tile into %ref[%i, 0] [8, 8] [1, 1]
+        : tensor<8x8xf32> into !pcf.sref<32x64xf32, sync(#pcf.sequential)>
+    pcf.return
+  }
+  // Buffer allocated after producer - should not fuse.
+  %buffer = memref.alloc() : memref<32x64xf32>
+  iree_linalg_ext.map_scatter %result into %buffer {
+  ^bb0(%idx0: index, %idx1: index):
+    %true = arith.constant true
+    iree_linalg_ext.yield %idx0, %idx1, %true : index, index, i1
+  } : tensor<32x64xf32> into memref<32x64xf32>
+  return
+}
+
+// CHECK-LABEL: @no_fuse_map_scatter_buffer_not_dominating(
+//       CHECK:   %[[RESULT:.+]] = pcf.loop
+//       CHECK:   %[[BUFFER:.+]] = memref.alloc
+//       CHECK:   iree_linalg_ext.map_scatter %[[RESULT]] into %[[BUFFER]]
+//       CHECK:     : tensor<32x64xf32> into memref<32x64xf32>
+
+// -----
+
+// Negative test: map_scatter with non-return-only sync scope should not fuse.
+func.func @no_fuse_map_scatter_non_return_only_sync(
+    %init: tensor<32x64xf32>,
+    %buffer: memref<32x64xf32>,
+    %n: index) {
+  %result = pcf.loop scope(#pcf.sequential) count(%n)
+      execute(%ref = %init)[%i: index]
+           : (!pcf.sref<32x64xf32, #pcf.sequential>)
+          -> (tensor<32x64xf32>) {
+    %c0 = arith.constant 0.0 : f32
+    %tile = tensor.generate {
+    ^bb0(%ii: index, %jj: index):
+      tensor.yield %c0 : f32
+    } : tensor<8x8xf32>
+    // Non-return-only sync scope (uses #pcf.sequential instead of return_only_sync).
+    pcf.write_slice %tile into %ref[%i, 0] [8, 8] [1, 1]
+        : tensor<8x8xf32> into !pcf.sref<32x64xf32, #pcf.sequential>
+    pcf.return
+  }
+  iree_linalg_ext.map_scatter %result into %buffer {
+  ^bb0(%idx0: index, %idx1: index):
+    %true = arith.constant true
+    iree_linalg_ext.yield %idx0, %idx1, %true : index, index, i1
+  } : tensor<32x64xf32> into memref<32x64xf32>
+  return
+}
+
+// CHECK-LABEL: @no_fuse_map_scatter_non_return_only_sync(
+//       CHECK:   %[[RESULT:.+]] = pcf.loop
+//       CHECK:   iree_linalg_ext.map_scatter %[[RESULT]] into %{{.+}}
+//       CHECK:     : tensor<32x64xf32> into memref<32x64xf32>
+
+// -----
+
+// Negative test: map_scatter with pure tensor semantics should not fuse.
+func.func @no_fuse_map_scatter_pure_tensor_semantics(
+    %init: tensor<32x64xf32>,
+    %output: tensor<32x64xf32>,
+    %n: index) -> tensor<32x64xf32> {
+  %result = pcf.loop scope(#pcf.sequential) count(%n)
+      execute(%ref = %init)[%i: index]
+           : (!pcf.sref<32x64xf32, sync(#pcf.sequential)>)
+          -> (tensor<32x64xf32>) {
+    %c0 = arith.constant 0.0 : f32
+    %tile = tensor.generate {
+    ^bb0(%ii: index, %jj: index):
+      tensor.yield %c0 : f32
+    } : tensor<8x8xf32>
+    pcf.write_slice %tile into %ref[%i, 0] [8, 8] [1, 1]
+        : tensor<8x8xf32> into !pcf.sref<32x64xf32, sync(#pcf.sequential)>
+    pcf.return
+  }
+  // Pure tensor semantics (tensor input, tensor output) - should not fuse.
+  %scattered = iree_linalg_ext.map_scatter %result into %output {
+  ^bb0(%idx0: index, %idx1: index):
+    %true = arith.constant true
+    iree_linalg_ext.yield %idx0, %idx1, %true : index, index, i1
+  } : tensor<32x64xf32> into tensor<32x64xf32> -> tensor<32x64xf32>
+  return %scattered : tensor<32x64xf32>
+}
+
+// CHECK-LABEL: @no_fuse_map_scatter_pure_tensor_semantics(
+//       CHECK:   %[[RESULT:.+]] = pcf.loop
+//       CHECK:   %[[SCATTERED:.+]] = iree_linalg_ext.map_scatter %[[RESULT]] into %{{.+}}
+//       CHECK:     : tensor<32x64xf32> into tensor<32x64xf32> -> tensor<32x64xf32>
+//       CHECK:   return %[[SCATTERED]]
