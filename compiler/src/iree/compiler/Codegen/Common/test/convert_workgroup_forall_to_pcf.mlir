@@ -116,3 +116,41 @@ func.func @forall_gpu_thread_mapping_not_converted() {
 // CHECK-LABEL: @forall_gpu_thread_mapping_not_converted
 // CHECK: scf.forall
 // CHECK-NOT: pcf.loop
+
+// -----
+
+// Test folding split-reduction forall containing workgroup pcf.loop into pcf.generic.
+func.func @fold_split_reduction_into_pcf_generic(%init: tensor<16xf32>, %slice: tensor<1xf32>) -> tensor<16xf32> {
+  %c4 = arith.constant 4 : index
+  %0 = scf.forall (%id) in (4) shared_outs(%iter = %init) -> (tensor<16xf32>) {
+    %tile_init = tensor.extract_slice %iter[%id] [4] [1]
+        : tensor<16xf32> to tensor<4xf32>
+    %loop_result = pcf.loop scope(#iree_codegen.workgroup_scope<linearize>) count(%c4)
+        execute(%ref = %tile_init)[%loop_id: index]
+            : (!pcf.sref<4xf32, sync(#iree_codegen.workgroup_scope<linearize>)>)
+           -> (tensor<4xf32>) {
+      pcf.write_slice %slice into %ref[%loop_id] [1] [1]
+          : tensor<1xf32> into !pcf.sref<4xf32, sync(#iree_codegen.workgroup_scope<linearize>)>
+      pcf.return
+    }
+    scf.forall.in_parallel {
+      tensor.parallel_insert_slice %loop_result into %iter[%id] [4] [1]
+          : tensor<4xf32> into tensor<16xf32>
+    }
+  } {mapping = [#iree_linalg_ext.split_reduction_mapping<0>]}
+  return %0 : tensor<16xf32>
+}
+
+// CHECK-LABEL: @fold_split_reduction_into_pcf_generic
+//  CHECK-SAME:   %[[INIT:[A-Za-z0-9_]+]]: tensor<16xf32>
+//  CHECK-SAME:   %[[SLICE:[A-Za-z0-9_]+]]: tensor<1xf32>
+//       CHECK:   iree_codegen.workgroup_count_hint
+//       CHECK:   %[[GENERIC:.+]] = pcf.generic
+//       CHECK:     scope(#iree_codegen.workgroup_scope<linearize>)
+//       CHECK:     execute(%[[REF:[A-Za-z0-9_]+]] = %[[INIT]])[%[[ID:[A-Za-z0-9_]+]]: index, %{{.*}}: index]
+//       CHECK:          : (!pcf.sref<16xf32, sync(#iree_codegen.workgroup_scope<linearize>)>)
+//       CHECK:     scf.for
+//       CHECK:       scf.for
+//       CHECK:         pcf.write_slice %[[SLICE]] into %[[REF]]
+//       CHECK:     pcf.return
+//       CHECK:   return %[[GENERIC]]
