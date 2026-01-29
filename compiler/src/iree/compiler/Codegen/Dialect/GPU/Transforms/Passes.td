@@ -71,13 +71,13 @@ def VectorizeIREEGPUOpsPass :
   ];
 }
 
-def TestConvertForallToGenericNestGPUPass :
-    InterfacePass<"iree-gpu-test-convert-forall-to-generic-nest",
+def ConvertForallToGenericNestGPUPass :
+    InterfacePass<"iree-gpu-convert-forall-to-generic-nest",
                   "mlir::FunctionOpInterface"> {
-  let summary = "Test pass for convertForallToGenericNest with GPU scopes";
+  let summary = "Converts scf.forall ops with GPU mapping to pcf.generic";
   let description = [{
-    Test pass that converts scf.forall ops with gpu.thread mapping to nested
-    pcf.generic ops using subgroup (outer) and lane (inner) scopes.
+    Converts scf.forall ops with gpu.thread mapping to nested pcf.generic ops
+    using subgroup (outer) and lane (inner) scopes.
   }];
   let dependentDialects = [
     "::mlir::iree_compiler::IREE::PCF::PCFDialect",
