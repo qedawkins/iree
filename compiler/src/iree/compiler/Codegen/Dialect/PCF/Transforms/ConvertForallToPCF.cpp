@@ -32,6 +32,7 @@ namespace mlir::iree_compiler::IREE::PCF {
 
 #define GEN_PASS_DEF_TESTCONVERTFORALLTOLOOPSPASS
 #define GEN_PASS_DEF_TESTCONVERTFORALLTOGENERICNESTPASS
+#define GEN_PASS_DEF_TESTFOLDFORALLINTOPCFLOOPPASS
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h.inc"
 
 namespace {
@@ -96,6 +97,510 @@ getProcessorIdPermutation(scf::ForallOp forallOp) {
   }
   return perm;
 }
+
+//===----------------------------------------------------------------------===//
+// scf.forall + pcf.loop -> pcf.generic fold helpers
+//===----------------------------------------------------------------------===//
+
+/// Validates that the forall terminator has the expected structure for folding:
+/// - All ops are tensor.parallel_insert_slice
+/// - All insert sources come from the same pcf.loop result
+/// - All insert destinations are forall shared_outs
+/// Returns the found pcf.loop on success.
+static FailureOr<PCF::LoopOp> matchFoldTerminator(scf::ForallOp forallOp) {
+  auto terminator =
+      cast<scf::InParallelOp>(forallOp.getRegion().front().getTerminator());
+
+  PCF::LoopOp foundLoop = nullptr;
+
+  for (Operation &op : terminator.getYieldingOps()) {
+    // All ops must be tensor.parallel_insert_slice.
+    auto insertSliceOp = dyn_cast<tensor::ParallelInsertSliceOp>(&op);
+    if (!insertSliceOp) {
+      return failure();
+    }
+
+    // Source must be from a pcf.loop result.
+    auto loopResult = dyn_cast<OpResult>(insertSliceOp.getSource());
+    if (!loopResult) {
+      return failure();
+    }
+
+    auto currentLoop = dyn_cast<PCF::LoopOp>(loopResult.getOwner());
+    if (!currentLoop) {
+      return failure();
+    }
+
+    // All inserts must reference the same pcf.loop.
+    if (foundLoop && foundLoop != currentLoop) {
+      return failure();
+    }
+    foundLoop = currentLoop;
+
+    // Destination must be a shared_out of the forall.
+    auto destArg = dyn_cast<BlockArgument>(insertSliceOp.getDest());
+    if (!destArg || destArg.getOwner() != &forallOp.getRegion().front()) {
+      return failure();
+    }
+
+    // Verify it's a shared_out (comes after induction vars).
+    if (destArg.getArgNumber() < forallOp.getRank()) {
+      return failure();
+    }
+  }
+
+  if (!foundLoop) {
+    return failure();
+  }
+
+  return foundLoop;
+}
+
+/// Validates the pcf.loop structure for folding:
+/// - Single count argument (linearized)
+/// - Count value dominates the forall
+/// - Loop is last op before terminator
+static LogicalResult matchFoldPCFLoop(scf::ForallOp forallOp,
+                                      PCF::LoopOp loopOp) {
+  // Single count argument required.
+  if (loopOp.getCount().size() != 1) {
+    return failure();
+  }
+
+  // Count must dominate the forall.
+  Value countValue = loopOp.getCount()[0];
+  if (auto defOp = countValue.getDefiningOp()) {
+    if (!defOp->isBeforeInBlock(forallOp)) {
+      return failure();
+    }
+  }
+
+  // Loop must be last op before terminator.
+  Operation *lastOp =
+      forallOp.getRegion().front().getTerminator()->getPrevNode();
+  if (lastOp != loopOp) {
+    return failure();
+  }
+
+  return success();
+}
+
+/// Validates pcf.loop region ref args:
+/// - All users are pcf.write_slice ops
+/// - Ref args have SyncOnReturnAttr sync scope
+/// Populates writesByResult with write_slice ops grouped by result index.
+static LogicalResult matchFoldWriteSlices(
+    PCF::LoopOp loopOp,
+    DenseMap<unsigned, SmallVector<PCF::WriteSliceOp>> &writesByResult) {
+  for (auto [idx, refArg] : llvm::enumerate(loopOp.getRegionRefArgs())) {
+    // Check sync scope is sync_on_return.
+    auto srefType = cast<PCF::ShapedRefType>(refArg.getType());
+    auto syncScope = srefType.getSyncScope();
+    if (!isa_and_nonnull<PCF::SyncOnReturnAttr>(syncScope)) {
+      return failure();
+    }
+
+    // All users must be write_slice ops.
+    for (Operation *user : refArg.getUsers()) {
+      auto writeOp = dyn_cast<PCF::WriteSliceOp>(user);
+      if (!writeOp) {
+        return failure();
+      }
+      writesByResult[idx].push_back(writeOp);
+    }
+  }
+
+  return success();
+}
+
+/// Core implementation of foldForallIntoPCFLoop after matching succeeds.
+/// Note: writesByResult is validated during matching but not directly used here
+/// since we iterate over ref arg users to find write_slice ops in their final
+/// positions after the IR has been restructured.
+static PCF::GenericOp
+foldForallIntoPCFLoopImpl(RewriterBase &rewriter, scf::ForallOp forallOp,
+                          PCF::LoopOp loopOp) {
+  Location loc = forallOp.getLoc();
+  scf::InParallelOp terminator = forallOp.getTerminator();
+
+  // Replace RegionIterArgs with initial values (except in terminator).
+  for (auto [iterArg, init] :
+       llvm::zip(forallOp.getRegionIterArgs(), forallOp.getOutputs())) {
+    rewriter.replaceUsesWithIf(iterArg, init, [&](OpOperand &use) {
+      return use.getOwner()->getParentOp() != terminator;
+    });
+  }
+
+  Value loopCount = loopOp.getCount()[0];
+
+  // Create pcf.generic.
+  auto genericOp = PCF::GenericOp::create(
+      rewriter, loc,
+      /*resultTypes=*/forallOp.getResultTypes(),
+      /*scope=*/loopOp.getScope(),
+      /*inits=*/forallOp.getOutputs(),
+      /*dynamic_sizes=*/ValueRange{},
+      /*is_tied=*/SmallVector<bool>(forallOp.getNumResults(), true),
+      /*num_iterators=*/1);
+
+  // Set sync scope to SyncOnReturn for the pcf.generic sref arguments.
+  Attribute syncScope = PCF::SyncOnReturnAttr::get(rewriter.getContext());
+  for (auto regionRefArg : genericOp.getRegionRefArgs()) {
+    auto srefType = cast<PCF::ShapedRefType>(regionRefArg.getType());
+    auto newSrefType = PCF::ShapedRefType::get(
+        rewriter.getContext(), srefType.getShape(), srefType.getElementType(),
+        srefType.getScope(), syncScope);
+    regionRefArg.setType(newSrefType);
+  }
+
+  Block *forallBody = &forallOp.getRegion().front();
+  Block *genericBody = &genericOp.getRegion().front();
+  rewriter.setInsertionPointToStart(genericBody);
+
+  // Compute scf.forall iteration counts inside generic.
+  // Handle both normalized form (lb/ub/step explicit) and short form (just ub).
+  SmallVector<Value> iterCounts;
+  Value totalIters = nullptr;
+
+  SmallVector<OpFoldResult> lowerBounds = forallOp.getMixedLowerBound();
+  SmallVector<OpFoldResult> upperBounds = forallOp.getMixedUpperBound();
+  SmallVector<OpFoldResult> steps = forallOp.getMixedStep();
+
+  // Use upper bound count as canonical size.
+  size_t numDims = upperBounds.size();
+
+  for (size_t i = 0; i < numDims; ++i) {
+    // Default lb=0, step=1 if not explicitly provided.
+    OpFoldResult lb = i < lowerBounds.size()
+                          ? lowerBounds[i]
+                          : rewriter.getIndexAttr(0);
+    OpFoldResult ub = upperBounds[i];
+    OpFoldResult step =
+        i < steps.size() ? steps[i] : rewriter.getIndexAttr(1);
+
+    Value lbVal = getValueOrCreateConstantIndexOp(rewriter, loc, lb);
+    Value ubVal = getValueOrCreateConstantIndexOp(rewriter, loc, ub);
+    Value stepVal = getValueOrCreateConstantIndexOp(rewriter, loc, step);
+
+    Value range = arith::SubIOp::create(rewriter, loc, ubVal, lbVal);
+    Value count = arith::CeilDivSIOp::create(rewriter, loc, range, stepVal);
+    iterCounts.push_back(count);
+
+    if (!totalIters) {
+      totalIters = count;
+    } else {
+      totalIters = arith::MulIOp::create(rewriter, loc, totalIters, count);
+    }
+  }
+
+  // Delinearize pcf.generic id into 2D (forall linear id, pcf loop id).
+  BlockArgument linearId = genericOp.getIdArgs()[0];
+  Value forallLinearId =
+      arith::DivSIOp::create(rewriter, loc, linearId, loopCount);
+  Value pcfLoopLinearId =
+      arith::RemSIOp::create(rewriter, loc, linearId, loopCount);
+
+  // Create outer scf.for for the forall dimensions.
+  Value totalWorkers = genericOp.getCountArgs()[0];
+  Value outerStep =
+      arith::CeilDivSIOp::create(rewriter, loc, totalWorkers, loopCount);
+
+  auto outerFor =
+      scf::ForOp::create(rewriter, loc, forallLinearId, totalIters, outerStep);
+
+  // Compute actual forall induction vars.
+  rewriter.setInsertionPointToStart(outerFor.getBody());
+
+  auto forallIvDelinOp = affine::AffineDelinearizeIndexOp::create(
+      rewriter, loc, outerFor.getInductionVar(), iterCounts);
+  ValueRange delinearizedIvs = forallIvDelinOp.getMultiIndex();
+
+  // Apply steps and offsets: iv = delinearized * step + lb.
+  // Use the same bounds arrays computed earlier to handle short form.
+  IRMapping forallMapping;
+  SmallVector<Value> forallIvs(forallOp.getInductionVars());
+  for (size_t i = 0; i < numDims; ++i) {
+    Value delinIv = delinearizedIvs[i];
+    OpFoldResult lb = i < lowerBounds.size()
+                          ? lowerBounds[i]
+                          : rewriter.getIndexAttr(0);
+    OpFoldResult step =
+        i < steps.size() ? steps[i] : rewriter.getIndexAttr(1);
+    Value forallIv = forallIvs[i];
+
+    Value lbVal = getValueOrCreateConstantIndexOp(rewriter, loc, lb);
+    Value stepVal = getValueOrCreateConstantIndexOp(rewriter, loc, step);
+    Value scaled = arith::MulIOp::create(rewriter, loc, delinIv, stepVal);
+    Value actualIv = arith::AddIOp::create(rewriter, loc, scaled, lbVal);
+    forallMapping.map(forallIv, actualIv);
+  }
+
+  // NOTE: We do NOT map iter args to ref args here. The iter args in the
+  // terminator's parallel_insert_slice ops are handled separately - we erase
+  // those ops after composing write_slice ops. Any other uses of iter args
+  // have already been replaced with init values at line 225-230.
+
+  // Collect info about parallel_insert_slice ops before moving body.
+  struct InsertSliceInfo {
+    unsigned resultIdx;
+    unsigned argIdx;
+    SmallVector<OpFoldResult> offsets;
+    SmallVector<OpFoldResult> sizes;
+    SmallVector<OpFoldResult> strides;
+  };
+  SmallVector<InsertSliceInfo> insertSliceInfos;
+
+  for (Operation &op : terminator.getYieldingOps()) {
+    auto insertOp = cast<tensor::ParallelInsertSliceOp>(&op);
+    auto loopResult = cast<OpResult>(insertOp.getSource());
+    unsigned resultIdx = loopResult.getResultNumber();
+    auto destArg = cast<BlockArgument>(insertOp.getDest());
+    unsigned argIdx = destArg.getArgNumber() - forallOp.getRank();
+
+    InsertSliceInfo info;
+    info.resultIdx = resultIdx;
+    info.argIdx = argIdx;
+    info.offsets = insertOp.getMixedOffsets();
+    info.sizes = insertOp.getMixedSizes();
+    info.strides = insertOp.getMixedStrides();
+    insertSliceInfos.push_back(info);
+  }
+
+  // Move forall body operations into outer for (except terminator).
+  Block *outerForBody = outerFor.getBody();
+  Operation *outerForTerminator = outerForBody->getTerminator();
+
+  for (Operation &op :
+       llvm::make_early_inc_range(forallBody->without_terminator())) {
+    op.moveBefore(outerForTerminator);
+  }
+
+  // Remap induction var block arguments in moved operations.
+  // Only replace induction vars - iter args were already replaced with init
+  // values at line 225-230, and terminator uses are handled when we erase
+  // parallel_insert_slice ops.
+  for (Value iv : forallOp.getInductionVars()) {
+    Value mapped = forallMapping.lookup(iv);
+    iv.replaceAllUsesWith(mapped);
+  }
+
+  // Find the moved pcf.loop.
+  PCF::LoopOp movedLoopOp = nullptr;
+  for (Operation &op : outerForBody->without_terminator()) {
+    if (auto loop = dyn_cast<PCF::LoopOp>(&op)) {
+      movedLoopOp = loop;
+      break;
+    }
+  }
+  assert(movedLoopOp && "Failed to find moved pcf.loop");
+
+  // Compose tensor.parallel_insert_slice with pcf.write_slice.
+  for (Operation &op :
+       llvm::make_early_inc_range(terminator.getYieldingOps())) {
+    auto insertOp = cast<tensor::ParallelInsertSliceOp>(&op);
+    auto loopResult = cast<OpResult>(insertOp.getSource());
+    unsigned resultIdx = loopResult.getResultNumber();
+
+    // Find matching insertSliceInfo.
+    const InsertSliceInfo *matchingInfo = nullptr;
+    for (const InsertSliceInfo &info : insertSliceInfos) {
+      if (info.resultIdx == resultIdx) {
+        matchingInfo = &info;
+        break;
+      }
+    }
+    assert(matchingInfo && "Failed to find matching insert slice info");
+
+    BlockArgument genericRefArg =
+        genericOp.getRegionRefArgs()[matchingInfo->argIdx];
+    BlockArgument movedRefArg = movedLoopOp.getRegionRefArgs()[resultIdx];
+
+    // Compose all write_slice ops that write to this ref arg.
+    for (Operation *user : llvm::make_early_inc_range(movedRefArg.getUsers())) {
+      auto writeOp = dyn_cast<PCF::WriteSliceOp>(user);
+      if (!writeOp) {
+        continue;
+      }
+
+      rewriter.setInsertionPoint(writeOp);
+
+      SmallVector<OpFoldResult> writeOffsets = writeOp.getMixedOffsets();
+      SmallVector<OpFoldResult> writeStrides = writeOp.getMixedStrides();
+      SmallVector<OpFoldResult> writeSizes = writeOp.getMixedSizes();
+
+      // Expand source to match sref rank by adding unit dims.
+      auto sourceType = cast<RankedTensorType>(writeOp.getSource().getType());
+      auto srefType = cast<PCF::ShapedRefType>(genericRefArg.getType());
+      int64_t srefRank = srefType.getRank();
+      int64_t sourceRank = sourceType.getRank();
+
+      Value expandedSource = writeOp.getSource();
+      if (srefRank > sourceRank) {
+        SmallVector<int64_t> expandedShape;
+        SmallVector<ReassociationIndices> reassociation;
+
+        // First sourceRank-1 dimensions map 1:1.
+        for (int64_t i = 0; i < sourceRank - 1; ++i) {
+          expandedShape.push_back(sourceType.getDimSize(i));
+          reassociation.push_back({i});
+        }
+
+        // Last input dimension expands to include itself plus unit dims.
+        ReassociationIndices lastGroup;
+        if (sourceRank > 0) {
+          expandedShape.push_back(sourceType.getDimSize(sourceRank - 1));
+          lastGroup.push_back(sourceRank - 1);
+        }
+
+        // Add unit dimensions to reach sref rank.
+        int64_t numUnitDims = srefRank - sourceRank;
+        for (int64_t i = 0; i < numUnitDims; ++i) {
+          expandedShape.push_back(1);
+          lastGroup.push_back(sourceRank + i);
+        }
+
+        if (!lastGroup.empty()) {
+          reassociation.push_back(lastGroup);
+        }
+
+        auto expandedType =
+            RankedTensorType::get(expandedShape, sourceType.getElementType());
+        expandedSource = tensor::ExpandShapeOp::create(
+            rewriter, writeOp.getLoc(), expandedType, writeOp.getSource(),
+            reassociation);
+      }
+
+      // Compose offsets, sizes, and strides.
+      SmallVector<OpFoldResult> composedOffsets;
+      SmallVector<OpFoldResult> composedSizes;
+      SmallVector<OpFoldResult> composedStrides;
+
+      // Helper to remap OpFoldResult Values through forallMapping.
+      // This is needed because insertSliceInfos was captured before we
+      // replaced forall IVs, so any Value operands still reference the
+      // original forall IVs.
+      auto remapOFR = [&](OpFoldResult ofr) -> OpFoldResult {
+        if (auto val = dyn_cast<Value>(ofr))
+          return forallMapping.lookupOrDefault(val);
+        return ofr;
+      };
+
+      // First writeRank dimensions: add write and insert offsets.
+      for (size_t i = 0; i < writeOffsets.size(); ++i) {
+        Value writeOff = getValueOrCreateConstantIndexOp(
+            rewriter, writeOp.getLoc(), writeOffsets[i]);
+        Value insertOff = getValueOrCreateConstantIndexOp(
+            rewriter, writeOp.getLoc(), remapOFR(matchingInfo->offsets[i]));
+        Value composedOff =
+            arith::AddIOp::create(rewriter, writeOp.getLoc(), writeOff,
+                                  insertOff);
+        composedOffsets.push_back(composedOff);
+
+        composedSizes.push_back(remapOFR(writeSizes[i]));
+
+        Value writeStride = getValueOrCreateConstantIndexOp(
+            rewriter, writeOp.getLoc(), writeStrides[i]);
+        Value insertStride = getValueOrCreateConstantIndexOp(
+            rewriter, writeOp.getLoc(), remapOFR(matchingInfo->strides[i]));
+        Value composedStride = arith::MulIOp::create(
+            rewriter, writeOp.getLoc(), writeStride, insertStride);
+        composedStrides.push_back(composedStride);
+      }
+
+      // Remaining dimensions from insert.
+      for (size_t i = writeOffsets.size(); i < matchingInfo->offsets.size();
+           ++i) {
+        composedOffsets.push_back(remapOFR(matchingInfo->offsets[i]));
+        composedSizes.push_back(remapOFR(matchingInfo->sizes[i]));
+        composedStrides.push_back(remapOFR(matchingInfo->strides[i]));
+      }
+
+      // Replace old write_slice with composed one.
+      rewriter.replaceOpWithNewOp<PCF::WriteSliceOp>(
+          writeOp, expandedSource, genericRefArg, composedOffsets,
+          composedSizes, composedStrides);
+    }
+
+    rewriter.eraseOp(insertOp);
+  }
+
+  // Replace forall results with generic results.
+  for (auto [forallResult, genericResult] :
+       llvm::zip(forallOp.getResults(), genericOp.getResults())) {
+    rewriter.replaceAllUsesWith(forallResult, genericResult);
+  }
+
+  // At this point, all parallel_insert_slice ops should be erased, so iter args
+  // should have no uses. Induction vars were replaced earlier. Verify this.
+  for (BlockArgument arg : forallBody->getArguments()) {
+    assert(arg.use_empty() && "forall block arg still has uses after fold!");
+  }
+
+  rewriter.eraseOp(forallOp);
+
+  // Convert moved pcf.loop to inner scf.for.
+  rewriter.setInsertionPoint(movedLoopOp);
+
+  Value product =
+      arith::MulIOp::create(rewriter, loc, loopCount, forallLinearId);
+  Value diff = arith::SubIOp::create(rewriter, loc, totalWorkers, product);
+  Value innerStep = arith::MinSIOp::create(rewriter, loc, diff, loopCount);
+
+  auto innerFor =
+      scf::ForOp::create(rewriter, loc, pcfLoopLinearId, loopCount, innerStep);
+
+  // Replace loop's id arg with inner for's induction variable.
+  rewriter.replaceAllUsesWith(movedLoopOp.getIdArgs()[0],
+                              innerFor.getInductionVar());
+
+  // Move operations from loop body to inner for.
+  Block *loopBody = &movedLoopOp.getRegion().front();
+  Block *innerForBody = innerFor.getBody();
+
+  innerForBody->getOperations().splice(
+      std::prev(innerForBody->end()), loopBody->getOperations(),
+      loopBody->begin(), std::prev(loopBody->end()));
+
+  rewriter.eraseOp(movedLoopOp);
+
+  // Add terminator to generic's region.
+  rewriter.setInsertionPointToEnd(genericBody);
+  PCF::ReturnOp::create(rewriter, loc);
+
+  return genericOp;
+}
+
+} // namespace (anonymous)
+
+//===----------------------------------------------------------------------===//
+// Public API: foldForallIntoPCFLoop
+//===----------------------------------------------------------------------===//
+
+FailureOr<GenericOp> foldForallIntoPCFLoop(RewriterBase &rewriter,
+                                           scf::ForallOp forallOp) {
+  // Step 1: Validate terminator structure.
+  FailureOr<LoopOp> loopOpOrFailure = matchFoldTerminator(forallOp);
+  if (failed(loopOpOrFailure)) {
+    return failure();
+  }
+  LoopOp loopOp = *loopOpOrFailure;
+
+  // Step 2: Validate pcf.loop structure.
+  if (failed(matchFoldPCFLoop(forallOp, loopOp))) {
+    return failure();
+  }
+
+  // Step 3: Validate write_slice ops.
+  DenseMap<unsigned, SmallVector<WriteSliceOp>> writesByResult;
+  if (failed(matchFoldWriteSlices(loopOp, writesByResult))) {
+    return failure();
+  }
+
+  // All validations passed, perform the fold.
+  return foldForallIntoPCFLoopImpl(rewriter, forallOp, loopOp);
+}
+
+namespace {
 
 /// Validates that the forall op can be converted.
 static LogicalResult matchForallConversion(scf::ForallOp forallOp) {
@@ -288,6 +793,45 @@ static PCF::LoopOp convertForallToPCFLoopImpl(RewriterBase &rewriter,
   rewriter.replaceOp(forallOp, loopOp);
   return loopOp;
 }
+
+//===----------------------------------------------------------------------===//
+// scf.forall + pcf.loop -> pcf.generic (fold)
+//===----------------------------------------------------------------------===//
+
+struct TestFoldForallIntoPCFLoopPass final
+    : impl::TestFoldForallIntoPCFLoopPassBase<TestFoldForallIntoPCFLoopPass> {
+  void runOnOperation() override {
+    SmallVector<scf::ForallOp> forallOps;
+    getOperation()->walk([&](scf::ForallOp forallOp) {
+      // Only match foralls with local_mapping attribute.
+      if (!hasEmptyOrLocalMapping(forallOp)) {
+        return;
+      }
+      // Check if there's a pcf.loop with sequential scope inside.
+      scf::InParallelOp terminator = forallOp.getTerminator();
+      Operation *lastOp = terminator->getPrevNode();
+      auto loopOp = dyn_cast_or_null<PCF::LoopOp>(lastOp);
+      if (!loopOp) {
+        return;
+      }
+      // Check for sequential scope.
+      if (!isa<PCF::SequentialAttr>(loopOp.getScope())) {
+        return;
+      }
+      forallOps.push_back(forallOp);
+    });
+
+    IRRewriter rewriter(&getContext());
+    for (scf::ForallOp forallOp : forallOps) {
+      rewriter.setInsertionPoint(forallOp);
+      FailureOr<PCF::GenericOp> result = foldForallIntoPCFLoop(rewriter, forallOp);
+      if (failed(result)) {
+        forallOp.emitError("failed to fold forall into pcf.loop");
+        return signalPassFailure();
+      }
+    }
+  }
+};
 
 //===----------------------------------------------------------------------===//
 // scf.forall -> pcf.generic nest Implementation
