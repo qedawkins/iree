@@ -1,11 +1,5 @@
 // RUN: iree-opt %s --pass-pipeline="builtin.module(func.func(iree-pcf-resolve-tokens, iree-pcf-convert-sref-to-memref, iree-pcf-lower-structural-pcf))" --split-input-file | FileCheck %s
 
-// Test that PCF lowering passes correctly lower GPU-scope PCF ops.
-// These passes are integrated into the SPIRV backend pipeline.
-// Tests workgroup, subgroup, and lane scopes including nested patterns.
-// Note: We test the passes directly rather than the full pipeline because
-// the full pipeline requires more complete IR context (executables, etc.).
-
 func.func @pcf_workgroup_loop(%arg0: memref<64xf32>) {
   %c64 = arith.constant 64 : index
   pcf.loop scope(#iree_codegen.workgroup_scope) count(%c64)

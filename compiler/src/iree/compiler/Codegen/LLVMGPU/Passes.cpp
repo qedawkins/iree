@@ -1553,18 +1553,21 @@ void registerCodegenROCDLPasses() {
                                     options.preserveDebugInfo);
           });
 
-  struct NVVMPipelineOptions final
-      : PassPipelineOptions<NVVMPipelineOptions> {
+  struct GPULowerToLLVMOptions final
+      : PassPipelineOptions<GPULowerToLLVMOptions> {
+    Option<bool> forROCDL{
+        *this, "rocdl",
+        llvm::cl::desc("Target ROCDL instead of NVVM")};
     Option<bool> preserveDebugInfo{
         *this, "preserve-debug-info",
         llvm::cl::desc("Preserve debug information (do not strip)")};
   };
 
-  static PassPipelineRegistration<NVVMPipelineOptions> LowerToNVVMLLVMGPUPasses(
-      "iree-codegen-lower-to-nvvm-gpu",
-      "Runs pass pipeline to progressively lower to NVVM",
-      [](OpPassManager &passManager, const NVVMPipelineOptions &options) {
-        addLowerToLLVMGPUPasses(passManager, /*forROCDL=*/false,
+  static PassPipelineRegistration<GPULowerToLLVMOptions> LowerToLLVMGPUPasses(
+      "iree-codegen-gpu-lower-to-llvm",
+      "Runs pass pipeline to progressively lower to LLVM for GPU",
+      [](OpPassManager &passManager, const GPULowerToLLVMOptions &options) {
+        addLowerToLLVMGPUPasses(passManager, options.forROCDL,
                                 options.preserveDebugInfo);
       });
 }

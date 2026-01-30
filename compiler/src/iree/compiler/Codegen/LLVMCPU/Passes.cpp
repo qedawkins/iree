@@ -814,7 +814,7 @@ void registerCodegenLLVMCPUPasses() {
           "Runs the lower to LLVM pipeline for CPU",
           [](OpPassManager &modulePassManager,
              LowerToLLVMPipelineOptions const &options) {
-            addLowerToLLVMPasses(modulePassManager, options.enableArmSME);
+            addLowerToLLVMPasses(modulePassManager, options.enableArmSME, /*cpuOpts=*/{});
           });
 }
 
