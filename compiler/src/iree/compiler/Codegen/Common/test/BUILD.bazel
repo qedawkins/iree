@@ -61,7 +61,7 @@ iree_lit_test_suite(
             "fold_reshape_into_interface_tensor.mlir",
             "fold_split_reduction_workgroup_mapping_loops.mlir",
             "fold_tensor_extract_op.mlir",
-            "fuse_pcf_stores.mlir",
+            "fuse_tensor_to_buffer_converters.mlir",
             "forall_to_for.mlir",
             "forop_canonicalization.mlir",
             "generic_vectorization.mlir",

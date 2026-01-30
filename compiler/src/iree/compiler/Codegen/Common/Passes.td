@@ -587,9 +587,9 @@ def FuseTensorPadWithConsumerPass :
   let summary = "Fuse tensor.pad op into its consumer op's tiled loop nest";
 }
 
-def FusePCFStoresPass
-    : Pass<"iree-codegen-fuse-pcf-stores", ""> {
-  let summary = "Fuse store operations into PCF parallel ops";
+def FuseTensorToBufferConvertersPass
+    : Pass<"iree-codegen-fuse-tensor-to-buffer-converters", ""> {
+  let summary = "Fuse tensor-to-buffer conversion operations into PCF parallel ops";
   let description = [{
     Fuses `iree_codegen.store_to_buffer`, `iree_tensor_ext.dispatch_tensor_store`,
     and `iree_linalg_ext.map_scatter` operations with their producer `pcf.loop`

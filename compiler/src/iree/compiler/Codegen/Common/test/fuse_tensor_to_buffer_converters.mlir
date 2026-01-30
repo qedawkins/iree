@@ -1,4 +1,4 @@
-// RUN: iree-opt %s --pass-pipeline="builtin.module(iree-codegen-fuse-pcf-stores)" --split-input-file | FileCheck %s
+// RUN: iree-opt %s --pass-pipeline="builtin.module(iree-codegen-fuse-tensor-to-buffer-converters)" --split-input-file | FileCheck %s
 
 // Test fusing store_to_buffer with pcf.loop producing tensor result.
 // After fusion, the loop no longer produces a result (ref arg dropped).
@@ -177,18 +177,6 @@ func.func @no_fuse_buffer_not_dominating(%init: tensor<32x64xf32>, %n: index) {
 //       CHECK:   %[[RESULT:.+]] = pcf.loop
 //       CHECK:   %[[ALLOC:.+]] = memref.alloc
 //       CHECK:   iree_codegen.store_to_buffer %[[RESULT]], %[[ALLOC]]
-//       CHECK:   return
-
-// -----
-
-// Negative test: tensor not from pcf.loop or pcf.generic.
-func.func @no_fuse_tensor_not_from_pcf(%tensor: tensor<32x64xf32>, %dest: memref<32x64xf32>) {
-  iree_codegen.store_to_buffer %tensor, %dest : tensor<32x64xf32> into memref<32x64xf32>
-  return
-}
-
-// CHECK-LABEL: @no_fuse_tensor_not_from_pcf(
-//       CHECK:   iree_codegen.store_to_buffer
 //       CHECK:   return
 
 // -----

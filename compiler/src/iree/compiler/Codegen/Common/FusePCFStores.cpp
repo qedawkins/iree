@@ -1,4 +1,4 @@
-// Copyright 2025 The IREE Authors
+// Copyright 2026 The IREE Authors
 //
 // Licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -23,7 +23,7 @@
 
 namespace mlir::iree_compiler {
 
-#define GEN_PASS_DEF_FUSEPCFSTORESPASS
+#define GEN_PASS_DEF_FUSETENSORTOBUFFERCONVERTERSPASS
 #include "iree/compiler/Codegen/Common/Passes.h.inc"
 
 namespace {
@@ -62,8 +62,8 @@ getProducerSlices(PCFOpTy pcfOp, OpResult result) {
 }
 
 struct FuseStoreToBuffer
-    : public OpRewritePattern<IREE::Codegen::StoreToBufferOp> {
-  using OpRewritePattern<IREE::Codegen::StoreToBufferOp>::OpRewritePattern;
+    : OpRewritePattern<IREE::Codegen::StoreToBufferOp> {
+  using Base::Base;
 
   LogicalResult matchAndRewrite(IREE::Codegen::StoreToBufferOp storeOp,
                                 PatternRewriter &rewriter) const override {
@@ -143,9 +143,8 @@ struct FuseStoreToBuffer
 };
 
 struct FuseDispatchTensorStore
-    : public OpRewritePattern<IREE::TensorExt::DispatchTensorStoreOp> {
-  using OpRewritePattern<
-      IREE::TensorExt::DispatchTensorStoreOp>::OpRewritePattern;
+    : OpRewritePattern<IREE::TensorExt::DispatchTensorStoreOp> {
+  using Base::Base;
 
   LogicalResult matchAndRewrite(IREE::TensorExt::DispatchTensorStoreOp storeOp,
                                 PatternRewriter &rewriter) const override {
@@ -290,8 +289,8 @@ cloneMapScatterWithOffsets(IREE::LinalgExt::MapScatterOp origOp,
 }
 
 struct FuseMapScatterIntoPCF
-    : public OpRewritePattern<IREE::LinalgExt::MapScatterOp> {
-  using OpRewritePattern<IREE::LinalgExt::MapScatterOp>::OpRewritePattern;
+    : OpRewritePattern<IREE::LinalgExt::MapScatterOp> {
+  using Base::Base;
 
   LogicalResult matchAndRewrite(IREE::LinalgExt::MapScatterOp mapScatterOp,
                                 PatternRewriter &rewriter) const override {
@@ -355,8 +354,9 @@ struct FuseMapScatterIntoPCF
   }
 };
 
-struct FusePCFStoresPass final
-    : impl::FusePCFStoresPassBase<FusePCFStoresPass> {
+struct FuseTensorToBufferConvertersPass final
+    : impl::FuseTensorToBufferConvertersPassBase<
+          FuseTensorToBufferConvertersPass> {
   void runOnOperation() override {
     Operation *op = getOperation();
     MLIRContext *context = &getContext();
