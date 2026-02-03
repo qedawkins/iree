@@ -246,6 +246,217 @@ LogicalResult BranchOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// CallOp parsing
+//===----------------------------------------------------------------------===//
+
+/// Parse type bindings: <type, [type, type], [], type>
+static ParseResult
+parseTypeBindings(OpAsmParser &parser,
+                  SmallVectorImpl<SmallVector<Type>> &typeBindings) {
+  if (failed(parser.parseLess())) {
+    return failure();
+  }
+
+  // Handle empty bindings case: <>
+  if (succeeded(parser.parseOptionalGreater())) {
+    return success();
+  }
+
+  auto parseBinding = [&]() -> ParseResult {
+    // Check for list syntax: [type, type, ...]
+    if (succeeded(parser.parseOptionalLSquare())) {
+      SmallVector<Type> types;
+      // Handle empty list: []
+      if (succeeded(parser.parseOptionalRSquare())) {
+        typeBindings.push_back(std::move(types));
+        return success();
+      }
+      // Parse non-empty list
+      if (failed(parser.parseTypeList(types))) {
+        return failure();
+      }
+      if (failed(parser.parseRSquare())) {
+        return failure();
+      }
+      typeBindings.push_back(std::move(types));
+      return success();
+    }
+    // Single type (no brackets)
+    Type singleType;
+    if (failed(parser.parseType(singleType))) {
+      return failure();
+    }
+    typeBindings.push_back({singleType});
+    return success();
+  };
+
+  if (failed(parseBinding())) {
+    return failure();
+  }
+  while (succeeded(parser.parseOptionalComma())) {
+    if (failed(parseBinding())) {
+      return failure();
+    }
+  }
+
+  if (failed(parser.parseGreater())) {
+    return failure();
+  }
+  return success();
+}
+
+ParseResult CallOp::parse(OpAsmParser &parser, OperationState &result) {
+  // Parse callee symbol
+  FlatSymbolRefAttr calleeAttr;
+  if (failed(parser.parseCustomAttributeWithFallback(calleeAttr))) {
+    return failure();
+  }
+  result.addAttribute("callee", calleeAttr);
+
+  // Parse type bindings: <...>
+  SmallVector<SmallVector<Type>> typeBindings;
+  if (failed(parseTypeBindings(parser, typeBindings))) {
+    return failure();
+  }
+
+  // Set the type bindings property.
+  CallOp::Properties &props = result.getOrAddProperties<CallOp::Properties>();
+  props.type_bindings.clear();
+  for (auto &binding : typeBindings) {
+    props.type_bindings.push_back(std::move(binding));
+  }
+
+  // Parse operands: (%arg0, %arg1 : type0, type1)
+  SmallVector<OpAsmParser::UnresolvedOperand> operands;
+  SmallVector<Type> operandTypes;
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (failed(parser.parseOperandList(operands)) ||
+        failed(parser.parseColonTypeList(operandTypes)) ||
+        failed(parser.parseRParen())) {
+      return failure();
+    }
+  }
+
+  // Parse result types: -> (type0, type1) or -> type0
+  SmallVector<Type> resultTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (succeeded(parser.parseOptionalLParen())) {
+      if (failed(parser.parseTypeList(resultTypes)) ||
+          failed(parser.parseRParen())) {
+        return failure();
+      }
+    } else {
+      Type singleResult;
+      if (failed(parser.parseType(singleResult))) {
+        return failure();
+      }
+      resultTypes.push_back(singleResult);
+    }
+  }
+
+  // Parse optional implementations region.
+  Region *implRegion = result.addRegion();
+  OptionalParseResult regionResult = parser.parseOptionalRegion(*implRegion);
+  if (regionResult.has_value() && failed(*regionResult)) {
+    return failure();
+  }
+
+  // Parse optional attributes.
+  if (failed(parser.parseOptionalAttrDict(result.attributes))) {
+    return failure();
+  }
+
+  // Resolve operands.
+  if (failed(parser.resolveOperands(operands, operandTypes,
+                                    parser.getCurrentLocation(),
+                                    result.operands))) {
+    return failure();
+  }
+
+  result.addTypes(resultTypes);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// CallOp printing
+//===----------------------------------------------------------------------===//
+
+void CallOp::print(OpAsmPrinter &printer) {
+  // Print callee.
+  printer << " ";
+  printer.printSymbolName(getCallee());
+
+  // Print type bindings: <type, [type, type], [], type>.
+  printer << "<";
+  const llvm::SmallVector<llvm::SmallVector<Type>> &bindings =
+      getProperties().type_bindings;
+  llvm::interleaveComma(
+      bindings, printer, [&](const llvm::SmallVector<Type> &binding) {
+        if (binding.size() == 1) {
+          // Single type without brackets.
+          printer << binding[0];
+        } else {
+          // Multiple types (or empty) with brackets.
+          printer << "[";
+          llvm::interleaveComma(binding, printer,
+                                [&](Type t) { printer << t; });
+          printer << "]";
+        }
+      });
+  printer << ">";
+
+  // Print operands.
+  if (!getOperands().empty()) {
+    printer << "(";
+    llvm::interleaveComma(getOperands(), printer,
+                          [&](Value v) { printer << v; });
+    printer << " : ";
+    llvm::interleaveComma(getOperands().getTypes(), printer);
+    printer << ")";
+  }
+
+  // Print result types.
+  if (!getResults().empty()) {
+    printer << " -> ";
+    if (getResults().size() > 1) {
+      printer << "(";
+    }
+    llvm::interleaveComma(getResults().getTypes(), printer);
+    if (getResults().size() > 1) {
+      printer << ")";
+    }
+  }
+
+  // Print implementations region.
+  if (!getImplementations().empty()) {
+    printer << " ";
+    printer.printRegion(getImplementations(), /*printEntryBlockArgs=*/true,
+                        /*printBlockTerminators=*/true);
+  }
+
+  // Print attributes (excluding callee which is printed specially).
+  printer.printOptionalAttrDict((*this)->getAttrs(), {"callee"});
+}
+
+//===----------------------------------------------------------------------===//
+// CallOp verification
+//===----------------------------------------------------------------------===//
+
+LogicalResult CallOp::verify() {
+  // Verify implementation blocks are terminated with template.return.
+  for (Block &block : getImplementations()) {
+    if (block.empty()) {
+      return emitOpError("implementation blocks must have a terminator");
+    }
+    if (!isa<ReturnOp>(block.getTerminator())) {
+      return emitOpError(
+          "implementation blocks must be terminated with template.return");
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // UnimplementedOp
 //===----------------------------------------------------------------------===//
 

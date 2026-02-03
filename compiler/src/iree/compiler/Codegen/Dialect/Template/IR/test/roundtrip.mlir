@@ -237,3 +237,109 @@ module {
 // CHECK:           template.unimplemented -> !template.type<2>
 // CHECK:         }
 // CHECK:       }
+
+// -----
+
+// Test template.call with single type bindings
+module {
+  template.func @callee(%arg0: index) -> tensor<4xf32> {
+    %empty = tensor.empty() : tensor<4xf32>
+    template.return %empty : tensor<4xf32>
+  }
+
+  func.func @test_call_simple(%idx: index) -> tensor<4xf32> {
+    %result = template.call @callee<tensor<4xf32>>(%idx : index) -> tensor<4xf32>
+    return %result : tensor<4xf32>
+  }
+}
+
+// CHECK-LABEL: module {
+// CHECK:         template.func @callee
+// CHECK:         func.func @test_call_simple(%[[IDX:.+]]: index) -> tensor<4xf32> {
+// CHECK:           %[[RESULT:.+]] = template.call @callee<tensor<4xf32>>(%[[IDX]] : index) -> tensor<4xf32>
+// CHECK:           return %[[RESULT]] : tensor<4xf32>
+
+// -----
+
+// Test template.call with list type bindings
+module {
+  template.func @callee_multi(%arg0: index) -> tensor<4xf32> {
+    %empty = tensor.empty() : tensor<4xf32>
+    template.return %empty : tensor<4xf32>
+  }
+
+  func.func @test_call_with_list(%idx: index, %a: i32, %b: f32) -> tensor<4xf32> {
+    %result = template.call @callee_multi<[i32, f32], tensor<4xf32>>(%idx, %a, %b : index, i32, f32) -> tensor<4xf32>
+    return %result : tensor<4xf32>
+  }
+}
+
+// CHECK-LABEL: module {
+// CHECK:         func.func @test_call_with_list(%[[IDX:.+]]: index, %[[A:.+]]: i32, %[[B:.+]]: f32) -> tensor<4xf32> {
+// CHECK:           %[[RESULT:.+]] = template.call @callee_multi<[i32, f32], tensor<4xf32>>(%[[IDX]], %[[A]], %[[B]] : index, i32, f32) -> tensor<4xf32>
+
+// -----
+
+// Test template.call with empty type binding
+module {
+  template.func @callee_empty(%arg0: index) -> index {
+    template.return %arg0 : index
+  }
+
+  func.func @test_call_empty_binding(%idx: index) -> index {
+    %result = template.call @callee_empty<[]>(%idx : index) -> index
+    return %result : index
+  }
+}
+
+// CHECK-LABEL: module {
+// CHECK:         func.func @test_call_empty_binding(%[[IDX:.+]]: index) -> index {
+// CHECK:           %[[RESULT:.+]] = template.call @callee_empty<[]>(%[[IDX]] : index) -> index
+
+// -----
+
+// Test template.call with implementations region
+module {
+  template.func @callee_with_impl(%arg0: index) -> tensor<4xf32> {
+    %result = template.branch 0(%arg0) : (index) -> (tensor<4xf32>)
+    template.return %result : tensor<4xf32>
+  } {
+  ^bb0(%idx: index):
+    template.unimplemented -> tensor<4xf32>
+  }
+
+  func.func @test_call_with_impl(%idx: index) -> tensor<4xf32> {
+    %result = template.call @callee_with_impl<>(%idx : index) -> tensor<4xf32> {
+    ^bb0(%inner_idx: index):
+      %empty = tensor.empty() : tensor<4xf32>
+      template.return %empty : tensor<4xf32>
+    }
+    return %result : tensor<4xf32>
+  }
+}
+
+// CHECK-LABEL: module {
+// CHECK:         func.func @test_call_with_impl(%[[IDX:.+]]: index) -> tensor<4xf32> {
+// CHECK:           %[[RESULT:.+]] = template.call @callee_with_impl<>(%[[IDX]] : index) -> tensor<4xf32> {
+// CHECK:           ^bb0(%[[INNER:.+]]: index):
+// CHECK:             %[[EMPTY:.+]] = tensor.empty() : tensor<4xf32>
+// CHECK:             template.return %[[EMPTY]] : tensor<4xf32>
+// CHECK:           }
+
+// -----
+
+// Test template.call with no results
+module {
+  template.func @callee_no_results(%arg0: index) {
+    template.return
+  }
+
+  func.func @test_call_no_results(%idx: index) {
+    template.call @callee_no_results<>(%idx : index)
+    return
+  }
+}
+
+// CHECK-LABEL: module {
+// CHECK:         func.func @test_call_no_results(%[[IDX:.+]]: index) {
+// CHECK:           template.call @callee_no_results<>(%[[IDX]] : index)
