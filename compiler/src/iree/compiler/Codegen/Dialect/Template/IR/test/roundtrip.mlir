@@ -69,7 +69,7 @@ func.func @test_instance_multiple_blocks() -> tensor<4x8xf32> {
 // -----
 
 module {
-  template.func @test_func_with_unimplemented(%dest: tensor<256x256xf32>, %k_size: index) {
+  template.func @test_func_with_unimplemented(%dest: tensor<256x256xf32>, %k_size: index) -> tensor<4x8xf32> {
     %c0 = arith.constant 0 : index
     %init = template.branch 0(%c0, %c0) : (index, index) -> (tensor<4x8xf32>)
     %lhs = tensor.empty() : tensor<4x4xf16>
@@ -85,7 +85,7 @@ module {
 }
 
 // CHECK-LABEL: module {
-// CHECK:         template.func @test_func_with_unimplemented (%[[DEST:.+]]: tensor<256x256xf32>, %[[K_SIZE:.+]]: index) {
+// CHECK:         template.func @test_func_with_unimplemented (%[[DEST:.+]]: tensor<256x256xf32>, %[[K_SIZE:.+]]: index) -> tensor<4x8xf32> {
 // CHECK:           %[[C0:.+]] = arith.constant 0 : index
 // CHECK:           %[[INIT:.+]] = template.branch 0(%[[C0]], %[[C0]]) : (index, index) -> tensor<4x8xf32>
 // CHECK:           %[[LHS2:.+]] = tensor.empty() : tensor<4x4xf16>
@@ -103,7 +103,7 @@ module {
 // -----
 
 module {
-  template.func @test_func_with_mixed_blocks {
+  template.func @test_func_with_mixed_blocks -> tensor<4x4xf32> {
     %c0 = arith.constant 0 : index
     %loaded = template.branch 0(%c0) : (index) -> (tensor<4x4xf32>)
     %result = template.branch 1(%loaded, %loaded) : (tensor<4x4xf32>, tensor<4x4xf32>) -> (tensor<4x4xf32>)
@@ -120,7 +120,7 @@ module {
 }
 
 // CHECK-LABEL: module {
-// CHECK:         template.func @test_func_with_mixed_blocks {
+// CHECK:         template.func @test_func_with_mixed_blocks  -> tensor<4x4xf32> {
 // CHECK:           %[[C0:.+]] = arith.constant 0 : index
 // CHECK:           %[[LOADED:.+]] = template.branch 0(%[[C0]]) : (index) -> tensor<4x4xf32>
 // CHECK:           %[[RESULT:.+]] = template.branch 1(%[[LOADED]], %[[LOADED]]) : (tensor<4x4xf32>, tensor<4x4xf32>) -> tensor<4x4xf32>
@@ -205,7 +205,7 @@ func.func @test_instance_no_implementations() -> tensor<4x4xf32> {
 // -----
 
 module {
-  template.func @test_func_with_template_types(%m: index, %n: index) {
+  template.func @test_func_with_template_types(%m: index, %n: index) -> !template.type<2> {
     %c0 = arith.constant 0 : index
     %loaded = template.branch 0(%c0) : (index) -> (!template.type<0>)
     %loaded2 = template.branch 1(%c0) : (index) -> (!template.type<1>)
@@ -222,7 +222,7 @@ module {
 }
 
 // CHECK-LABEL: module {
-// CHECK:         template.func @test_func_with_template_types (%[[M:.+]]: index, %[[N:.+]]: index) {
+// CHECK:         template.func @test_func_with_template_types (%[[M:.+]]: index, %[[N:.+]]: index) -> !template.type<2> {
 // CHECK:           %[[C0:.+]] = arith.constant 0 : index
 // CHECK:           %[[LOADED:.+]] = template.branch 0(%[[C0]]) : (index) -> !template.type<0>
 // CHECK:           %[[LOADED2:.+]] = template.branch 1(%[[C0]]) : (index) -> !template.type<1>

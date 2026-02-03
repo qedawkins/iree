@@ -8,16 +8,23 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpImplementation.h"
 
 namespace mlir::iree_compiler::IREE::Template {
 
 //===----------------------------------------------------------------------===//
-// Custom parsing/printing for FuncOp main region
+// Custom parsing/printing for FuncOp signature
 //===----------------------------------------------------------------------===//
 
-static ParseResult parseTemplateFuncMain(OpAsmParser &parser, Region &region) {
+static ParseResult parseTemplateFuncSignature(OpAsmParser &parser,
+                                              TypeAttr &functionType,
+                                              Region &region) {
   SmallVector<OpAsmParser::Argument> args;
+  SmallVector<Type> argTypes;
+  SmallVector<Type> resultTypes;
+
+  // Parse optional argument list: (%arg0: type0, %arg1: type1).
   if (succeeded(parser.parseOptionalLParen())) {
     if (failed(parser.parseArgumentList(args, OpAsmParser::Delimiter::None,
                                         /*allowType=*/true))) {
@@ -26,8 +33,35 @@ static ParseResult parseTemplateFuncMain(OpAsmParser &parser, Region &region) {
     if (failed(parser.parseRParen())) {
       return failure();
     }
+    for (const auto &arg : args) {
+      argTypes.push_back(arg.type);
+    }
   }
 
+  // Parse optional result types: -> (type0, type1) or -> type0.
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (succeeded(parser.parseOptionalLParen())) {
+      if (failed(parser.parseTypeList(resultTypes))) {
+        return failure();
+      }
+      if (failed(parser.parseRParen())) {
+        return failure();
+      }
+    } else {
+      Type singleResult;
+      if (failed(parser.parseType(singleResult))) {
+        return failure();
+      }
+      resultTypes.push_back(singleResult);
+    }
+  }
+
+  // Build function type.
+  FunctionType fnType =
+      FunctionType::get(parser.getContext(), argTypes, resultTypes);
+  functionType = TypeAttr::get(fnType);
+
+  // Parse the region.
   if (failed(parser.parseRegion(region, args))) {
     return failure();
   }
@@ -35,19 +69,34 @@ static ParseResult parseTemplateFuncMain(OpAsmParser &parser, Region &region) {
   return success();
 }
 
-static void printTemplateFuncMain(OpAsmPrinter &printer, FuncOp op,
-                                  Region &region) {
-  bool hasArgs = !region.empty() && !region.front().getArguments().empty();
-  if (hasArgs) {
-    // Print args without leading space (format already adds space after
-    // sym_name). This removes it with a backspace approach not possible here,
-    // so we accept the space before '(' for now.
+static void printTemplateFuncSignature(OpAsmPrinter &printer, FuncOp op,
+                                       TypeAttr functionType, Region &region) {
+  FunctionType fnType = cast<FunctionType>(functionType.getValue());
+
+  // Print arguments.
+  if (!region.empty() && !region.front().getArguments().empty()) {
     printer << "(";
     llvm::interleaveComma(
         region.front().getArguments(), printer,
         [&](BlockArgument arg) { printer.printRegionArgument(arg); });
-    printer << ") ";
+    printer << ")";
   }
+
+  // Print result types.
+  ArrayRef<Type> results = fnType.getResults();
+  if (!results.empty()) {
+    printer << " -> ";
+    if (results.size() > 1) {
+      printer << "(";
+    }
+    llvm::interleaveComma(results, printer, [&](Type t) { printer << t; });
+    if (results.size() > 1) {
+      printer << ")";
+    }
+  }
+
+  // Print space before region.
+  printer << " ";
   printer.printRegion(region, /*printEntryBlockArgs=*/false,
                       /*printBlockTerminators=*/true);
 }
@@ -109,6 +158,22 @@ LogicalResult FuncOp::verify() {
   Block &mainBlock = getMain().front();
   if (mainBlock.empty() || !isa<ReturnOp>(mainBlock.getTerminator())) {
     return emitOpError("main region must be terminated with template.return");
+  }
+
+  // Verify main block argument types match function input types.
+  FunctionType fnType = getFunctionType();
+  if (mainBlock.getArgumentTypes() != fnType.getInputs()) {
+    return emitOpError("main block argument types ")
+           << mainBlock.getArgumentTypes()
+           << " must match function input types " << fnType.getInputs();
+  }
+
+  // Verify return operand types match function result types.
+  auto returnOp = cast<ReturnOp>(mainBlock.getTerminator());
+  if (returnOp.getOperands().getTypes() != fnType.getResults()) {
+    return emitOpError("return operand types ")
+           << returnOp.getOperands().getTypes()
+           << " must match function result types " << fnType.getResults();
   }
 
   return success();

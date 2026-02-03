@@ -85,10 +85,10 @@ def Template_FuncOp : Template_Op<"func", [
 
     Example:
     ```mlir
-    template.func @matmul_template(%m: index, %n: index, %k: index) {
+    template.func @matmul_template(%m: index, %n: index, %k: index) -> tensor<4x8xf32> {
       // Loop structure that branches into implementation blocks.
       ...
-      template.return %final : !template.type<2>
+      template.return %final : tensor<4x8xf32>
     } {
     ^load_a(%idx: index):
       // Abstract - caller must provide implementation.
@@ -104,7 +104,10 @@ def Template_FuncOp : Template_Op<"func", [
     ```
   }];
 
-  let arguments = (ins SymbolNameAttr:$sym_name);
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type
+  );
   let results = (outs);
   let regions = (region
     SizedRegion<1>:$main,
@@ -113,12 +116,20 @@ def Template_FuncOp : Template_Op<"func", [
 
   let assemblyFormat = [{
     $sym_name
-    custom<TemplateFuncMain>($main)
+    custom<TemplateFuncSignature>($function_type, $main)
     ($implementations^)?
     attr-dict
   }];
 
   let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns the argument types of this function.
+    ArrayRef<Type> getArgumentTypes() { return getFunctionType().getInputs(); }
+
+    /// Returns the result types of this function.
+    ArrayRef<Type> getResultTypes() { return getFunctionType().getResults(); }
+  }];
 }
 
 //===----------------------------------------------------------------------===//
