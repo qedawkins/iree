@@ -239,4 +239,63 @@ def Template_UnimplementedOp : Template_Op<"unimplemented", [
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// template.call
+//===----------------------------------------------------------------------===//
+
+def Template_CallOp : Template_Op<"call", [
+    RecursiveMemoryEffects
+]> {
+  let summary = [{Calls a template function with type bindings and implementations.}];
+  let description = [{
+    Calls a `template.func` symbol, providing:
+    1. Concrete type bindings for each `!template.type<N>` parameter
+    2. Operands matching the expanded input signature
+    3. Optional implementation blocks for unimplemented blocks
+
+    Type bindings are specified as a list where each element can be:
+    - A single type: `!my_type` (expands to one type)
+    - A list of types: `[!type_a, !type_b]` (expands to multiple types)
+    - An empty list: `[]` (expands to zero types)
+
+    Example:
+    ```mlir
+    // template.func @foo has signature (index, !template.type<0>) -> !template.type<1>
+    // with !template.type<0> = [i32, f32] and !template.type<1> = tensor<4xf32>
+    %result = template.call @foo<[i32, f32], tensor<4xf32>>(%idx, %a, %b : index, i32, f32) -> tensor<4xf32> {
+    ^bb0(%x: i32, %y: f32):
+      %z = arith.addi %x, %y : i32
+      template.return %z : tensor<4xf32>
+    }
+    ```
+  }];
+
+  let arguments = (ins
+    FlatSymbolRefAttr:$callee,
+    TypeBindingsProp:$type_bindings,
+    Variadic<AnyType>:$operands
+  );
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region AnyRegion:$implementations);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    /// Get the type binding for a specific template type ID.
+    ArrayRef<Type> getTypeBinding(int64_t id) {
+      auto bindings = getTypeBindings();
+      if (id < 0 || static_cast<size_t>(id) >= bindings.size()) {
+        return {};
+      }
+      return bindings[id];
+    }
+
+    /// Get the number of unimplemented blocks this call provides.
+    size_t getNumProvidedImplementations() {
+      return getImplementations().getBlocks().size();
+    }
+  }];
+}
+
 #endif  // IREE_CODEGEN_DIALECT_TEMPLATE_OPS
