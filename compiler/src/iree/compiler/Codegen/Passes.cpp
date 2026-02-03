@@ -15,6 +15,7 @@
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
+#include "iree/compiler/Codegen/Dialect/Template/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
@@ -39,6 +40,7 @@ void registerCodegenPasses() {
   registerIREEGPUPasses();
   registerIREEVectorExtPasses();
   registerPCFPasses();
+  registerTemplateTransformsPasses();
 }
 
 } // namespace mlir::iree_compiler
