@@ -10,6 +10,7 @@ namespace mlir::iree_compiler {
 
 void registerTemplateTransformsPasses() {
   IREE::Template::registerConcretizeTemplateCallsPass();
+  IREE::Template::registerInlineTemplateInstancesPass();
 }
 
 } // namespace mlir::iree_compiler

@@ -30,4 +30,21 @@ def ConcretizeTemplateCallsPass :
   ];
 }
 
+def InlineTemplateInstancesPass :
+    Pass<"iree-template-inline-instances"> {
+  let summary = "Inline template.instance ops by expanding branch operations";
+  let description = [{
+    Inlines template.instance operations by:
+    1. Finding all template.branch ops within the instance
+    2. Inlining the corresponding implementation block at each branch site
+    3. Inlining the main region content in place of the instance op
+
+    Uses walkAndApplyPatterns with post-order traversal to ensure nested
+    instances are inlined before their parents.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::Template::TemplateDialect",
+  ];
+}
+
 #endif // IREE_CODEGEN_DIALECT_TEMPLATE_TRANSFORMS_PASSES

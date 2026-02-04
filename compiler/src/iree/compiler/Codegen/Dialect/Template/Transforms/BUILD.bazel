@@ -37,6 +37,7 @@ iree_compiler_cc_library(
     name = "Transforms",
     srcs = [
         "ConcretizeTemplateCalls.cpp",
+        "InlineTemplateInstances.cpp",
         "Passes.cpp",
     ],
     hdrs = [

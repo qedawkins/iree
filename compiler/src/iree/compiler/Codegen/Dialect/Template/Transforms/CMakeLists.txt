@@ -26,6 +26,7 @@ iree_cc_library(
     "Passes.h"
   SRCS
     "ConcretizeTemplateCalls.cpp"
+    "InlineTemplateInstances.cpp"
     "Passes.cpp"
   DEPS
     ::PassesIncGen
