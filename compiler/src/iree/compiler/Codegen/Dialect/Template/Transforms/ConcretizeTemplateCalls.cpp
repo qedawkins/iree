@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Dialect/Template/IR/Template.h"
+#include "iree/compiler/Codegen/Dialect/Template/IR/TemplateInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/Template/Transforms/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -189,9 +190,11 @@ static void convertOpTypes(Operation *op, TypeConverter &typeConverter) {
     }
   }
   // If this is a nested template.call, convert its type_bindings.
-  if (auto nestedCall = dyn_cast<CallOp>(op)) {
-    auto &bindings = nestedCall.getProperties().type_bindings;
-    for (auto &binding : bindings) {
+  if (isa<CallOp>(op)) {
+    auto nestedCall = cast<CallOp>(op);
+    auto bindings = nestedCall.getTypeBindings();
+    SmallVector<SmallVector<Type>> newBindings;
+    for (const auto &binding : bindings) {
       SmallVector<Type> newBinding;
       for (Type t : binding) {
         SmallVector<Type> converted;
@@ -203,8 +206,9 @@ static void convertOpTypes(Operation *op, TypeConverter &typeConverter) {
           newBinding.push_back(t);
         }
       }
-      binding = newBinding;
+      newBindings.push_back(newBinding);
     }
+    nestedCall.getProperties().type_bindings = newBindings;
   }
 }
 
@@ -238,8 +242,8 @@ static void fixupReturnOpsFor1NExpansion(InstanceOp instanceOp) {
 /// Convert a template.call to template.instance.
 static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
                                          SymbolTable &symbolTable) {
-  MLIRContext *context = callOp.getContext();
-  Location loc = callOp.getLoc();
+  MLIRContext *context = callOp->getContext();
+  Location loc = callOp->getLoc();
   OpBuilder builder(callOp);
 
   LLVM_DEBUG(llvm::dbgs() << "Converting call to @" << callOp.getCallee()
@@ -530,8 +534,12 @@ void ConcretizeTemplateCallsPass::runOnOperation() {
       if (op->getParentOfType<FuncOp>()) {
         return;
       }
-      if (auto callOp = dyn_cast<CallOp>(op)) {
-        callsToProcess.push_back(callOp);
+      // Find all ops implementing the interface, but for now we only handle
+      // CallOp.
+      if (auto callInterface = dyn_cast<TemplateCallOpInterface>(op)) {
+        if (auto callOp = dyn_cast<CallOp>(op)) {
+          callsToProcess.push_back(callOp);
+        }
       }
     });
 
