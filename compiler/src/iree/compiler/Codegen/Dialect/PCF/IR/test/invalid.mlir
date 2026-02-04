@@ -115,3 +115,29 @@ util.func private @dynamic_dim_mismatch(%dim0: index) {
   }
   util.return
 }
+
+// -----
+
+util.func private @template_type_mismatch_region_arg() {
+// expected-error@+1 {{region ref argument type '!template.type<1>' must match template result type '!template.type<0>'}}
+  pcf.generic scope(#pcf.sequential)
+    execute(%ref)[%id: index, %n: index]
+         : (!template.type<1>)
+        -> (!template.type<0>) {
+    pcf.return
+  }
+  util.return
+}
+
+// -----
+
+util.func private @template_type_mismatch_init(%init: !template.type<1>) {
+// expected-error@+1 {{tied init type '!template.type<1>' must match template result type '!template.type<0>'}}
+  pcf.generic scope(#pcf.sequential)
+    execute(%ref = %init)[%id: index, %n: index]
+         : (!template.type<0>)
+        -> (!template.type<0>) {
+    pcf.return
+  }
+  util.return
+}

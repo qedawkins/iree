@@ -126,3 +126,16 @@ func.func @get_memref_no_fold_dynamic(%source: !pcf.sref<32x64xf32, sync(#pcf.se
   %0 = pcf.get_memref %source[%offset, 0] [8, 8] [1, 1] : !pcf.sref<32x64xf32, sync(#pcf.sequential)> to memref<8x8xf32, strided<[?, ?], offset: ?>>
   return %0 : memref<8x8xf32, strided<[?, ?], offset: ?>>
 }
+
+// -----
+
+// Verify folders don't crash with template types present (they won't fold, but shouldn't crash).
+// CHECK-LABEL: @write_slice_with_template_context
+func.func @write_slice_with_template_context(%arg0: tensor<8x8xf32>, %dest: !pcf.sref<32x64xf32, sync(#pcf.sequential)>, %t: !template.type<0>) -> !template.type<0> {
+  %c10 = arith.constant 10 : index
+  %c20 = arith.constant 20 : index
+  // CHECK: pcf.write_slice %arg0 into %arg1[10, 20] [8, 8] [1, 1]
+  pcf.write_slice %arg0 into %dest[%c10, %c20] [8, 8] [1, 1] : tensor<8x8xf32> into !pcf.sref<32x64xf32, sync(#pcf.sequential)>
+  // Just return the template type to ensure it parses in this context.
+  return %t : !template.type<0>
+}
