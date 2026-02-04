@@ -7,10 +7,15 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
+#include "iree/compiler/Codegen/Dialect/Template/IR/Template.h"
 #include "iree/compiler/Codegen/Dialect/Template/IR/TemplateInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -606,86 +611,507 @@ FlatSymbolRefAttr ProcessInnerTileOp::getCalledSymbol() {
   return getCalleeAttr();
 }
 
+OperandRange ProcessInnerTileOp::getCallOperands() {
+  // Per design doc section 2.3: "Only output operands are passed explicitly
+  // because pcf.generic needs them for init args."
+  // The template.func receives outputs as arguments.
+  // Inputs are accessed via implicit captures (the inlineImplementationBlocks
+  // method can reference them directly since they're in scope).
+  unsigned numBounds = getBounds().size();
+  unsigned numInputs = getInputs().size();
+  unsigned numOutputs = getOutputs().size();
+
+  // Return only outputs, starting after bounds and inputs.
+  return getOperation()->getOperands().slice(numBounds + numInputs, numOutputs);
+}
+
 SmallVector<SmallVector<Type>> ProcessInnerTileOp::getTemplateTypes() {
+  // Per design doc section 2.2, we provide 4 type bindings:
+  //   type<0>: Result types (same as output tensor types)
+  //   type<1>: pcf.sref with same shape/element as results (for destinations)
+  //   type<2>: Per-thread accumulator tensors (distributed inner tile shape)
+  //   type<3>: pcf.sref for input shared memory
+  SmallVector<SmallVector<Type>> bindings;
   MLIRContext *context = getContext();
-  SmallVector<SmallVector<Type>> typeBindings;
 
-  // type<0>: Result types (same as output tensor types)
-  SmallVector<Type> resultTypes;
-  for (Type t : getOutputs().getTypes()) {
-    resultTypes.push_back(t);
+  Codegen::InnerTileDescAttrInterface kind = getKind();
+
+  // Get undistributed and distributed tile types.
+  SmallVector<VectorType> undistributedTypes;
+  kind.getUndistributedTileTypes(undistributedTypes);
+  SmallVector<VectorType> distributedTypes;
+  kind.getDistributedTileTypes(distributedTypes);
+
+  // Create a scope attribute for shared memory allocations.
+  // Using TestScopeAttr for now - a production impl would use GPU-specific
+  // scope.
+  auto scope = PCF::TestScopeAttr::get(context);
+
+  // type<0>: Output/result tensor type (full tensor shape).
+  if (!getOutputs().empty()) {
+    bindings.push_back({getOutputs().front().getType()});
+  } else {
+    bindings.push_back({});
   }
-  typeBindings.push_back(std::move(resultTypes));
 
-  // type<1>: pcf.sref with result shapes using return_only_sync_scope
-  // This is for the output shared memory.
-  SmallVector<Type> outputSrefTypes;
-  for (Type t : getOutputs().getTypes()) {
-    auto tensorType = cast<RankedTensorType>(t);
-    auto syncAttr = PCF::SyncOnReturnAttr::get(context);
-    auto scopeAttr = PCF::SequentialAttr::get(context);
-    auto srefType = PCF::ShapedRefType::get(context, tensorType.getShape(),
-                                            tensorType.getElementType(),
-                                            scopeAttr, syncAttr);
-    outputSrefTypes.push_back(srefType);
+  // type<1>: pcf.sref for destination (same shape/element as output).
+  if (!getOutputs().empty()) {
+    auto outputType = cast<RankedTensorType>(getOutputs().front().getType());
+    auto srefType = PCF::ShapedRefType::get(context, outputType.getShape(),
+                                            outputType.getElementType(), scope);
+    bindings.push_back({srefType});
+  } else {
+    bindings.push_back({});
   }
-  typeBindings.push_back(std::move(outputSrefTypes));
 
-  // type<2>: Per-thread accumulator tensors (outer dims / distribution / inner)
-  // For now, we compute this based on the inner tile description.
-  SmallVector<Type> accumulatorTypes;
-  SmallVector<VectorType> undistributedTileTypes;
-  getKind().getUndistributedTileTypes(undistributedTileTypes);
-  // The accumulator types are the output operand tile types.
-  for (int64_t i = 0; i < getKind().getExpectedNumOutputs(); ++i) {
-    int64_t operandIdx = getKind().getExpectedNumInputs() + i;
-    VectorType tileType = undistributedTileTypes[operandIdx];
-    // Create a tensor type from the vector type dimensions.
-    auto tensorType =
-        RankedTensorType::get(tileType.getShape(), tileType.getElementType());
-    accumulatorTypes.push_back(tensorType);
+  // type<2>: Per-thread accumulator tensor (distributed shape).
+  // Shape = outer_dims + distributed_inner_dims
+  // For MFMA_F32_16x16x16_F16 with tensor<4x4x16x16xf32>:
+  //   - outer_dims = [4, 4]
+  //   - undistributed inner = [16, 16]
+  //   - distributed inner = [4, 1] (per-thread portion)
+  //   - result type<2> = tensor<4x4x4x1xf32>
+  if (!getOutputs().empty() && !undistributedTypes.empty() &&
+      !distributedTypes.empty()) {
+    auto outputType = cast<RankedTensorType>(getOutputs().front().getType());
+    int64_t numInputs = getInputs().size();
+    // Accumulator is after inputs in the operand list.
+    int64_t accIndex = numInputs;
+
+    if (accIndex < undistributedTypes.size() &&
+        accIndex < distributedTypes.size()) {
+      VectorType undistType = undistributedTypes[accIndex];
+      VectorType distType = distributedTypes[accIndex];
+
+      int64_t innerRank = undistType.getRank();
+      int64_t totalRank = outputType.getRank();
+      int64_t outerRank = totalRank - innerRank;
+
+      // Build shape: outer dims from output + distributed inner dims.
+      SmallVector<int64_t> shape;
+      for (int64_t i = 0; i < outerRank; ++i) {
+        shape.push_back(outputType.getDimSize(i));
+      }
+      for (int64_t dim : distType.getShape()) {
+        shape.push_back(dim);
+      }
+
+      auto type2 = RankedTensorType::get(shape, outputType.getElementType());
+      bindings.push_back({type2});
+    } else {
+      bindings.push_back({getOutputs().front().getType()});
+    }
+  } else {
+    bindings.push_back({});
   }
-  typeBindings.push_back(std::move(accumulatorTypes));
 
-  // type<3>: pcf.sref for input shared memory
-  SmallVector<Type> inputSrefTypes;
-  for (Type t : getInputs().getTypes()) {
-    auto tensorType = cast<RankedTensorType>(t);
-    auto syncAttr = PCF::SyncOnReturnAttr::get(context);
-    auto scopeAttr = PCF::SequentialAttr::get(context);
-    auto srefType = PCF::ShapedRefType::get(context, tensorType.getShape(),
-                                            tensorType.getElementType(),
-                                            scopeAttr, syncAttr);
-    inputSrefTypes.push_back(srefType);
+  // type<3>: pcf.sref for input shared memory.
+  if (!getInputs().empty()) {
+    auto inputType = cast<RankedTensorType>(getInputs().front().getType());
+    auto srefType = PCF::ShapedRefType::get(context, inputType.getShape(),
+                                            inputType.getElementType(), scope);
+    bindings.push_back({srefType});
+  } else {
+    bindings.push_back({});
   }
-  typeBindings.push_back(std::move(inputSrefTypes));
 
-  return typeBindings;
+  return bindings;
+}
+
+/// Helper to compute offsets/sizes/strides for an operand using the kind
+/// interface, given the lane_id for distribution.
+static LogicalResult computeDistributedSliceParams(
+    OpBuilder &builder, Location loc, Codegen::InnerTileDescAttrInterface kind,
+    uint32_t operandIndex, Value operand, Value laneId,
+    SmallVectorImpl<OpFoldResult> &offsets,
+    SmallVectorImpl<OpFoldResult> &sizes,
+    SmallVectorImpl<OpFoldResult> &strides) {
+  OpFoldResult zero = builder.getIndexAttr(0);
+  OpFoldResult one = builder.getIndexAttr(1);
+
+  // Get tensor type for computing outer rank.
+  auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
+  if (!tensorType) {
+    return failure();
+  }
+
+  // Get undistributed tile types to determine inner rank.
+  SmallVector<VectorType> undistributedTypes;
+  kind.getUndistributedTileTypes(undistributedTypes);
+  if (operandIndex >= undistributedTypes.size()) {
+    return failure();
+  }
+  int64_t innerRank = undistributedTypes[operandIndex].getRank();
+  int64_t totalRank = tensorType.getRank();
+  int64_t outerRank = totalRank - innerRank;
+
+  // Initialize outer dimensions: offset=0, size=dim, stride=1.
+  for (int64_t i = 0; i < outerRank; ++i) {
+    offsets.push_back(zero);
+    sizes.push_back(tensor::getMixedSize(builder, loc, operand, i));
+    strides.push_back(one);
+  }
+
+  // Compute permutation (identity permutation for inner dims).
+  SmallVector<int64_t> permutation =
+      llvm::to_vector(llvm::seq<int64_t>(0, innerRank));
+
+  // Use the kind interface to populate inner offsets/sizes/strides based on
+  // lane_id distribution.
+  if (failed(kind.populateOperandOffsetsSizesStrides(
+          builder, loc, operandIndex, laneId, permutation, offsets, sizes,
+          strides))) {
+    return failure();
+  }
+
+  return success();
 }
 
 LogicalResult ProcessInnerTileOp::inlineImplementationBlocks(
     OpBuilder &builder, ArrayRef<Block *> blocksToPopulate) {
-  // For ProcessInnerTileOp, the blocks are:
-  // 0. Allocate shared memory
-  // 1. Initialize accumulators
-  // 2. Copy inputs to shared memory
-  // 3. Perform inner-tiled operation
-  // 4. Write results to destinations
+  // Per design doc section 2.3, ProcessInnerTileOp generates IR for 5 blocks:
+  //   Block 0: Allocate shared memory - () -> type<3>
+  //   Block 1: Initialize accumulators - (sg_id, lane_id, dest) -> type<2>
+  //   Block 2: Copy inputs to shared memory - (sg_id, lane_id, k_idx, allocs)
+  //   Block 3: Perform inner_tiled - (sg_id, lane_id, acc, allocs) -> type<2>
+  //   Block 4: Write results - (sg_id, lane_id, result, dest) -> ()
   //
-  // The actual implementation is highly target-specific and will be
-  // populated by the lowering passes. For now, we emit placeholder IR
-  // that can be further lowered.
+  // Block argument layout (for blocks 1-4):
+  //   arg 0: subgroup_id (index) - for distributing outer dims
+  //   arg 1: lane_id (index) - for distributing inner tile across lanes
+  //   arg 2+: block-specific data arguments
   //
-  // This method is called by ConcretizeTemplateCallsPass to populate
-  // the blocks with the implementation from this high-level op.
+  // Inputs (lhs, rhs) are captured from the enclosing scope. When the
+  // template.instance is created inside a func.func, the func arguments
+  // are accessible from within the implementation blocks.
 
-  // For the initial implementation, we return failure to indicate
-  // that the template should be resolved by the template.func's own
-  // implementation blocks rather than generating them here.
-  //
-  // In the future, this could generate the full implementation based
-  // on the inner tile description and indexing maps.
-  return failure();
+  Location loc = getLoc();
+  MLIRContext *context = getContext();
+
+  // Get indexing maps and iterator types from this op.
+  SmallVector<AffineMap> indexingMaps;
+  for (Attribute attr : getIndexingMaps()) {
+    indexingMaps.push_back(cast<AffineMapAttr>(attr).getValue());
+  }
+
+  SmallVector<utils::IteratorType> iteratorTypes;
+  for (Attribute attr : getIteratorTypes()) {
+    iteratorTypes.push_back(cast<linalg::IteratorTypeAttr>(attr).getValue());
+  }
+
+  // Get the kind (MMA layout descriptor) and create DISTRIBUTED semantics.
+  // We slice operands using lane_id and create a distributed inner_tiled op.
+  Codegen::InnerTileDescAttrInterface kind = getKind();
+  auto semantics = InnerTiledSemanticsAttr::get(context, /*distributed=*/true,
+                                                /*opaque=*/true);
+
+  // Get the inputs from this op - these are captured values.
+  SmallVector<Value> capturedInputs(getInputs().begin(), getInputs().end());
+  int64_t numInputs = capturedInputs.size();
+
+  // Process each block by index.
+  for (auto [blockIdx, destBlock] : llvm::enumerate(blocksToPopulate)) {
+    if (destBlock->empty()) {
+      continue;
+    }
+
+    Operation *terminator = destBlock->getTerminator();
+    auto unimplOp = dyn_cast<Template::UnimplementedOp>(terminator);
+    if (!unimplOp) {
+      continue;
+    }
+
+    builder.setInsertionPoint(terminator);
+
+    switch (blockIdx) {
+    case 0: {
+      // Block 0: Allocate shared memory.
+      // Arguments: () - no arguments.
+      // Returns pcf.sref (type<3>) for input shared memory.
+      SmallVector<Value> returnValues;
+      for (Type resultType : unimplOp.getResultTypes()) {
+        if (auto srefType = dyn_cast<PCF::ShapedRefType>(resultType)) {
+          // Use pcf.alloc to allocate pcf.sref shared memory.
+          Value allocResult = PCF::AllocOp::create(builder, loc, srefType);
+          returnValues.push_back(allocResult);
+        } else {
+          return emitOpError("block 0: expected pcf.sref return type, got ")
+                 << resultType;
+        }
+      }
+      Template::ReturnOp::create(builder, loc, returnValues);
+      break;
+    }
+    case 1: {
+      // Block 1: Initialize accumulators from destination.
+      // Arguments: (subgroup_id, lane_id, dest).
+      // dest is pcf.sref (type<1>). Uses lane_id to read this thread's portion
+      // of the destination via pcf.read_slice.
+      if (destBlock->getNumArguments() < 3) {
+        return emitOpError("block 1: expected at least 3 arguments");
+      }
+      Value laneId = destBlock->getArgument(1);
+      Value destArg = destBlock->getArgument(2);
+
+      // Verify dest is pcf.sref.
+      auto srefType = dyn_cast<PCF::ShapedRefType>(destArg.getType());
+      if (!srefType) {
+        return emitOpError("block 1: expected pcf.sref for dest argument, got ")
+               << destArg.getType();
+      }
+
+      SmallVector<Value> returnValues;
+      for (Type resultType : unimplOp.getResultTypes()) {
+        auto tensorType = dyn_cast<RankedTensorType>(resultType);
+        if (!tensorType) {
+          return emitOpError("block 1: unsupported return type ") << resultType;
+        }
+
+        // Create a placeholder tensor to compute slice params (we need a
+        // RankedTensorType for the helper function).
+        auto placeholderType = RankedTensorType::get(srefType.getShape(),
+                                                     srefType.getElementType());
+        Value placeholder =
+            tensor::EmptyOp::create(builder, loc, placeholderType.getShape(),
+                                    placeholderType.getElementType());
+
+        // Compute this thread's slice of the destination using lane_id.
+        // The accumulator operand index is after all inputs.
+        SmallVector<OpFoldResult> offsets, sizes, strides;
+        if (failed(computeDistributedSliceParams(builder, loc, kind, numInputs,
+                                                 placeholder, laneId, offsets,
+                                                 sizes, strides))) {
+          return emitOpError("block 1: failed to compute slice params");
+        }
+
+        // Build the full-rank slice shape from sizes.
+        // pcf.read_slice requires source and result to have the same rank.
+        SmallVector<int64_t> sliceShape;
+        for (OpFoldResult size : sizes) {
+          if (auto attr = dyn_cast<Attribute>(size)) {
+            sliceShape.push_back(cast<IntegerAttr>(attr).getInt());
+          } else {
+            sliceShape.push_back(ShapedType::kDynamic);
+          }
+        }
+        auto fullRankType =
+            RankedTensorType::get(sliceShape, srefType.getElementType());
+
+        // Use pcf.read_slice to read the full-rank slice from dest (pcf.sref).
+        Value fullSlice = PCF::ReadSliceOp::create(
+            builder, loc, fullRankType, destArg, offsets, sizes, strides);
+
+        // If the result type has fewer dimensions (e.g., trailing 1s
+        // collapsed), collapse the slice to match.
+        Value resultSlice = fullSlice;
+        if (fullRankType.getRank() != tensorType.getRank()) {
+          // Build reassociation map to collapse trailing dimensions.
+          // E.g., [4,4,4,1] -> [4,4,4] collapses last two dims.
+          SmallVector<ReassociationIndices> reassociation;
+          int64_t srcRank = fullRankType.getRank();
+          int64_t dstRank = tensorType.getRank();
+          for (int64_t i = 0; i < dstRank - 1; ++i) {
+            reassociation.push_back({i});
+          }
+          // Last group collapses remaining dimensions.
+          ReassociationIndices lastGroup;
+          for (int64_t i = dstRank - 1; i < srcRank; ++i) {
+            lastGroup.push_back(i);
+          }
+          reassociation.push_back(lastGroup);
+          resultSlice = tensor::CollapseShapeOp::create(
+              builder, loc, tensorType, fullSlice, reassociation);
+        }
+
+        returnValues.push_back(resultSlice);
+      }
+      Template::ReturnOp::create(builder, loc, returnValues);
+      break;
+    }
+    case 2: {
+      // Block 2: Copy inputs to shared memory.
+      // Arguments: (subgroup_id, lane_id, k_idx, allocs).
+      // allocs is pcf.sref (type<3>). Uses lane_id to compute which portion
+      // of the input each lane copies from captured inputs to shared memory.
+      if (destBlock->getNumArguments() < 4) {
+        return emitOpError("block 2: expected at least 4 arguments");
+      }
+      Value laneId = destBlock->getArgument(1);
+      // Value kIdx = destBlock->getArgument(2);
+      Value allocsArg = destBlock->getArgument(3);
+
+      // Verify allocs is pcf.sref.
+      auto srefType = dyn_cast<PCF::ShapedRefType>(allocsArg.getType());
+      if (!srefType) {
+        return emitOpError(
+                   "block 2: expected pcf.sref for allocs argument, got ")
+               << allocsArg.getType();
+      }
+
+      // Extract per-lane slice from each captured input using lane_id
+      // and write to shared memory via pcf.write_slice.
+      for (auto [opIndex, input] : llvm::enumerate(capturedInputs)) {
+        SmallVector<OpFoldResult> offsets, sizes, strides;
+        if (failed(computeDistributedSliceParams(builder, loc, kind, opIndex,
+                                                 input, laneId, offsets, sizes,
+                                                 strides))) {
+          return emitOpError("block 2: failed to compute slice for input ")
+                 << opIndex;
+        }
+
+        // Extract per-lane slice from input (tensor).
+        Value inputSlice = tensor::ExtractSliceOp::create(
+            builder, loc, input, offsets, sizes, strides);
+
+        // Write to shared memory (pcf.sref) using pcf.write_slice.
+        PCF::WriteSliceOp::create(builder, loc, inputSlice, allocsArg, offsets,
+                                  sizes, strides);
+      }
+
+      // Block 2 returns void.
+      Template::ReturnOp::create(builder, loc, ValueRange{});
+      break;
+    }
+    case 3: {
+      // Block 3: Perform inner_tiled computation.
+      // Arguments: (subgroup_id, lane_id, acc, allocs).
+      // The acc argument is type<2> (per-thread distributed accumulator).
+      // Uses lane_id to slice captured inputs for per-thread computation.
+      if (destBlock->getNumArguments() < 4) {
+        return emitOpError("block 3: expected at least 4 arguments");
+      }
+      Value laneId = destBlock->getArgument(1);
+      Value accArg = destBlock->getArgument(2);
+      // Value allocsArg = destBlock->getArgument(3);
+
+      // Slice each captured input using lane_id distribution.
+      SmallVector<Value> inputSlices;
+      for (auto [opIndex, input] : llvm::enumerate(capturedInputs)) {
+        SmallVector<OpFoldResult> offsets, sizes, strides;
+        if (failed(computeDistributedSliceParams(builder, loc, kind, opIndex,
+                                                 input, laneId, offsets, sizes,
+                                                 strides))) {
+          return emitOpError("block 3: failed to compute slice for input ")
+                 << opIndex;
+        }
+        Value slice = tensor::ExtractSliceOp::create(builder, loc, input,
+                                                     offsets, sizes, strides);
+        inputSlices.push_back(slice);
+      }
+
+      // The acc argument is already the per-thread distributed shape (type<2>).
+      // Create inner_tiled op with distributed semantics using sliced inputs.
+      auto innerTiledOp = Codegen::InnerTiledOp::create(
+          builder, loc, inputSlices, {accArg}, indexingMaps, iteratorTypes,
+          kind, semantics);
+
+      Template::ReturnOp::create(builder, loc, innerTiledOp.getResults());
+      break;
+    }
+    case 4: {
+      // Block 4: Write results back to destinations.
+      // Arguments: (subgroup_id, lane_id, result, dest).
+      // dest is pcf.sref (type<1>). Uses lane_id to compute where to write
+      // this thread's result via pcf.write_slice.
+      if (destBlock->getNumArguments() < 4) {
+        return emitOpError("block 4: expected at least 4 arguments");
+      }
+      Value laneId = destBlock->getArgument(1);
+      Value resultArg = destBlock->getArgument(2);
+      Value destArg = destBlock->getArgument(3);
+
+      // Verify dest is pcf.sref.
+      auto srefType = dyn_cast<PCF::ShapedRefType>(destArg.getType());
+      if (!srefType) {
+        return emitOpError("block 4: expected pcf.sref for dest argument, got ")
+               << destArg.getType();
+      }
+
+      // Create a placeholder tensor to compute slice params (we need a
+      // RankedTensorType for the helper function).
+      auto placeholderType =
+          RankedTensorType::get(srefType.getShape(), srefType.getElementType());
+      Value placeholder =
+          tensor::EmptyOp::create(builder, loc, placeholderType.getShape(),
+                                  placeholderType.getElementType());
+
+      // Compute offsets for writing this thread's result into destination.
+      SmallVector<OpFoldResult> offsets, sizes, strides;
+      if (failed(computeDistributedSliceParams(builder, loc, kind, numInputs,
+                                               placeholder, laneId, offsets,
+                                               sizes, strides))) {
+        return emitOpError("block 4: failed to compute slice params");
+      }
+
+      // pcf.write_slice requires source and dest to have the same rank.
+      // If result has fewer dimensions (collapsed from full rank), expand it.
+      auto resultType = cast<RankedTensorType>(resultArg.getType());
+      int64_t destRank = srefType.getRank();
+      Value sourceToWrite = resultArg;
+
+      if (resultType.getRank() != destRank) {
+        // Build the full-rank slice shape from sizes.
+        SmallVector<int64_t> sliceShape;
+        for (OpFoldResult size : sizes) {
+          if (auto attr = dyn_cast<Attribute>(size)) {
+            sliceShape.push_back(cast<IntegerAttr>(attr).getInt());
+          } else {
+            sliceShape.push_back(ShapedType::kDynamic);
+          }
+        }
+        auto fullRankType =
+            RankedTensorType::get(sliceShape, resultType.getElementType());
+
+        // Build reassociation map to expand dimensions.
+        // E.g., [4,4,4] -> [4,4,4,1] expands by adding a trailing dim.
+        SmallVector<ReassociationIndices> reassociation;
+        int64_t srcRank = resultType.getRank();
+        for (int64_t i = 0; i < srcRank - 1; ++i) {
+          reassociation.push_back({i});
+        }
+        // Last group expands to remaining dimensions.
+        ReassociationIndices lastGroup;
+        for (int64_t i = srcRank - 1; i < destRank; ++i) {
+          lastGroup.push_back(i);
+        }
+        reassociation.push_back(lastGroup);
+        sourceToWrite = tensor::ExpandShapeOp::create(
+            builder, loc, fullRankType, resultArg, reassociation);
+      }
+
+      // Write result to dest (pcf.sref) using pcf.write_slice.
+      PCF::WriteSliceOp::create(builder, loc, sourceToWrite, destArg, offsets,
+                                sizes, strides);
+
+      // Block 4 returns void - result flows through the main region's return.
+      Template::ReturnOp::create(builder, loc, ValueRange{});
+      break;
+    }
+    default: {
+      // Handle additional blocks with generic fallback.
+      SmallVector<Value> returnValues;
+      for (Type resultType : unimplOp.getResultTypes()) {
+        if (auto tensorType = dyn_cast<RankedTensorType>(resultType)) {
+          Value emptyTensor = tensor::EmptyOp::create(
+              builder, loc, tensorType.getShape(), tensorType.getElementType());
+          returnValues.push_back(emptyTensor);
+        } else if (isa<IndexType>(resultType)) {
+          Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+          returnValues.push_back(zero);
+        } else {
+          return emitOpError("unsupported return type in block ")
+                 << blockIdx << ": " << resultType;
+        }
+      }
+      Template::ReturnOp::create(builder, loc, returnValues);
+      break;
+    }
+    }
+
+    terminator->erase();
+  }
+
+  return success();
 }
 
 } // namespace mlir::iree_compiler::IREE::GPU

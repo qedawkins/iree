@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/Dialect/Template/IR/Template.h"
 #include "iree/compiler/Codegen/Dialect/Template/IR/TemplateInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/Template/Transforms/Passes.h"
@@ -12,6 +14,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -239,28 +242,33 @@ static void fixupReturnOpsFor1NExpansion(InstanceOp instanceOp) {
   });
 }
 
-/// Convert a template.call to template.instance.
-static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
-                                         SymbolTable &symbolTable) {
+/// Convert a TemplateCallOpInterface to template.instance.
+static LogicalResult
+convertTemplateCallInterface(TemplateCallOpInterface callInterface,
+                             FuncOp funcOp, SymbolTable &symbolTable) {
+  Operation *callOp = callInterface.getOperation();
   MLIRContext *context = callOp->getContext();
   Location loc = callOp->getLoc();
   OpBuilder builder(callOp);
 
-  LLVM_DEBUG(llvm::dbgs() << "Converting call to @" << callOp.getCallee()
+  FlatSymbolRefAttr calleeAttr = callInterface.getCalledSymbol();
+  SmallVector<SmallVector<Type>> typeBindings =
+      callInterface.getTemplateTypes();
+
+  LLVM_DEBUG(llvm::dbgs() << "Converting call to @" << calleeAttr.getValue()
                           << "\n");
 
   // a) Setup TypeConverter for template types.
   TypeConverter typeConverter;
   typeConverter.addConversion([](Type type) { return type; });
   typeConverter.addConversion(
-      [&callOp](TypeType templateType, SmallVectorImpl<Type> &results)
+      [&typeBindings](TypeType templateType, SmallVectorImpl<Type> &results)
           -> std::optional<LogicalResult> {
         int64_t id = templateType.getId();
-        const auto &bindings = callOp.getProperties().type_bindings;
-        if (id < 0 || static_cast<size_t>(id) >= bindings.size()) {
+        if (id < 0 || static_cast<size_t>(id) >= typeBindings.size()) {
           return success(); // Empty expansion.
         }
-        ArrayRef<Type> expansion = bindings[id];
+        ArrayRef<Type> expansion = typeBindings[id];
         for (Type t : expansion) {
           results.push_back(t);
         }
@@ -287,7 +295,7 @@ static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
   for (Type inputType : funcType.getInputs()) {
     SmallVector<Type> converted;
     if (failed(typeConverter.convertType(inputType, converted))) {
-      return callOp.emitOpError("failed to convert input type ") << inputType;
+      return callOp->emitOpError("failed to convert input type ") << inputType;
     }
     for (Type t : converted) {
       convertedInputTypes.push_back(t);
@@ -297,11 +305,14 @@ static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
   LLVM_DEBUG(llvm::dbgs() << "  Converted input types: "
                           << convertedInputTypes.size() << "\n");
 
-  // Verify operand count matches.
-  if (callOp.getOperands().size() != convertedInputTypes.size()) {
-    return callOp.emitOpError("expected ")
-           << convertedInputTypes.size() << " operands but got "
-           << callOp.getOperands().size();
+  // Get operands to pass to instance via the interface.
+  // This allows ops like process_inner_tile to provide only the operands
+  // that correspond to template.func arguments, not metadata like bounds.
+  OperandRange instanceOperands = callInterface.getCallOperands();
+  if (instanceOperands.size() != convertedInputTypes.size()) {
+    return callOp->emitOpError("template.func expects ")
+           << convertedInputTypes.size() << " operands but interface provides "
+           << instanceOperands.size();
   }
 
   // c) Calculate expected result types.
@@ -309,7 +320,8 @@ static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
   for (Type resultType : funcType.getResults()) {
     SmallVector<Type> converted;
     if (failed(typeConverter.convertType(resultType, converted))) {
-      return callOp.emitOpError("failed to convert result type ") << resultType;
+      return callOp->emitOpError("failed to convert result type ")
+             << resultType;
     }
     for (Type t : converted) {
       convertedResultTypes.push_back(t);
@@ -321,7 +333,7 @@ static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
 
   // d) Create template.instance with converted types.
   OperationState instanceState(loc, InstanceOp::getOperationName());
-  instanceState.addOperands(callOp.getOperands());
+  instanceState.addOperands(instanceOperands);
   instanceState.addTypes(convertedResultTypes);
   instanceState.addRegion(); // main
   instanceState.addRegion(); // implementations
@@ -353,11 +365,11 @@ static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
 
     if (numConverted == 1) {
       // 1:1 mapping.
-      mapping.map(funcArg, callOp.getOperand(operandIdx));
+      mapping.map(funcArg, instanceOperands[operandIdx]);
     } else if (numConverted > 1) {
       // 1:N mapping - create cast back to original type.
       builder.setInsertionPointToStart(instanceMainBlock);
-      ValueRange segment = callOp.getOperands().slice(operandIdx, numConverted);
+      ValueRange segment = instanceOperands.slice(operandIdx, numConverted);
       auto castOp =
           UnrealizedConversionCastOp::create(builder, loc, inputType, segment);
       mapping.map(funcArg, castOp.getResult(0));
@@ -424,8 +436,8 @@ static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
   LLVM_DEBUG(llvm::dbgs() << "  Cloned " << clonedImplBlocks.size()
                           << " impl blocks\n");
 
-  // g) Populate unimplemented blocks from call's implementations.
-  int64_t callBlockIdx = 0;
+  // g) Populate unimplemented blocks using the interface.
+  SmallVector<Block *> blocksToPopulate;
   for (Block *implBlock : clonedImplBlocks) {
     // Skip empty blocks.
     if (implBlock->empty()) {
@@ -440,35 +452,15 @@ static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
       continue; // Already implemented.
     }
 
-    if (callBlockIdx >=
-        static_cast<int64_t>(callOp.getImplementations().getBlocks().size())) {
-      return callOp.emitOpError("not enough implementations provided");
-    }
+    blocksToPopulate.push_back(implBlock);
+  }
 
-    Block &callBlock =
-        *std::next(callOp.getImplementations().begin(), callBlockIdx);
-    callBlockIdx++;
-
-    builder.setInsertionPoint(unimplOp);
-
-    // Clone callBlock body with arg remapping.
-    IRMapping callMapping;
-    for (auto [callArg, implArg] :
-         llvm::zip(callBlock.getArguments(), implBlock->getArguments())) {
-      callMapping.map(callArg, implArg);
+  // Call the interface to populate the blocks.
+  if (!blocksToPopulate.empty()) {
+    if (failed(callInterface.inlineImplementationBlocks(builder,
+                                                        blocksToPopulate))) {
+      return callOp->emitOpError("failed to inline implementation blocks");
     }
-    for (Operation &op : callBlock.without_terminator()) {
-      builder.clone(op, callMapping);
-    }
-
-    // Get the template.return from callBlock and create new one.
-    auto callReturn = cast<ReturnOp>(callBlock.getTerminator());
-    SmallVector<Value> returnVals;
-    for (Value v : callReturn.getOperands()) {
-      returnVals.push_back(callMapping.lookupOrDefault(v));
-    }
-    ReturnOp::create(builder, loc, returnVals);
-    unimplOp->erase();
   }
 
   LLVM_DEBUG(llvm::dbgs() << "  Populated unimplemented blocks\n");
@@ -505,8 +497,8 @@ static LogicalResult convertTemplateCall(CallOp callOp, FuncOp funcOp,
   LLVM_DEBUG(llvm::dbgs() << "  Applied type conversion\n");
 
   // j) Replace uses and erase original call.
-  callOp.replaceAllUsesWith(instanceOp.getResults());
-  callOp.erase();
+  callOp->replaceAllUsesWith(instanceOp.getResults());
+  callOp->erase();
 
   LLVM_DEBUG(llvm::dbgs() << "  Conversion complete\n");
 
@@ -523,23 +515,20 @@ void ConcretizeTemplateCallsPass::runOnOperation() {
 
   LLVM_DEBUG(llvm::dbgs() << "=== ConcretizeTemplateCallsPass ===\n");
 
-  // Process template.call ops iteratively until none remain.
+  // Process TemplateCallOpInterface ops iteratively until none remain.
   bool changed = true;
   while (changed) {
     changed = false;
 
-    // Collect template.call ops not inside template.func.
-    SmallVector<CallOp> callsToProcess;
+    // Collect all ops implementing TemplateCallOpInterface not inside
+    // template.func.
+    SmallVector<TemplateCallOpInterface> callsToProcess;
     moduleOp.walk([&](Operation *op) {
       if (op->getParentOfType<FuncOp>()) {
         return;
       }
-      // Find all ops implementing the interface, but for now we only handle
-      // CallOp.
       if (auto callInterface = dyn_cast<TemplateCallOpInterface>(op)) {
-        if (auto callOp = dyn_cast<CallOp>(op)) {
-          callsToProcess.push_back(callOp);
-        }
+        callsToProcess.push_back(callInterface);
       }
     });
 
@@ -550,29 +539,32 @@ void ConcretizeTemplateCallsPass::runOnOperation() {
       break;
     }
 
-    for (CallOp callOp : callsToProcess) {
+    for (TemplateCallOpInterface callInterface : callsToProcess) {
+      Operation *op = callInterface.getOperation();
       // Skip if already erased by a previous conversion.
-      if (!callOp->getParentOp()) {
+      if (!op->getParentOp()) {
         continue;
       }
 
       // Look up the callee.
-      auto funcOp = symbolTable.lookup<FuncOp>(callOp.getCallee());
+      FlatSymbolRefAttr calleeAttr = callInterface.getCalledSymbol();
+      auto funcOp = symbolTable.lookup<FuncOp>(calleeAttr.getValue());
       if (!funcOp) {
-        callOp.emitOpError("cannot find template function '")
-            << callOp.getCallee() << "'";
+        op->emitOpError("cannot find template function '")
+            << calleeAttr.getValue() << "'";
         return signalPassFailure();
       }
 
       // Check for recursion using call stack detection.
       llvm::SetVector<StringRef> callStack;
       if (failed(checkForRecursion(funcOp, symbolTable, callStack))) {
-        callOp.emitOpError("recursive template call detected");
+        op->emitOpError("recursive template call detected");
         return signalPassFailure();
       }
 
       // Convert the call.
-      if (failed(convertTemplateCall(callOp, funcOp, symbolTable))) {
+      if (failed(convertTemplateCallInterface(callInterface, funcOp,
+                                              symbolTable))) {
         return signalPassFailure();
       }
 

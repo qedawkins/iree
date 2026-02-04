@@ -42,6 +42,22 @@ def TemplateCallOpInterface : OpInterface<"TemplateCallOpInterface"> {
     >,
     InterfaceMethod<
       /*desc=*/[{
+        Returns the operands to pass to the template.func call.
+        For template.call, this returns all operands.
+        For ops like process_inner_tile, this returns only the operands
+        that correspond to template.func arguments (e.g., inputs + outputs,
+        not bounds or other metadata operands).
+      }],
+      /*retTy=*/"::mlir::OperandRange",
+      /*methodName=*/"getCallOperands",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op->getOperands();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
         Populates the provided implementation blocks with generated IR.
         For template.call, this clones from its implementations region.
         For other ops like process_inner_tile, this generates IR based on

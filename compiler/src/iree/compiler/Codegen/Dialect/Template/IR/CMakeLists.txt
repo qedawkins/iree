@@ -18,6 +18,8 @@ iree_cc_library(
     "TemplateAttrs.h"
     "TemplateAttrs.h.inc"
     "TemplateDialect.h"
+    "TemplateInterfaces.h"
+    "TemplateInterfaces.h.inc"
     "TemplateOps.h"
     "TemplateOps.h.inc"
     "TemplateTypes.h"
@@ -26,11 +28,14 @@ iree_cc_library(
     "TemplateAttrs.cpp"
     "TemplateAttrs.cpp.inc"
     "TemplateDialect.cpp"
+    "TemplateInterfaces.cpp"
+    "TemplateInterfaces.cpp.inc"
     "TemplateOps.cpp"
     "TemplateOps.cpp.inc"
     "TemplateTypes.cpp"
     "TemplateTypes.cpp.inc"
   DEPS
+    ::TemplateInterfacesGen
     ::TemplateOpsGen
     ::TemplateTypesGen
     LLVMSupport
@@ -40,6 +45,16 @@ iree_cc_library(
     MLIRSupport
     MLIRTransformUtils
   PUBLIC
+)
+
+iree_tablegen_library(
+  NAME
+    TemplateInterfacesGen
+  TD_FILE
+    "TemplateInterfaces.td"
+  OUTS
+    --gen-op-interface-decls TemplateInterfaces.h.inc
+    --gen-op-interface-defs TemplateInterfaces.cpp.inc
 )
 
 iree_tablegen_library(

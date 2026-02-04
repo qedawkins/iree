@@ -17,6 +17,7 @@ iree_lit_test_suite(
     "combine_barrier_regions.mlir"
     "distribute_inner_tiled_to_lanes.mlir"
     "expand_undistributed_inner_tiles.mlir"
+    "process_inner_tile_concretization.mlir"
   TOOLS
     FileCheck
     iree-opt

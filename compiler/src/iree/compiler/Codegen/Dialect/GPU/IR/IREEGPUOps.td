@@ -352,7 +352,7 @@ def IREEGPU_CoalescedGatherDMAOp : Op<IREEGPU_Dialect, "coalesced_gather_dma", [
 
 def IREEGPU_ProcessInnerTileOp : Op<IREEGPU_Dialect, "process_inner_tile", [
     AttrSizedOperandSegments,
-    DeclareOpInterfaceMethods<TemplateCallOpInterface>
+    DeclareOpInterfaceMethods<TemplateCallOpInterface, ["getCallOperands"]>
 ]> {
   let summary = "Process an inner-tiled computation using a template function";
   let description = [{

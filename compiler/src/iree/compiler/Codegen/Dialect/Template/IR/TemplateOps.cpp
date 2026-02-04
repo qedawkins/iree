@@ -504,13 +504,16 @@ CallOp::inlineImplementationBlocks(OpBuilder &builder,
 
     Block *destBlock = blocksToPopulate[blockIdx];
 
+    // Erase the UnimplementedOp terminator before populating.
+    Operation *terminator = destBlock->getTerminator();
+
     IRMapping mapping;
     for (auto [srcArg, destArg] :
          llvm::zip(srcBlock.getArguments(), destBlock->getArguments())) {
       mapping.map(srcArg, destArg);
     }
 
-    builder.setInsertionPointToEnd(destBlock);
+    builder.setInsertionPoint(terminator);
     for (Operation &op : srcBlock.without_terminator()) {
       builder.clone(op, mapping);
     }
@@ -522,6 +525,9 @@ CallOp::inlineImplementationBlocks(OpBuilder &builder,
       }
       ReturnOp::create(builder, getLoc(), returnVals);
     }
+
+    // Erase the original terminator (UnimplementedOp).
+    terminator->erase();
 
     ++blockIdx;
   }

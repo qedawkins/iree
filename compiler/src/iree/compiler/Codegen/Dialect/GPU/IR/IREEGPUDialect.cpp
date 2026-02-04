@@ -9,6 +9,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.cpp.inc"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFDialect.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 
@@ -19,6 +20,9 @@ void IREEGPUDialect::initialize() {
 
   // Load dependent dialects needed for iterator_types attribute.
   getContext()->loadDialect<linalg::LinalgDialect>();
+
+  // Load PCF dialect for pcf.sref types used in process_inner_tile.
+  getContext()->loadDialect<PCF::PCFDialect>();
 
   addOperations<
 #define GET_OP_LIST

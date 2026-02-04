@@ -19,6 +19,7 @@ iree_td_library(
         # keep sorted
         [
             "TemplateBase.td",
+            "TemplateInterfaces.td",
             "TemplateOps.td",
         ],
         include = ["*.td"],
@@ -37,6 +38,8 @@ iree_compiler_cc_library(
         "TemplateAttrs.cpp",
         "TemplateAttrs.cpp.inc",
         "TemplateDialect.cpp",
+        "TemplateInterfaces.cpp",
+        "TemplateInterfaces.cpp.inc",
         "TemplateOps.cpp",
         "TemplateOps.cpp.inc",
         "TemplateTypes.cpp",
@@ -47,12 +50,15 @@ iree_compiler_cc_library(
         "TemplateAttrs.h",
         "TemplateAttrs.h.inc",
         "TemplateDialect.h",
+        "TemplateInterfaces.h",
+        "TemplateInterfaces.h.inc",
         "TemplateOps.h",
         "TemplateOps.h.inc",
         "TemplateTypes.h",
         "TemplateTypes.h.inc",
     ],
     deps = [
+        ":TemplateInterfacesGen",
         ":TemplateOpsGen",
         ":TemplateTypesGen",
         "@llvm-project//llvm:Support",
@@ -63,6 +69,23 @@ iree_compiler_cc_library(
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TransformUtils",
     ],
+)
+
+iree_gentbl_cc_library(
+    name = "TemplateInterfacesGen",
+    tbl_outs = [
+        (
+            ["--gen-op-interface-decls"],
+            "TemplateInterfaces.h.inc",
+        ),
+        (
+            ["--gen-op-interface-defs"],
+            "TemplateInterfaces.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "TemplateInterfaces.td",
+    deps = [":td_files"],
 )
 
 iree_gentbl_cc_library(

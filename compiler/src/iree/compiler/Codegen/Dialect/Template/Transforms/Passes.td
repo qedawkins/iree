@@ -25,8 +25,12 @@ def ConcretizeTemplateCallsPass :
   }];
   let dependentDialects = [
     "::mlir::iree_compiler::IREE::Template::TemplateDialect",
+    "::mlir::iree_compiler::IREE::Codegen::IREECodegenDialect",
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
     "::mlir::arith::ArithDialect",
     "::mlir::scf::SCFDialect",
+    "::mlir::tensor::TensorDialect",
+    "::mlir::linalg::LinalgDialect",
   ];
 }
 

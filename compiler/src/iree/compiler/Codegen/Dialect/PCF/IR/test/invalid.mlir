@@ -131,9 +131,10 @@ util.func private @template_type_mismatch_region_arg() {
 
 // -----
 
+// expected-note@+1 {{prior use here}}
 util.func private @template_type_mismatch_init(%init: !template.type<1>) {
-// expected-error@+1 {{tied init type '!template.type<1>' must match template result type '!template.type<0>'}}
   pcf.generic scope(#pcf.sequential)
+    // expected-error@+1 {{use of value '%init' expects different type than prior uses: '!template.type<0>' vs '!template.type<1>'}}
     execute(%ref = %init)[%id: index, %n: index]
          : (!template.type<0>)
         -> (!template.type<0>) {

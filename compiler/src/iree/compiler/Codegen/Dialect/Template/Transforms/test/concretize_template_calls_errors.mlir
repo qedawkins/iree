@@ -28,7 +28,7 @@ module {
 
   func.func @test_insufficient_impls(%idx: index) -> tensor<4xf32> {
     // Only providing one implementation when two are needed.
-    // expected-error @below {{not enough implementations provided}}
+    // expected-error @below {{'template.instance' op implementation blocks must be terminated with template.return}}
     %result = template.call @needs_two_impls<>(%idx : index) -> tensor<4xf32> {
     ^bb0(%inner_idx: index):
       %empty = tensor.empty() : tensor<4xf32>
