@@ -7,6 +7,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include <numeric>
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
+#include "iree/compiler/Codegen/Dialect/Template/IR/TemplateTypes.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -77,41 +78,65 @@ static LogicalResult verifyParallelBodyOp(OpTy op, int64_t numLeadingArgs,
   int64_t currResultIndex = 0;
   for (auto [resultType, refArg, isTied] : llvm::zip_equal(
            op.getResultTypes(), op.getRegionRefArgs(), op.getIsTied())) {
-    auto srefType = dyn_cast<PCF::ShapedRefType>(refArg.getType());
-    if (!srefType || srefType.getScope() != scope) {
-      return op.emitOpError(
-                 "expected region ref argument to be of type !pcf.sref "
-                 "with scope ")
-             << scope;
-    }
-    if (!srefType.isReturnOnlySync() && srefType.getSyncScope()) {
-      return op.emitOpError(
-          "expected region ref argument to sync on return or is unspecified");
-    }
+    // Check if result is a template type.
+    bool isTemplateType = isa<IREE::Template::TypeType>(resultType);
 
-    // Traits guarantee this cast to be valid.
-    auto shapedResultType = cast<ShapedType>(resultType);
-    if (shapedResultType.getShape() != srefType.getShape()) {
-      return op.emitOpError("region arg at index ")
-             << currResultIndex << " with type " << srefType
-             << " shape mismatch with tied result of type " << resultType;
-    }
-
-    if (shapedResultType.getElementType() != srefType.getElementType()) {
-      return op.emitOpError("region arg at index ")
-             << currResultIndex << " element type mismatch of "
-             << srefType.getElementType() << " vs "
-             << shapedResultType.getElementType();
-    }
-
-    if (isTied) {
-      Value init = op.getInits()[currIsTiedIndex];
-      if (init.getType() != resultType) {
-        return op.emitOpError("tied init at index ")
-               << currIsTiedIndex << " does not match the type " << resultType
-               << " at result index " << currResultIndex;
+    if (isTemplateType) {
+      // For template types, region arg must be exactly the same template type.
+      if (refArg.getType() != resultType) {
+        return op.emitOpError("region ref argument type ")
+               << refArg.getType() << " must match template result type "
+               << resultType;
       }
-      ++currIsTiedIndex;
+
+      // Check tied init matches exactly.
+      if (isTied) {
+        Value init = op.getInits()[currIsTiedIndex];
+        if (init.getType() != resultType) {
+          return op.emitOpError("tied init type ")
+                 << init.getType() << " must match template result type "
+                 << resultType;
+        }
+        ++currIsTiedIndex;
+      }
+    } else {
+      // Non-template type: existing verification logic.
+      auto srefType = dyn_cast<PCF::ShapedRefType>(refArg.getType());
+      if (!srefType || srefType.getScope() != scope) {
+        return op.emitOpError(
+                   "expected region ref argument to be of type !pcf.sref "
+                   "with scope ")
+               << scope;
+      }
+      if (!srefType.isReturnOnlySync() && srefType.getSyncScope()) {
+        return op.emitOpError(
+            "expected region ref argument to sync on return or is unspecified");
+      }
+
+      // Traits guarantee this cast to be valid for non-template types.
+      auto shapedResultType = cast<ShapedType>(resultType);
+      if (shapedResultType.getShape() != srefType.getShape()) {
+        return op.emitOpError("region arg at index ")
+               << currResultIndex << " with type " << srefType
+               << " shape mismatch with tied result of type " << resultType;
+      }
+
+      if (shapedResultType.getElementType() != srefType.getElementType()) {
+        return op.emitOpError("region arg at index ")
+               << currResultIndex << " element type mismatch of "
+               << srefType.getElementType() << " vs "
+               << shapedResultType.getElementType();
+      }
+
+      if (isTied) {
+        Value init = op.getInits()[currIsTiedIndex];
+        if (init.getType() != resultType) {
+          return op.emitOpError("tied init at index ")
+                 << currIsTiedIndex << " does not match the type " << resultType
+                 << " at result index " << currResultIndex;
+        }
+        ++currIsTiedIndex;
+      }
     }
     ++currResultIndex;
   }
@@ -215,19 +240,23 @@ static ParseResult parseParallelExecutionBody(
         return parser.emitError(resultTypeLoc, "failed to parse result type");
       }
 
+      // Allow template types or shaped types.
       ShapedType shapedType = dyn_cast<ShapedType>(resultTypes[i]);
-      if (!shapedType) {
+      bool isTemplateType = isa<IREE::Template::TypeType>(resultTypes[i]);
+      if (!shapedType && !isTemplateType) {
         return parser.emitError(resultTypeLoc,
-                                "result type must be a shaped type");
+                                "result type must be a shaped type or "
+                                "template type");
       }
 
       if (isTied) {
         initTypes.push_back(resultTypes[i]);
-      } else if (!shapedType.hasStaticShape()) {
+      } else if (shapedType && !shapedType.hasStaticShape()) {
+        // Only parse dynamic dims for non-tied shaped type operands.
+        // Template types don't have dynamic dimensions to parse.
         if (failed(parser.parseLBrace())) {
           return failure();
         }
-        // Only parse dynamic dims for non-tied operands.
         SmallVector<OpAsmParser::UnresolvedOperand> dims;
         if (failed(parser.parseOperandList(dims))) {
           return failure();
@@ -336,16 +365,20 @@ static void printParallelExecutionBody(
     p << "      -> (";
     OperandRange currSizes = dynamicSizes;
     for (int64_t i = 0, e = numResults; i < e; ++i) {
-      ShapedType resultType = cast<ShapedType>(resultTypes[i]);
+      Type resultType = resultTypes[i];
       bool isResultTied = isTied[i];
       p << resultType;
-      if (!isResultTied && !resultType.hasStaticShape()) {
-        int64_t numDynamicDims = resultType.getNumDynamicDims();
-        p << "{";
-        llvm::interleaveComma(currSizes.take_front(numDynamicDims), p,
-                              [&](Value dim) { p << dim; });
-        currSizes = currSizes.drop_front(numDynamicDims);
-        p << "}";
+      // Only print dynamic dims for non-tied shaped types.
+      // Template types don't have dynamic dims.
+      if (auto shapedType = dyn_cast<ShapedType>(resultType)) {
+        if (!isResultTied && !shapedType.hasStaticShape()) {
+          int64_t numDynamicDims = shapedType.getNumDynamicDims();
+          p << "{";
+          llvm::interleaveComma(currSizes.take_front(numDynamicDims), p,
+                                [&](Value dim) { p << dim; });
+          currSizes = currSizes.drop_front(numDynamicDims);
+          p << "}";
+        }
       }
       if (i < numResults - 1) {
         p << ", ";
@@ -481,6 +514,11 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
 
   // sref args.
   for (Type resultType : resultTypes) {
+    // For template types, use the type directly (no sref wrapping).
+    if (isa<IREE::Template::TypeType>(resultType)) {
+      entryBlock.addArgument(resultType, result.location);
+      continue;
+    }
     auto shapedType = cast<ShapedType>(resultType);
     entryBlock.addArgument(
         PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
@@ -640,6 +678,11 @@ void LoopOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
 
   // sref args.
   for (Type resultType : resultTypes) {
+    // For template types, use the type directly (no sref wrapping).
+    if (isa<IREE::Template::TypeType>(resultType)) {
+      entryBlock.addArgument(resultType, result.location);
+      continue;
+    }
     auto shapedType = cast<ShapedType>(resultType);
     entryBlock.addArgument(
         PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),

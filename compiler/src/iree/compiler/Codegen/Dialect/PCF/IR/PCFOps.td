@@ -18,6 +18,15 @@ include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
 
+// Include template type for template support in PCF ops.
+include "iree/compiler/Codegen/Dialect/Template/IR/TemplateBase.td"
+
+// Type constraint that allows ranked tensor, memref, or template type.
+// Used for pcf.generic and pcf.loop inits/results to support templated code.
+def PCF_RankedTensorOrMemRefOrTemplateType : AnyTypeOf<[
+    AnyRankedTensor, AnyMemRef, Template_TypeType
+], "ranked tensor, memref, or template type">;
+
 //===----------------------------------------------------------------------===//
 // Alloc
 //===----------------------------------------------------------------------===//
@@ -152,12 +161,12 @@ def GenericOp : PCF_Op<"generic", [
     ```
   }];
   let arguments = (ins PCF_ScopeAttrInterface:$scope,
-      Variadic<AnyRankedTensorOrMemRef>:$inits, Variadic<Index>:$dynamic_sizes,
+      Variadic<PCF_RankedTensorOrMemRefOrTemplateType>:$inits, Variadic<Index>:$dynamic_sizes,
       ArrayProp<BoolProp>:$is_tied,
       DefaultValuedProp<BoolProp, "false">:$sync_on_return,
       IntProp<"int64_t">:$num_index_args, IntProp<"int64_t">:$num_leading_args);
 
-  let results = (outs Variadic<AnyRankedTensorOrMemRef>:$results);
+  let results = (outs Variadic<PCF_RankedTensorOrMemRefOrTemplateType>:$results);
   let regions = (region
     MaxSizedRegion<1>:$initializer,
     MinSizedRegion<1>:$region
@@ -311,11 +320,11 @@ def LoopOp : PCF_Op<"loop", [
     ```
   }];
   let arguments = (ins PCF_ScopeAttrInterface:$scope, Variadic<Index>:$count,
-      Variadic<AnyRankedTensorOrMemRef>:$inits, Variadic<Index>:$dynamic_sizes,
+      Variadic<PCF_RankedTensorOrMemRefOrTemplateType>:$inits, Variadic<Index>:$dynamic_sizes,
       ArrayProp<BoolProp>:$is_tied,
       DefaultValuedProp<BoolProp, "false">:$sync_on_return);
 
-  let results = (outs Variadic<AnyRankedTensorOrMemRef>:$results);
+  let results = (outs Variadic<PCF_RankedTensorOrMemRefOrTemplateType>:$results);
   let regions = (region AnyRegion:$region);
 
   let assemblyFormat = [{
