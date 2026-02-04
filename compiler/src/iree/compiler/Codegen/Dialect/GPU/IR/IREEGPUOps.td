@@ -10,7 +10,10 @@
 include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.td"
 include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUInterfaces.td"
 include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.td"
+include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.td"
+include "iree/compiler/Codegen/Dialect/Template/IR/TemplateInterfaces.td"
 include "iree/compiler/Utils/CommonTypeConstraints.td"
+include "mlir/Dialect/Linalg/IR/LinalgBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/ParallelCombiningOpInterface.td"
@@ -339,6 +342,84 @@ def IREEGPU_CoalescedGatherDMAOp : Op<IREEGPU_Dialect, "coalesced_gather_dma", [
 
     bool hasTensorSemantics() {
       return ::llvm::isa<RankedTensorType>(getInit().getType());
+    }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// ProcessInnerTileOp
+//===----------------------------------------------------------------------===//
+
+def IREEGPU_ProcessInnerTileOp : Op<IREEGPU_Dialect, "process_inner_tile", [
+    AttrSizedOperandSegments,
+    DeclareOpInterfaceMethods<TemplateCallOpInterface>
+]> {
+  let summary = "Process an inner-tiled computation using a template function";
+  let description = [{
+    High-level operation for inner-tiled GPU computations like matrix multiply.
+    This op encapsulates the iteration space, inner tile description, indexing
+    maps, and a reference to a template function that defines the computation
+    structure.
+
+    The op computes type bindings for template types based on:
+    - type<0>: Result types (same as output tensor types)
+    - type<1>: pcf.sref with result shapes using return_only_sync_scope
+    - type<2>: Per-thread accumulator tensors (outer dims / distribution / inner)
+    - type<3>: pcf.sref for input shared memory
+
+    When lowered via ConcretizeTemplateCallsPass, this op generates
+    implementation blocks for:
+    0. Allocate shared memory
+    1. Initialize accumulators
+    2. Copy inputs to shared memory
+    3. Perform inner-tiled operation
+    4. Write results to destinations
+
+    Example:
+    ```mlir
+    %result = iree_gpu.process_inner_tile
+        bounds(%m, %n, %k : index, index, index)
+        kind(#iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>)
+        indexing_maps = [affine_map<(m,n,k) -> (m,k)>,
+                         affine_map<(m,n,k) -> (k,n)>,
+                         affine_map<(m,n,k) -> (m,n)>]
+        iterator_types = ["parallel", "parallel", "reduction"]
+        outer_dim_distribution = [1, 1]
+        ins(%lhs, %rhs : tensor<64x64xf16>, tensor<64x64xf16>)
+        outs(%init : tensor<64x64xf32>)
+        @matmul_template -> tensor<64x64xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    Variadic<Index>:$bounds,
+    IREECodegen_InnerTileDescAttrInterface:$kind,
+    AffineMapArrayAttr:$indexing_maps,
+    IteratorTypeArrayAttr:$iterator_types,
+    DenseI64ArrayAttr:$outer_dim_distribution,
+    Variadic<AnyRankedTensor>:$inputs,
+    Variadic<AnyRankedTensor>:$outputs,
+    FlatSymbolRefAttr:$callee
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns the number of iteration space dimensions (bounds).
+    int64_t getNumIterators() { return getBounds().size(); }
+
+    /// Returns the indexing map for the given operand index.
+    AffineMap getIndexingMapForOperand(int64_t operandIdx) {
+      auto maps = getIndexingMaps().getValue();
+      return cast<AffineMapAttr>(maps[operandIdx]).getValue();
+    }
+
+    /// Returns the output indexing map (last map).
+    AffineMap getOutputIndexingMap() {
+      return getIndexingMapForOperand(getInputs().size());
     }
   }];
 }

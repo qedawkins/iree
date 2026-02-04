@@ -10,11 +10,15 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.cpp.inc"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 
 namespace mlir::iree_compiler::IREE::GPU {
 
 void IREEGPUDialect::initialize() {
   registerAttributes();
+
+  // Load dependent dialects needed for iterator_types attribute.
+  getContext()->loadDialect<linalg::LinalgDialect>();
 
   addOperations<
 #define GET_OP_LIST

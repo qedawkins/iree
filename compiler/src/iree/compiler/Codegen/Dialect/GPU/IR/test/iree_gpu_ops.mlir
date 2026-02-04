@@ -197,3 +197,46 @@ func.func @coalesced_gather_dma_tensor_indices(%idx0: tensor<64xi32>, %source: t
 //       CHECK:   scf.forall
 //       CHECK:     scf.forall.in_parallel
 //       CHECK:       iree_gpu.coalesced_gather_dma %{{.+}}[%{{.+}}] into %{{.+}} lane(%{{.+}}) : tensor<4096xf32>, tensor<64xi32>, tensor<64xf32>, index -> tensor<64xf32>
+
+// -----
+
+module {
+  template.func @matmul_template() -> tensor<64x64xf32> {
+    %c0 = arith.constant 0 : index
+    %init = template.branch 0(%c0) : (index) -> (tensor<64x64xf32>)
+    template.return %init : tensor<64x64xf32>
+  } {
+  ^bb0(%lane_id: index):
+    template.unimplemented -> tensor<64x64xf32>
+  }
+
+  func.func @process_inner_tile_basic(
+      %m: index, %n: index, %k: index,
+      %lhs: tensor<64x64xf16>, %rhs: tensor<64x64xf16>, %init: tensor<64x64xf32>) -> tensor<64x64xf32> {
+    %result = iree_gpu.process_inner_tile
+        bounds(%m, %n, %k : index, index, index)
+        kind(#iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>)
+        indexing_maps = [affine_map<(m, n, k) -> (m, k)>,
+                         affine_map<(m, n, k) -> (k, n)>,
+                         affine_map<(m, n, k) -> (m, n)>]
+        iterator_types = ["parallel", "parallel", "reduction"]
+        outer_dim_distribution = [1, 1]
+        ins(%lhs, %rhs : tensor<64x64xf16>, tensor<64x64xf16>)
+        outs(%init : tensor<64x64xf32>)
+        @matmul_template -> tensor<64x64xf32>
+    return %result : tensor<64x64xf32>
+  }
+}
+
+// CHECK-LABEL: module {
+// CHECK:         template.func @matmul_template
+// CHECK:         func.func @process_inner_tile_basic
+// CHECK:           iree_gpu.process_inner_tile
+// CHECK-SAME:        bounds(%{{.+}}, %{{.+}}, %{{.+}} : index, index, index)
+// CHECK-SAME:        kind(#iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>)
+// CHECK-SAME:        indexing_maps = [#map, #map1, #map2]
+// CHECK-SAME:        iterator_types = ["parallel", "parallel", "reduction"]
+// CHECK-SAME:        outer_dim_distribution = [1, 1]
+// CHECK-SAME:        ins(%{{.+}}, %{{.+}} : tensor<64x64xf16>, tensor<64x64xf16>)
+// CHECK-SAME:        outs(%{{.+}} : tensor<64x64xf32>)
+// CHECK-SAME:        @matmul_template -> tensor<64x64xf32>

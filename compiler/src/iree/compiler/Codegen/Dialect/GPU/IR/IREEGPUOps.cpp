@@ -6,10 +6,16 @@
 
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
+#include "iree/compiler/Codegen/Dialect/Template/IR/TemplateInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -311,6 +317,375 @@ LogicalResult CoalescedGatherDMAOp::verify() {
   }
 
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ProcessInnerTileOp
+//===----------------------------------------------------------------------===//
+
+// Parser for the custom assembly format:
+//   bounds(%m, %n, %k : index, index, index)
+//   kind(#iree_gpu.mma_layout<...>)
+//   indexing_maps = [...]
+//   iterator_types = [...]
+//   outer_dim_distribution = [...]
+//   ins(%lhs, %rhs : ...)
+//   outs(%init : ...)
+//   @template_func -> result_types
+ParseResult ProcessInnerTileOp::parse(OpAsmParser &parser,
+                                      OperationState &result) {
+  MLIRContext *context = parser.getContext();
+
+  // Parse bounds(%m, %n, %k : index, index, index)
+  SmallVector<OpAsmParser::UnresolvedOperand> boundsOperands;
+  SmallVector<Type> boundsTypes;
+  if (parser.parseKeyword("bounds") || parser.parseLParen()) {
+    return failure();
+  }
+  if (parser.parseOperandList(boundsOperands) || parser.parseColon() ||
+      parser.parseTypeList(boundsTypes) || parser.parseRParen()) {
+    return failure();
+  }
+  if (parser.resolveOperands(boundsOperands, boundsTypes, parser.getNameLoc(),
+                             result.operands)) {
+    return failure();
+  }
+
+  // Parse kind(...)
+  Codegen::InnerTileDescAttrInterface kindAttr;
+  if (parser.parseKeyword("kind") || parser.parseLParen() ||
+      parser.parseAttribute(kindAttr) || parser.parseRParen()) {
+    return failure();
+  }
+  result.addAttribute("kind", kindAttr);
+
+  // Parse indexing_maps = [...]
+  SmallVector<Attribute> indexingMaps;
+  if (parser.parseKeyword("indexing_maps") || parser.parseEqual() ||
+      parser.parseLSquare()) {
+    return failure();
+  }
+  do {
+    AffineMapAttr mapAttr;
+    if (parser.parseAttribute(mapAttr)) {
+      return failure();
+    }
+    indexingMaps.push_back(mapAttr);
+  } while (succeeded(parser.parseOptionalComma()));
+  if (parser.parseRSquare()) {
+    return failure();
+  }
+  result.addAttribute("indexing_maps", ArrayAttr::get(context, indexingMaps));
+
+  // Parse iterator_types = [...]
+  SmallVector<Attribute> iteratorTypes;
+  if (parser.parseKeyword("iterator_types") || parser.parseEqual() ||
+      parser.parseLSquare()) {
+    return failure();
+  }
+  do {
+    StringAttr iterAttr;
+    if (parser.parseAttribute(iterAttr)) {
+      return failure();
+    }
+    iteratorTypes.push_back(linalg::IteratorTypeAttr::get(
+        context, llvm::StringSwitch<utils::IteratorType>(iterAttr.getValue())
+                     .Case("parallel", utils::IteratorType::parallel)
+                     .Case("reduction", utils::IteratorType::reduction)));
+  } while (succeeded(parser.parseOptionalComma()));
+  if (parser.parseRSquare()) {
+    return failure();
+  }
+  result.addAttribute("iterator_types", ArrayAttr::get(context, iteratorTypes));
+
+  // Parse outer_dim_distribution = [...]
+  SmallVector<int64_t> outerDimDist;
+  if (parser.parseKeyword("outer_dim_distribution") || parser.parseEqual() ||
+      parser.parseLSquare()) {
+    return failure();
+  }
+  do {
+    int64_t val;
+    if (parser.parseInteger(val)) {
+      return failure();
+    }
+    outerDimDist.push_back(val);
+  } while (succeeded(parser.parseOptionalComma()));
+  if (parser.parseRSquare()) {
+    return failure();
+  }
+  result.addAttribute("outer_dim_distribution",
+                      DenseI64ArrayAttr::get(context, outerDimDist));
+
+  // Parse ins(...) - inputs
+  SmallVector<OpAsmParser::UnresolvedOperand> inputOperands;
+  SmallVector<Type> inputTypes;
+  if (parser.parseKeyword("ins") || parser.parseLParen()) {
+    return failure();
+  }
+  if (parser.parseOperandList(inputOperands) || parser.parseColon() ||
+      parser.parseTypeList(inputTypes) || parser.parseRParen()) {
+    return failure();
+  }
+
+  // Parse outs(...) - outputs
+  SmallVector<OpAsmParser::UnresolvedOperand> outputOperands;
+  SmallVector<Type> outputTypes;
+  if (parser.parseKeyword("outs") || parser.parseLParen()) {
+    return failure();
+  }
+  if (parser.parseOperandList(outputOperands) || parser.parseColon() ||
+      parser.parseTypeList(outputTypes) || parser.parseRParen()) {
+    return failure();
+  }
+
+  // Resolve input and output operands.
+  if (parser.resolveOperands(inputOperands, inputTypes, parser.getNameLoc(),
+                             result.operands) ||
+      parser.resolveOperands(outputOperands, outputTypes, parser.getNameLoc(),
+                             result.operands)) {
+    return failure();
+  }
+
+  // Record segment sizes.
+  result.addAttribute("operandSegmentSizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(boundsOperands.size()),
+                           static_cast<int32_t>(inputOperands.size()),
+                           static_cast<int32_t>(outputOperands.size())}));
+
+  // Parse @callee
+  FlatSymbolRefAttr calleeAttr;
+  if (parser.parseAttribute(calleeAttr)) {
+    return failure();
+  }
+  result.addAttribute("callee", calleeAttr);
+
+  // Parse -> result_types
+  SmallVector<Type> resultTypes;
+  if (parser.parseArrow() || parser.parseTypeList(resultTypes)) {
+    return failure();
+  }
+  result.addTypes(resultTypes);
+
+  // Parse optional attributes.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  return success();
+}
+
+void ProcessInnerTileOp::print(OpAsmPrinter &p) {
+  // bounds(%m, %n, %k : index, index, index)
+  p << " bounds(";
+  llvm::interleaveComma(getBounds(), p, [&](Value v) { p.printOperand(v); });
+  p << " : ";
+  llvm::interleaveComma(getBounds().getTypes(), p);
+  p << ")";
+
+  // kind(...)
+  p << " kind(" << getKind() << ")";
+
+  // indexing_maps = [...]
+  p << " indexing_maps = [";
+  llvm::interleaveComma(getIndexingMaps(), p);
+  p << "]";
+
+  // iterator_types = [...]
+  p << " iterator_types = [";
+  llvm::interleaveComma(getIteratorTypes(), p, [&](Attribute attr) {
+    auto iterType = cast<linalg::IteratorTypeAttr>(attr).getValue();
+    p << "\"" << utils::stringifyIteratorType(iterType) << "\"";
+  });
+  p << "]";
+
+  // outer_dim_distribution = [...]
+  p << " outer_dim_distribution = [";
+  llvm::interleaveComma(getOuterDimDistribution(), p);
+  p << "]";
+
+  // ins(...)
+  p << " ins(";
+  llvm::interleaveComma(getInputs(), p, [&](Value v) { p.printOperand(v); });
+  p << " : ";
+  llvm::interleaveComma(getInputs().getTypes(), p);
+  p << ")";
+
+  // outs(...)
+  p << " outs(";
+  llvm::interleaveComma(getOutputs(), p, [&](Value v) { p.printOperand(v); });
+  p << " : ";
+  llvm::interleaveComma(getOutputs().getTypes(), p);
+  p << ")";
+
+  // @callee
+  p << " ";
+  p.printAttribute(getCalleeAttr());
+
+  // -> result_types
+  p << " -> ";
+  llvm::interleaveComma(getResultTypes(), p);
+
+  // Print any extra attributes (excluding known ones).
+  SmallVector<StringRef> elidedAttrs = {
+      "kind",           "indexing_maps",
+      "iterator_types", "outer_dim_distribution",
+      "callee",         "operandSegmentSizes"};
+  p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+}
+
+LogicalResult ProcessInnerTileOp::verify() {
+  // Verify the number of indexing maps matches inputs + outputs.
+  size_t numOperands = getInputs().size() + getOutputs().size();
+  if (getIndexingMaps().size() != numOperands) {
+    return emitOpError("expected ") << numOperands << " indexing maps but got "
+                                    << getIndexingMaps().size();
+  }
+
+  // Verify the number of iterator types matches bounds.
+  if (getIteratorTypes().size() != getBounds().size()) {
+    return emitOpError("expected ")
+           << getBounds().size() << " iterator types but got "
+           << getIteratorTypes().size();
+  }
+
+  // Verify result types match output types.
+  if (getResults().size() != getOutputs().size()) {
+    return emitOpError("expected ")
+           << getOutputs().size() << " results but got " << getResults().size();
+  }
+  for (auto [result, output] : llvm::zip(getResults(), getOutputs())) {
+    if (result.getType() != output.getType()) {
+      return emitOpError("result type ")
+             << result.getType() << " does not match output type "
+             << output.getType();
+    }
+  }
+
+  // Verify indexing map dimensions match bounds count.
+  int64_t numIterators = getBounds().size();
+  for (auto [i, mapAttr] : llvm::enumerate(getIndexingMaps())) {
+    AffineMap map = cast<AffineMapAttr>(mapAttr).getValue();
+    if (map.getNumDims() != static_cast<unsigned>(numIterators)) {
+      return emitOpError("indexing map ")
+             << i << " has " << map.getNumDims() << " dims but expected "
+             << numIterators;
+    }
+  }
+
+  // Verify kind interface constraints.
+  Codegen::InnerTileDescAttrInterface kind = getKind();
+  if (static_cast<int64_t>(getInputs().size()) != kind.getExpectedNumInputs()) {
+    return emitOpError("expected ")
+           << kind.getExpectedNumInputs() << " inputs for kind but got "
+           << getInputs().size();
+  }
+  if (static_cast<int64_t>(getOutputs().size()) !=
+      kind.getExpectedNumOutputs()) {
+    return emitOpError("expected ")
+           << kind.getExpectedNumOutputs() << " outputs for kind but got "
+           << getOutputs().size();
+  }
+
+  // Verify indexing maps using the kind interface.
+  SmallVector<AffineMap> maps;
+  for (Attribute attr : getIndexingMaps()) {
+    maps.push_back(cast<AffineMapAttr>(attr).getValue());
+  }
+  if (failed(kind.verifyIndexingMaps(maps))) {
+    return emitOpError("indexing maps failed kind verification");
+  }
+
+  return success();
+}
+
+// TemplateCallOpInterface implementation
+
+FlatSymbolRefAttr ProcessInnerTileOp::getCalledSymbol() {
+  return getCalleeAttr();
+}
+
+SmallVector<SmallVector<Type>> ProcessInnerTileOp::getTemplateTypes() {
+  MLIRContext *context = getContext();
+  SmallVector<SmallVector<Type>> typeBindings;
+
+  // type<0>: Result types (same as output tensor types)
+  SmallVector<Type> resultTypes;
+  for (Type t : getOutputs().getTypes()) {
+    resultTypes.push_back(t);
+  }
+  typeBindings.push_back(std::move(resultTypes));
+
+  // type<1>: pcf.sref with result shapes using return_only_sync_scope
+  // This is for the output shared memory.
+  SmallVector<Type> outputSrefTypes;
+  for (Type t : getOutputs().getTypes()) {
+    auto tensorType = cast<RankedTensorType>(t);
+    auto syncAttr = PCF::SyncOnReturnAttr::get(context);
+    auto scopeAttr = PCF::SequentialAttr::get(context);
+    auto srefType = PCF::ShapedRefType::get(context, tensorType.getShape(),
+                                            tensorType.getElementType(),
+                                            scopeAttr, syncAttr);
+    outputSrefTypes.push_back(srefType);
+  }
+  typeBindings.push_back(std::move(outputSrefTypes));
+
+  // type<2>: Per-thread accumulator tensors (outer dims / distribution / inner)
+  // For now, we compute this based on the inner tile description.
+  SmallVector<Type> accumulatorTypes;
+  SmallVector<VectorType> undistributedTileTypes;
+  getKind().getUndistributedTileTypes(undistributedTileTypes);
+  // The accumulator types are the output operand tile types.
+  for (int64_t i = 0; i < getKind().getExpectedNumOutputs(); ++i) {
+    int64_t operandIdx = getKind().getExpectedNumInputs() + i;
+    VectorType tileType = undistributedTileTypes[operandIdx];
+    // Create a tensor type from the vector type dimensions.
+    auto tensorType =
+        RankedTensorType::get(tileType.getShape(), tileType.getElementType());
+    accumulatorTypes.push_back(tensorType);
+  }
+  typeBindings.push_back(std::move(accumulatorTypes));
+
+  // type<3>: pcf.sref for input shared memory
+  SmallVector<Type> inputSrefTypes;
+  for (Type t : getInputs().getTypes()) {
+    auto tensorType = cast<RankedTensorType>(t);
+    auto syncAttr = PCF::SyncOnReturnAttr::get(context);
+    auto scopeAttr = PCF::SequentialAttr::get(context);
+    auto srefType = PCF::ShapedRefType::get(context, tensorType.getShape(),
+                                            tensorType.getElementType(),
+                                            scopeAttr, syncAttr);
+    inputSrefTypes.push_back(srefType);
+  }
+  typeBindings.push_back(std::move(inputSrefTypes));
+
+  return typeBindings;
+}
+
+LogicalResult ProcessInnerTileOp::inlineImplementationBlocks(
+    OpBuilder &builder, ArrayRef<Block *> blocksToPopulate) {
+  // For ProcessInnerTileOp, the blocks are:
+  // 0. Allocate shared memory
+  // 1. Initialize accumulators
+  // 2. Copy inputs to shared memory
+  // 3. Perform inner-tiled operation
+  // 4. Write results to destinations
+  //
+  // The actual implementation is highly target-specific and will be
+  // populated by the lowering passes. For now, we emit placeholder IR
+  // that can be further lowered.
+  //
+  // This method is called by ConcretizeTemplateCallsPass to populate
+  // the blocks with the implementation from this high-level op.
+
+  // For the initial implementation, we return failure to indicate
+  // that the template should be resolved by the template.func's own
+  // implementation blocks rather than generating them here.
+  //
+  // In the future, this could generate the full implementation based
+  // on the inner tile description and indexing maps.
+  return failure();
 }
 
 } // namespace mlir::iree_compiler::IREE::GPU
