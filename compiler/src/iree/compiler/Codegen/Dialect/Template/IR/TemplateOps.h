@@ -8,6 +8,7 @@
 #define IREE_COMPILER_CODEGEN_DIALECT_TEMPLATE_IR_TEMPLATEOPS_H_
 
 #include "iree/compiler/Codegen/Dialect/Template/IR/TemplateDialect.h"
+#include "iree/compiler/Codegen/Dialect/Template/IR/TemplateInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/Template/IR/TemplateTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"

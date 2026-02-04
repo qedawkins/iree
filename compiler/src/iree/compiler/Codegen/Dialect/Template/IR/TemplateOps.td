@@ -8,6 +8,7 @@
 #define IREE_CODEGEN_DIALECT_TEMPLATE_OPS
 
 include "iree/compiler/Codegen/Dialect/Template/IR/TemplateBase.td"
+include "iree/compiler/Codegen/Dialect/Template/IR/TemplateInterfaces.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/IR/OpAsmInterface.td"
 include "mlir/IR/SymbolInterfaces.td"
@@ -244,7 +245,8 @@ def Template_UnimplementedOp : Template_Op<"unimplemented", [
 //===----------------------------------------------------------------------===//
 
 def Template_CallOp : Template_Op<"call", [
-    RecursiveMemoryEffects
+    RecursiveMemoryEffects,
+    DeclareOpInterfaceMethods<TemplateCallOpInterface>
 ]> {
   let summary = [{Calls a template function with type bindings and implementations.}];
   let description = [{

@@ -6,9 +6,11 @@
 
 #include "iree/compiler/Codegen/Dialect/Template/IR/TemplateOps.h"
 
+#include "iree/compiler/Codegen/Dialect/Template/IR/TemplateInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/OpImplementation.h"
 
 namespace mlir::iree_compiler::IREE::Template {
@@ -466,6 +468,64 @@ LogicalResult UnimplementedOp::verify() {
   if (block && &block->front() != getOperation()) {
     return emitOpError("must be the only operation in its block");
   }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// CallOp - TemplateCallOpInterface implementation
+//===----------------------------------------------------------------------===//
+
+FlatSymbolRefAttr CallOp::getCalledSymbol() { return getCalleeAttr(); }
+
+SmallVector<SmallVector<Type>> CallOp::getTemplateTypes() {
+  const auto &bindings = getTypeBindings();
+  SmallVector<SmallVector<Type>> result;
+  result.reserve(bindings.size());
+  for (const auto &binding : bindings) {
+    result.push_back(SmallVector<Type>(binding.begin(), binding.end()));
+  }
+  return result;
+}
+
+LogicalResult
+CallOp::inlineImplementationBlocks(OpBuilder &builder,
+                                   ArrayRef<Block *> blocksToPopulate) {
+  Region &implRegion = getImplementations();
+
+  if (implRegion.empty()) {
+    return success();
+  }
+
+  size_t blockIdx = 0;
+  for (Block &srcBlock : implRegion) {
+    if (blockIdx >= blocksToPopulate.size()) {
+      return emitOpError("more implementation blocks provided than expected");
+    }
+
+    Block *destBlock = blocksToPopulate[blockIdx];
+
+    IRMapping mapping;
+    for (auto [srcArg, destArg] :
+         llvm::zip(srcBlock.getArguments(), destBlock->getArguments())) {
+      mapping.map(srcArg, destArg);
+    }
+
+    builder.setInsertionPointToEnd(destBlock);
+    for (Operation &op : srcBlock.without_terminator()) {
+      builder.clone(op, mapping);
+    }
+
+    if (auto returnOp = dyn_cast<ReturnOp>(srcBlock.getTerminator())) {
+      SmallVector<Value> returnVals;
+      for (Value v : returnOp.getOperands()) {
+        returnVals.push_back(mapping.lookupOrDefault(v));
+      }
+      ReturnOp::create(builder, getLoc(), returnVals);
+    }
+
+    ++blockIdx;
+  }
+
   return success();
 }
 
