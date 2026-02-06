@@ -308,7 +308,7 @@ convertTemplateCallInterface(TemplateCallOpInterface callInterface,
   // Get operands to pass to instance via the interface.
   // This allows ops like process_inner_tile to provide only the operands
   // that correspond to template.func arguments, not metadata like bounds.
-  OperandRange instanceOperands = callInterface.getCallOperands();
+  SmallVector<Value> instanceOperands = callInterface.getCallOperands();
   if (instanceOperands.size() != convertedInputTypes.size()) {
     return callOp->emitOpError("template.func expects ")
            << convertedInputTypes.size() << " operands but interface provides "
@@ -369,7 +369,8 @@ convertTemplateCallInterface(TemplateCallOpInterface callInterface,
     } else if (numConverted > 1) {
       // 1:N mapping - create cast back to original type.
       builder.setInsertionPointToStart(instanceMainBlock);
-      ValueRange segment = instanceOperands.slice(operandIdx, numConverted);
+      ValueRange segment(
+          ArrayRef<Value>(instanceOperands).slice(operandIdx, numConverted));
       auto castOp =
           UnrealizedConversionCastOp::create(builder, loc, inputType, segment);
       mapping.map(funcArg, castOp.getResult(0));
@@ -394,6 +395,9 @@ convertTemplateCallInterface(TemplateCallOpInterface callInterface,
   LLVM_DEBUG(llvm::dbgs() << "  Cloned main block ops\n");
 
   // f) Clone funcOp's implementations region into instance.
+  // Note: We only do 1:1 type conversion here. The dialect conversion in
+  // step (i) handles 1:N expansion for template.branch ops and block args.
+  // inlineImplementationBlocks() gets expanded types from getTemplateTypes().
   SmallVector<Block *> clonedImplBlocks;
   for (Block &funcImplBlock : funcOp.getImplementations()) {
     // Convert block argument types.

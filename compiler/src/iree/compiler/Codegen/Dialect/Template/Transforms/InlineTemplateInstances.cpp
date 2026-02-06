@@ -118,6 +118,21 @@ struct InlineTemplateInstancesPass final
     // the outer instance's branches are inlined, otherwise we would miss
     // template.branch ops inside nested instances.
     walkAndApplyPatterns(getOperation(), std::move(patterns));
+
+    // After all template.instance ops are inlined, the template.func symbols
+    // at the module level are dead. Erase them to prevent later passes from
+    // encountering template.branch ops with stale block references.
+    Operation *parentModule = getOperation()->getParentOfType<ModuleOp>();
+    if (!parentModule) {
+      parentModule = getOperation()->getParentOp();
+    }
+    if (parentModule) {
+      SmallVector<FuncOp> deadFuncs;
+      parentModule->walk([&](FuncOp funcOp) { deadFuncs.push_back(funcOp); });
+      for (FuncOp funcOp : deadFuncs) {
+        funcOp->erase();
+      }
+    }
   }
 };
 

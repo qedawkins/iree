@@ -45,15 +45,16 @@ def TemplateCallOpInterface : OpInterface<"TemplateCallOpInterface"> {
         Returns the operands to pass to the template.func call.
         For template.call, this returns all operands.
         For ops like process_inner_tile, this returns only the operands
-        that correspond to template.func arguments (e.g., inputs + outputs,
-        not bounds or other metadata operands).
+        that correspond to template.func arguments (e.g., outputs and
+        reduction bounds, not inputs or other metadata operands).
       }],
-      /*retTy=*/"::mlir::OperandRange",
+      /*retTy=*/"::llvm::SmallVector<::mlir::Value>",
       /*methodName=*/"getCallOperands",
       /*args=*/(ins),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
-        return $_op->getOperands();
+        return ::llvm::SmallVector<::mlir::Value>(
+            $_op->getOperands().begin(), $_op->getOperands().end());
       }]
     >,
     InterfaceMethod<
