@@ -136,6 +136,45 @@ def LLVMGPUVectorToGPUPass :
   let summary = "Pass to convert vector to gpu.";
 }
 
+def LLVMGPUCreateTemplateForMmaOpsPass :
+    Pass<"iree-llvmgpu-create-template-for-mma-ops", "ModuleOp"> {
+  let summary = "Create template.func for linalg ops with mma_kind lowering config";
+  let description = [{
+    Finds linalg ops with lowering configs containing `mma_kind` and
+    `promote_operands = [0, 1]` but no `template_call`. For each such op,
+    creates a template.func following the inner-tile pattern and adds
+    `template_call` to the lowering config.
+  }];
+  let options = [
+    Option<"splitSubgroups", "split-subgroups", "bool",
+           /*default=*/"false",
+           "Split even/odd subgroups into separate copy and compute loops.">,
+  ];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::Template::TemplateDialect",
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+  ];
+}
+
+def LLVMGPUConvertMmaToProcessInnerTilePass :
+    InterfacePass<"iree-llvmgpu-convert-mma-to-process-inner-tile", "mlir::FunctionOpInterface"> {
+  let summary = "Convert linalg ops with mma_kind to iree_gpu.process_inner_tile";
+  let description = [{
+    Finds linalg ops with lowering configs containing `mma_kind` and
+    `template_call`. Converts them to `iree_gpu.process_inner_tile` ops
+    using the template function, indexing maps, and iterator types from
+    the linalg op.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
+    "::mlir::iree_compiler::IREE::Template::TemplateDialect",
+    "::mlir::linalg::LinalgDialect",
+  ];
+}
+
 //------------------------------------------------------------------------------
 // Test Passes
 //------------------------------------------------------------------------------
