@@ -118,11 +118,11 @@ util.func private @dynamic_dim_mismatch(%dim0: index) {
 
 // -----
 
-util.func private @template_type_mismatch_region_arg() {
-// expected-error@+1 {{region ref argument type '!template.type<1>' must match template result type '!template.type<0>'}}
+util.func private @template_type_non_template_region_arg(%init: !template.type<0>) {
+// expected-error@+1 {{region ref argument type 'index' must be a template type when result is a template type}}
   pcf.generic scope(#pcf.sequential)
-    execute(%ref)[%id: index, %n: index]
-         : (!template.type<1>)
+    execute(%ref = %init)[%id: index, %n: index]
+         : (index)
         -> (!template.type<0>) {
     pcf.return
   }

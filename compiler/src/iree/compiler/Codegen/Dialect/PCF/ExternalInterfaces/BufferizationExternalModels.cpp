@@ -90,6 +90,10 @@ struct GenericOpInterface
         rewriter, loc, newResultTypes, genericOp.getScope(), newInits,
         genericOp.getDynamicSizes(), genericOp.getIsTied(),
         genericOp.getNumIterators(), genericOp.getSyncOnReturn());
+    // The builder doesn't set num_leading_args (it defaults to 0), but we
+    // need to preserve it from the original op since the execute region's
+    // block arguments include leading args from the initialize region.
+    newGenericOp.setNumLeadingArgs(genericOp.getNumLeadingArgs());
     newGenericOp.getRegion().takeBody(genericOp.getRegion());
     newGenericOp.getInitializer().takeBody(genericOp.getInitializer());
     replaceOpWithBufferizedValues(rewriter, op, newGenericOp.getResults());
@@ -265,17 +269,19 @@ struct WriteSliceOpInterface
 struct ReadSliceOpInterface
     : BufferizableOpInterface::ExternalModel<ReadSliceOpInterface,
                                              PCF::ReadSliceOp> {
+  /// Build a memref type for the slice result using the read_slice's sizes.
+  /// The result shape comes from the static sizes, not the full source shape.
   static MemRefType
-  getMaximallyDynamicBufferType(MLIRContext *context,
-                                PCF::ShapedRefType sourceType) {
-    // Create result type with maximally dynamic layout and no memory space.
-    // Layout and memory space aren't known until resolving sref types, after
-    // which we will propagate both to this operation's users.
-    SmallVector<int64_t> strides(sourceType.getRank(), ShapedType::kDynamic);
+  getSliceBufferType(MLIRContext *context, PCF::ReadSliceOp readOp) {
+    // Use the result tensor shape (which reflects the slice sizes).
+    auto resultTensorType =
+        cast<RankedTensorType>(readOp.getResultType());
+    int64_t rank = resultTensorType.getRank();
+    SmallVector<int64_t> strides(rank, ShapedType::kDynamic);
     auto layout =
         StridedLayoutAttr::get(context, ShapedType::kDynamic, strides);
-    return MemRefType::get(sourceType.getShape(), sourceType.getElementType(),
-                           layout,
+    return MemRefType::get(resultTensorType.getShape(),
+                           resultTensorType.getElementType(), layout,
                            /*memorySpace=*/nullptr);
   }
   FailureOr<BaseMemRefType>
@@ -283,8 +289,7 @@ struct ReadSliceOpInterface
                 const BufferizationState &state,
                 SmallVector<Value> &invocationStack) const {
     auto readOp = cast<PCF::ReadSliceOp>(op);
-    return getMaximallyDynamicBufferType(op->getContext(),
-                                         readOp.getSourceType());
+    return getSliceBufferType(op->getContext(), readOp);
   }
 
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
@@ -297,9 +302,9 @@ struct ReadSliceOpInterface
       return success();
     }
 
-    // Create result type with maximally dynamic layout and no memory space.
-    auto resultType =
-        getMaximallyDynamicBufferType(op->getContext(), readOp.getSourceType());
+    // Create result type using the slice sizes, not the full source shape.
+    MemRefType resultType =
+        getSliceBufferType(op->getContext(), readOp);
 
     // GetMemrefOp lets us get a memref out of a read_slice. Accesses to srefs
     // are allowed to ignore accesses to this memref.

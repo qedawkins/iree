@@ -82,14 +82,16 @@ static LogicalResult verifyParallelBodyOp(OpTy op, int64_t numLeadingArgs,
     bool isTemplateType = isa<IREE::Template::TypeType>(resultType);
 
     if (isTemplateType) {
-      // For template types, region arg must be exactly the same template type.
-      if (refArg.getType() != resultType) {
+      // For template types, the region ref arg is a different template type
+      // representing the sref version of the result. Only require it to be a
+      // template type (the actual sref wrapping happens at concretization).
+      if (!isa<IREE::Template::TypeType>(refArg.getType())) {
         return op.emitOpError("region ref argument type ")
-               << refArg.getType() << " must match template result type "
-               << resultType;
+               << refArg.getType()
+               << " must be a template type when result is a template type";
       }
 
-      // Check tied init matches exactly.
+      // Check tied init matches result type exactly.
       if (isTied) {
         Value init = op.getInits()[currIsTiedIndex];
         if (init.getType() != resultType) {
