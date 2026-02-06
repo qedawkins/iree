@@ -169,4 +169,30 @@ void appendConvertAccGemm(MLIRContext *context,
   attrs.emplace_back(kConvertAccGemmName, UnitAttr::get(context));
 }
 
+constexpr StringLiteral kTemplateCallName = "template_call";
+
+std::optional<FlatSymbolRefAttr> getTemplateCall(LoweringConfigAttr config) {
+  auto attr = config.getAttributes().getAs<FlatSymbolRefAttr>(kTemplateCallName);
+  if (!attr) {
+    return std::nullopt;
+  }
+  return attr;
+}
+
+void setTemplateCall(MLIRContext *context,
+                     SmallVectorImpl<NamedAttribute> &attrs,
+                     FlatSymbolRefAttr templateSymbol) {
+  attrs.emplace_back(kTemplateCallName, templateSymbol);
+}
+
+IREE::GPU::LoweringConfigAttr
+setTemplateCall(MLIRContext *context, IREE::GPU::LoweringConfigAttr currAttr,
+                FlatSymbolRefAttr templateSymbol) {
+  DictionaryAttr currAttributes = currAttr.getAttributes();
+  NamedAttrList attributes(currAttributes);
+  attributes.set(kTemplateCallName, templateSymbol);
+  return IREE::GPU::LoweringConfigAttr::get(context,
+                                            attributes.getDictionary(context));
+}
+
 } // namespace mlir::iree_compiler::IREE::GPU

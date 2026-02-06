@@ -73,6 +73,16 @@ bool shouldConvertAccGemm(LoweringConfigAttr config);
 void appendConvertAccGemm(MLIRContext *context,
                           SmallVectorImpl<NamedAttribute> &attrs);
 
+/// Helper to retrieve/set template function symbol for template-based lowering.
+std::optional<FlatSymbolRefAttr> getTemplateCall(LoweringConfigAttr config);
+void setTemplateCall(MLIRContext *context, SmallVectorImpl<NamedAttribute> &attrs,
+                     FlatSymbolRefAttr templateSymbol);
+
+/// Create a new LoweringConfigAttr with template_call field added/updated.
+IREE::GPU::LoweringConfigAttr
+setTemplateCall(MLIRContext *context, IREE::GPU::LoweringConfigAttr currAttr,
+                FlatSymbolRefAttr templateSymbol);
+
 } // namespace mlir::iree_compiler::IREE::GPU
 
 #endif // IREE_COMPILER_CODEGEN_DIALECT_GPU_IR_GPULOWERINGCONFIGUTILS_H_
