@@ -22,6 +22,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #define DEBUG_TYPE "iree-template-concretize-calls"
@@ -514,8 +515,20 @@ convertTemplateCallInterface(TemplateCallOpInterface callInterface,
 //===----------------------------------------------------------------------===//
 
 void ConcretizeTemplateCallsPass::runOnOperation() {
-  ModuleOp moduleOp = getOperation();
-  SymbolTable symbolTable(moduleOp);
+  Operation *rootOp = getOperation();
+
+  // Determine the symbol table source. If running on a function, get the
+  // symbol table from the parent module. Otherwise, use the operation itself.
+  Operation *symbolTableOp = rootOp;
+  if (dyn_cast<FunctionOpInterface>(rootOp)) {
+    symbolTableOp = rootOp->getParentOfType<ModuleOp>();
+    if (!symbolTableOp) {
+      rootOp->emitOpError(
+          "function must be nested inside a module for symbol lookup");
+      return signalPassFailure();
+    }
+  }
+  SymbolTable symbolTable(symbolTableOp);
 
   LLVM_DEBUG(llvm::dbgs() << "=== ConcretizeTemplateCallsPass ===\n");
 
@@ -527,7 +540,7 @@ void ConcretizeTemplateCallsPass::runOnOperation() {
     // Collect all ops implementing TemplateCallOpInterface not inside
     // template.func.
     SmallVector<TemplateCallOpInterface> callsToProcess;
-    moduleOp.walk([&](Operation *op) {
+    rootOp->walk([&](Operation *op) {
       if (op->getParentOfType<FuncOp>()) {
         return;
       }

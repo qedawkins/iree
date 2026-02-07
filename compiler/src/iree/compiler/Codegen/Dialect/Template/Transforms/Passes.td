@@ -10,7 +10,7 @@
 include "mlir/Pass/PassBase.td"
 
 def ConcretizeTemplateCallsPass :
-    Pass<"iree-template-concretize-calls", "ModuleOp"> {
+    Pass<"iree-template-concretize-calls"> {
   let summary = "Concretize template.call ops into template.instance ops";
   let description = [{
     Converts template.call operations into concrete template.instance
