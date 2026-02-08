@@ -111,3 +111,14 @@ func.func private @workgroup_scope_attr_linearize() attributes {
 }
 // CHECK-LABEL: func.func private @workgroup_scope_attr_linearize()
 // CHECK-SAME:    scope = #iree_codegen.workgroup_scope<linearize>
+
+// -----
+
+func.func @fence_release_acquire() {
+  iree_codegen.fence release #gpu.address_space<workgroup>
+  iree_codegen.fence acquire #gpu.address_space<workgroup>
+  return
+}
+// CHECK-LABEL: func.func @fence_release_acquire
+//       CHECK:   iree_codegen.fence release #gpu.address_space<workgroup>
+//       CHECK:   iree_codegen.fence acquire #gpu.address_space<workgroup>
