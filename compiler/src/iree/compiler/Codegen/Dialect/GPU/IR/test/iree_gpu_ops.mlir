@@ -240,3 +240,15 @@ module {
 // CHECK-SAME:        ins(%{{.+}}, %{{.+}} : tensor<64x64xf16>, tensor<64x64xf16>)
 // CHECK-SAME:        outs(%{{.+}} : tensor<64x64xf32>)
 // CHECK-SAME:        @matmul_template -> tensor<64x64xf32>
+
+// -----
+
+func.func @global_subgroup_barrier() {
+  iree_gpu.global_subgroup_barrier
+  iree_gpu.global_subgroup_barrier
+  return
+}
+
+// CHECK-LABEL: func @global_subgroup_barrier
+//       CHECK:   iree_gpu.global_subgroup_barrier
+//       CHECK:   iree_gpu.global_subgroup_barrier
