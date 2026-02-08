@@ -95,6 +95,14 @@ void DistributeInnerTiledToLanesPass::runOnOperation() {
     if (!tiledOp.hasTensorSemantics()) {
       return;
     }
+    // Skip ops that are already distributed (e.g., from concretized
+    // templates like the pingpong schedule).
+    if (auto semantics =
+            dyn_cast<IREE::GPU::InnerTiledSemanticsAttr>(tiledOp.getSemantics())) {
+      if (semantics.getDistributed()) {
+        return;
+      }
+    }
     tiledOps.push_back(tiledOp);
   });
   if (tiledOps.empty()) {
