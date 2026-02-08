@@ -7,6 +7,7 @@
 #include "iree/compiler/Codegen/Common/GPU/GPUPatterns.h"
 #include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/LLVMGPU/ConvertToLLVM.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
@@ -70,8 +71,38 @@ struct ReplaceGPUBarrierWithLDSBarrier
   }
 };
 
+// Lower iree_gpu.global_subgroup_barrier to just the hardware barrier
+// instruction (s_barrier via inline asm), with NO memory fences. The fences
+// are handled separately by iree_codegen.fence ops.
+struct LowerGlobalSubgroupBarrier
+    : public OpRewritePattern<IREE::GPU::GlobalSubgroupBarrierOp> {
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(IREE::GPU::GlobalSubgroupBarrierOp op,
+                                PatternRewriter &rewriter) const override {
+    // Pure synchronization, no memory fences. The fences are handled
+    // separately by iree_codegen.fence ops.
+    //
+    // Based on LDSBarrierOpLowering but without the release/acquire fences.
+    // TODO: Detect chipset and use appropriate barrier intrinsic.
+    // For now, use inline asm like LDSBarrierOp pre-gfx90a path.
+    auto asmDialectAttr = LLVM::AsmDialectAttr::get(rewriter.getContext(),
+                                                    LLVM::AsmDialect::AD_ATT);
+    const char *asmStr = ";;;WARNING: BREAKS DEBUG WATCHES\ns_barrier";
+    const char *constraints = "";
+    rewriter.replaceOpWithNewOp<LLVM::InlineAsmOp>(
+        op, /*resultTypes=*/TypeRange(), /*operands=*/ValueRange(),
+        /*asm_string=*/asmStr, constraints, /*has_side_effects=*/true,
+        /*is_align_stack=*/false, LLVM::TailCallKind::None,
+        /*asm_dialect=*/asmDialectAttr,
+        /*operand_attrs=*/ArrayAttr());
+    return success();
+  }
+};
+
 static void populateConvertGPUToAMDGPUPatterns(RewritePatternSet &patterns) {
-  patterns.add<ReplaceGPUBarrierWithLDSBarrier>(patterns.getContext());
+  patterns.add<ReplaceGPUBarrierWithLDSBarrier,
+               LowerGlobalSubgroupBarrier>(patterns.getContext());
 }
 
 /// Hacky pattern to swap `s_setprio` operations with `amdgpu.mfma` ops.
