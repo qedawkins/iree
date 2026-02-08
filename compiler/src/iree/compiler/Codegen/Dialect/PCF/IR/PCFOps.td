@@ -440,6 +440,34 @@ def BranchCondReturnOp : PCF_Op<"br.cond_return", [
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// BarrierOp
+//===----------------------------------------------------------------------===//
+
+def BarrierOp : PCF_Op<"barrier", []> {
+  let summary = [{Global barrier synchronizing all workers at the given scope.}];
+  let description = [{
+    Creates a global barrier that synchronizes all workers at the specified
+    scope. All workers must reach *any* instance of the barrier before any can
+    proceed past it. This is not a named or numbered barrier -- all barriers
+    at a given scope are considered the same synchronization point.
+
+    This means that two workers may reach different `pcf.barrier` ops in the
+    program (e.g., on different sides of a conditional branch) and still
+    satisfy each other's synchronization requirements, as long as they share
+    the same scope.
+
+    Example:
+    ```mlir
+      pcf.barrier(#iree_gpu.subgroup_scope)
+    ```
+  }];
+
+  let arguments = (ins PCF_ScopeAttrInterface:$scope);
+  let results = (outs);
+  let assemblyFormat = [{`(` $scope `)` attr-dict}];
+}
+
 } // OpGroupControlFlowOps
 
 //===----------------------------------------------------------------------===//
