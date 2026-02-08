@@ -440,10 +440,28 @@ public:
 
   LogicalResult run() {
     // Initialize all shaped ref values to maximally dynamic layouts.
-    explorer.walkValuesOfType<PCF::ShapedRefType>([&](Value v) {
-      solver.getOrCreateElementFor<StridedLayoutValueElement>(
-          Position::forValue(v));
-      return WalkResult::advance();
+    // NOTE: We walk the root op directly instead of using
+    // explorer.walkValuesOfType<> because walkValuesOfType uses the call
+    // graph which can miss values when the pass operates on a function-like
+    // op (the func's parent module is outside the Explorer's scope, causing
+    // the "validInPlace" check to skip the func's callable region).
+    explorer.getRootOp()->walk([&](Operation *op) {
+      for (Value result : op->getResults()) {
+        if (isa<PCF::ShapedRefType>(result.getType())) {
+          solver.getOrCreateElementFor<StridedLayoutValueElement>(
+              Position::forValue(result));
+        }
+      }
+      for (Region &region : op->getRegions()) {
+        for (Block &block : region) {
+          for (BlockArgument arg : block.getArguments()) {
+            if (isa<PCF::ShapedRefType>(arg.getType())) {
+              solver.getOrCreateElementFor<StridedLayoutValueElement>(
+                  Position::forValue(arg));
+            }
+          }
+        }
+      }
     });
 
     // Run solver to completion.
