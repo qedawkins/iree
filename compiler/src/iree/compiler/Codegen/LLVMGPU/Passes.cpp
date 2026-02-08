@@ -445,6 +445,11 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   tileAndDistributeToWorkgroup(funcPassManager, /*useForall=*/true,
                                /*convertToDpsOptions=*/std::nullopt);
 
+  // Convert eligible MMA ops to process_inner_tile before template
+  // concretization. This creates process_inner_tile ops (which implement
+  // TemplateCallOpInterface) from linalg ops with mma_kind + template_call.
+  funcPassManager.addPass(createLLVMGPUConvertMmaToProcessInnerTilePass());
+
   // Concretize and inline template calls.
   funcPassManager.addPass(IREE::Template::createConcretizeTemplateCallsPass());
   funcPassManager.addPass(IREE::Template::createInlineTemplateInstancesPass());

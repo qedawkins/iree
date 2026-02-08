@@ -32,66 +32,31 @@ namespace {
 
 /// Check if a lowering config is eligible for conversion to process_inner_tile.
 /// Requirements:
-/// - Has mma_kind
-/// - Has template_call
-/// - Has promote_operands = [0, 1]
+/// - Has mma_kind.
+/// - Has template_call.
+/// - Has subgroup tiling level with non-zero values.
 static bool
-isEligibleForProcessInnerTile(IREE::GPU::LoweringConfigAttr config) {
-  if (!config) {
+isEligibleForProcessInnerTile(IREE::GPU::LoweringConfigAttr config,
+                              linalg::LinalgOp linalgOp) {
+  if (!config)
     return false;
-  }
 
-  // Must have mma_kind.
-  auto mmaKind = IREE::GPU::getMmaKind(config);
-  if (!mmaKind) {
+  if (!IREE::GPU::getMmaKind(config))
     return false;
-  }
 
-  // Must have template_call.
-  if (!IREE::GPU::getTemplateCall(config)) {
+  if (!IREE::GPU::getTemplateCall(config))
     return false;
-  }
 
-  // Must have promote_operands = [0, 1].
-  auto promoteOperands = IREE::GPU::getPromotedOperandList(config);
-  if (!promoteOperands) {
-    return false;
-  }
-  if (promoteOperands->size() != 2 || (*promoteOperands)[0] != 0 ||
-      (*promoteOperands)[1] != 1) {
-    return false;
-  }
-
-  return true;
-}
-
-/// Get the outer dimension distribution from the subgroup tile sizes.
-/// This tells us how to distribute outer dimensions across subgroups.
-static SmallVector<int64_t>
-getOuterDimDistribution(IREE::GPU::LoweringConfigAttr config,
-                        linalg::LinalgOp linalgOp,
-                        ArrayRef<utils::IteratorType> iteratorTypes) {
+  // Require subgroup tiles to be present (distinguishes pingpong from
+  // standard MMA ops that use the template infrastructure differently).
   SmallVector<int64_t> subgroupTiles = config.getStaticTilingLevelSizes(
       llvm::to_underlying(IREE::GPU::TilingLevel::Subgroup), linalgOp);
-  if (subgroupTiles.empty()) {
-    // Default to [1, 1] if not specified.
-    return SmallVector<int64_t>(2, 1);
-  }
+  if (subgroupTiles.empty())
+    return false;
 
-  // Extract only parallel dimensions (skip reduction dimensions).
-  SmallVector<int64_t> distribution;
-  for (auto [tile, iterType] : llvm::zip(subgroupTiles, iteratorTypes)) {
-    if (iterType == utils::IteratorType::parallel && tile != 0) {
-      distribution.push_back(tile);
-    }
-  }
-
-  // Ensure we have at least 2 dimensions.
-  while (distribution.size() < 2) {
-    distribution.push_back(1);
-  }
-
-  return distribution;
+  // Must have at least one non-zero subgroup tile.
+  bool hasNonZero = llvm::any_of(subgroupTiles, [](int64_t v) { return v != 0; });
+  return hasNonZero;
 }
 
 class LLVMGPUConvertMmaToProcessInnerTilePass final
@@ -109,7 +74,7 @@ public:
     funcOp->walk([&](linalg::LinalgOp linalgOp) {
       auto config = dyn_cast_or_null<IREE::GPU::LoweringConfigAttr>(
           getLoweringConfig(linalgOp));
-      if (isEligibleForProcessInnerTile(config)) {
+      if (isEligibleForProcessInnerTile(config, linalgOp)) {
         eligibleOps.push_back({linalgOp, config});
       }
     });
@@ -122,47 +87,62 @@ public:
       Location loc = linalgOp.getLoc();
       OpBuilder builder(linalgOp);
 
-      // Get MMA kind.
+      // --- Read only 3 fields from the config ---
+
+      // 1. MMA kind.
       auto mmaKind = IREE::GPU::getMmaKind(config);
       assert(mmaKind && "Expected mma_kind to be present");
 
-      // Get template symbol.
+      // 2. Template symbol.
       auto templateCall = IREE::GPU::getTemplateCall(config);
       assert(templateCall && "Expected template_call to be present");
 
-      // Get iterator types.
+      // 3. Subgroup tile sizes.
+      //    For parallel dims: distribution factors (number of subgroups).
+      //    For reduction dims: tile size (e.g. K tile size).
+      SmallVector<int64_t> subgroupTiles = config.getStaticTilingLevelSizes(
+          llvm::to_underlying(IREE::GPU::TilingLevel::Subgroup), linalgOp);
+
+      // --- Derive everything else from the linalg op ---
+
       SmallVector<utils::IteratorType> iteratorTypes =
           linalgOp.getIteratorTypesArray();
-
-      // Get indexing maps.
       SmallVector<AffineMap> indexingMaps = linalgOp.getIndexingMapsArray();
 
-      // Create bounds from workgroup + reduction tile sizes.
-      // The bounds represent the iteration space dimensions.
-      SmallVector<int64_t> workgroupTiles = config.getWorkgroupTileSizes();
-      SmallVector<int64_t> reductionTiles = config.getStaticTilingLevelSizes(
-          llvm::to_underlying(IREE::GPU::TilingLevel::Reduction), linalgOp);
+      // Get static loop ranges from the linalg op shapes.
+      // After workgroup tiling, parallel dims reflect workgroup tile sizes.
+      SmallVector<int64_t> loopRanges = linalgOp.getStaticLoopRanges();
 
-      // Build bounds values (using constants for static sizes).
+      // Build bounds values.
+      // Parallel dims: from linalg op shapes (workgroup tile sizes after
+      //   tileAndDistributeToWorkgroup).
+      // Reduction dims: from subgroup tiles (K tile size stored there).
       SmallVector<Value> bounds;
       for (size_t i = 0; i < iteratorTypes.size(); ++i) {
         int64_t tileSize = 0;
-        if (i < workgroupTiles.size() && workgroupTiles[i] != 0) {
-          tileSize = workgroupTiles[i];
-        } else if (i < reductionTiles.size() && reductionTiles[i] != 0) {
-          tileSize = reductionTiles[i];
+        if (iteratorTypes[i] == utils::IteratorType::parallel) {
+          tileSize = loopRanges[i];
+        } else {
+          // Reduction dim: K tile size from subgroup tiles.
+          tileSize = (i < subgroupTiles.size()) ? subgroupTiles[i] : 0;
         }
-        // For dynamic sizes or zero, use a placeholder.
-        if (tileSize == 0) {
+        if (tileSize == 0 || ShapedType::isDynamic(tileSize)) {
           tileSize = 1;
         }
-        Value boundValue = arith::ConstantIndexOp::create(builder, loc, tileSize);
-        bounds.push_back(boundValue);
+        bounds.push_back(arith::ConstantIndexOp::create(builder, loc, tileSize));
       }
 
-      // Get outer dimension distribution.
-      SmallVector<int64_t> outerDimDistribution =
-          getOuterDimDistribution(config, linalgOp, iteratorTypes);
+      // Outer dimension distribution: subgroup tiles for parallel dims.
+      SmallVector<int64_t> outerDimDistribution;
+      for (auto [sg, iterType] :
+           llvm::zip(subgroupTiles, iteratorTypes)) {
+        if (iterType == utils::IteratorType::parallel && sg != 0) {
+          outerDimDistribution.push_back(sg);
+        }
+      }
+      while (outerDimDistribution.size() < 2) {
+        outerDimDistribution.push_back(1);
+      }
 
       // Get inputs and outputs.
       SmallVector<Value> inputs(linalgOp.getDpsInputs());

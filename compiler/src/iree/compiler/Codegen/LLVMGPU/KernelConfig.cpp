@@ -57,6 +57,12 @@ static llvm::cl::opt<bool> clGPUUseTileAndFuseMatmul(
     llvm::cl::desc("test the the tile and fuse pipeline for matmul"),
     llvm::cl::init(true));
 
+static llvm::cl::opt<bool> clGPUTestPingpong(
+    "iree-codegen-llvmgpu-test-pingpong",
+    llvm::cl::desc("test the the pingpong pipeline for matmul/conv"),
+    llvm::cl::init(true),
+    llvm::cl::Hidden);
+
 static llvm::cl::opt<bool> clGPUTestTileAndFuseVectorize(
     "iree-codegen-llvmgpu-test-tile-and-fuse-vectorize",
     llvm::cl::desc(
@@ -2265,6 +2271,13 @@ static LogicalResult setRootConfig(IREE::GPU::TargetAttr target,
           target, entryPointFn, computeOp, ukernelConfig))) {
     LDBG() << "Tile and fuse data tiled MMA inner_tiled config";
     return success();
+  }
+  if (clGPUTestPingpong) {
+    if (succeeded(IREE::GPU::setPingpongLoweringConfig(
+            target, entryPointFn, computeOp))) {
+      LDBG() << "Pingpong config";
+      return success();
+    }
   }
   if (clGPUUseTileAndFuseMatmul) {
     if (succeeded(IREE::GPU::setMatmulLoweringConfig(

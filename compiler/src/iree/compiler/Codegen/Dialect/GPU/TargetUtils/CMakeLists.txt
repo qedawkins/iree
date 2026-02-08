@@ -17,20 +17,27 @@ iree_cc_library(
     "ConfigUtils.h"
   SRCS
     "ConfigUtils.cpp"
+    "PingpongConfig.cpp"
     "ReductionConfigUtils.cpp"
   DEPS
     LLVMSupport
     MLIRAnalysis
+    MLIRArithDialect
     MLIRFunctionInterfaces
     MLIRIR
     MLIRLinalgDialect
     MLIRLinalgUtils
+    MLIRSCFDialect
     MLIRSupport
+    MLIRTensorDialect
+    MLIRVectorDialect
     iree::compiler::Codegen::Common
     iree::compiler::Codegen::Common::GPU::GPUHeuristics
     iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
     iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
     iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUInterfaces
+    iree::compiler::Codegen::Dialect::PCF::IR
+    iree::compiler::Codegen::Dialect::Template::IR
     iree::compiler::Codegen::Interfaces::PartitionableLoopsInterface
     iree::compiler::Codegen::Utils
     iree::compiler::Dialect::LinalgExt::IR
