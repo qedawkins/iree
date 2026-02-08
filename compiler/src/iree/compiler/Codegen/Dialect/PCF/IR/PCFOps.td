@@ -440,6 +440,27 @@ def BranchCondReturnOp : PCF_Op<"br.cond_return", [
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// BarrierOp
+//===----------------------------------------------------------------------===//
+
+def BarrierOp : PCF_Op<"barrier", []> {
+  let summary = [{Synchronize all workers at the given scope.}];
+  let description = [{
+    Creates a barrier that synchronizes all workers at the specified scope.
+    All workers must reach the barrier before any can proceed past it.
+
+    Example:
+    ```mlir
+      pcf.barrier(#iree_gpu.subgroup_scope)
+    ```
+  }];
+
+  let arguments = (ins PCF_ScopeAttrInterface:$scope);
+  let results = (outs);
+  let assemblyFormat = [{`(` $scope `)` attr-dict}];
+}
+
 } // OpGroupControlFlowOps
 
 //===----------------------------------------------------------------------===//
