@@ -452,3 +452,34 @@ void WorkgroupCountHintOp::build(OpBuilder &builder, OperationState &state,
   build(builder, state, dynamicSizes,
         builder.getDenseI64ArrayAttr(staticSizes));
 }
+
+//===----------------------------------------------------------------------===//
+// FenceOp
+//===----------------------------------------------------------------------===//
+
+// Parse: iree_codegen.fence (release|acquire) <memory_space>
+ParseResult FenceOp::parse(OpAsmParser &parser, OperationState &result) {
+  MLIRContext *context = parser.getContext();
+  bool isRelease = false;
+  if (succeeded(parser.parseOptionalKeyword("release"))) {
+    isRelease = true;
+  } else if (failed(parser.parseKeyword("acquire"))) {
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected 'release' or 'acquire'");
+  }
+  result.addAttribute("is_release", BoolAttr::get(context, isRelease));
+
+  Attribute memorySpace;
+  if (failed(parser.parseAttribute(memorySpace)))
+    return failure();
+  result.addAttribute("memory_space", memorySpace);
+
+  return parser.parseOptionalAttrDict(result.attributes);
+}
+
+void FenceOp::print(OpAsmPrinter &p) {
+  p << (getIsRelease() ? " release" : " acquire");
+  p << " " << getMemorySpace();
+  SmallVector<StringRef> elidedAttrs = {"is_release", "memory_space"};
+  p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+}

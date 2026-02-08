@@ -615,4 +615,31 @@ def IREECodegen_IndexHintOp : Op<IREECodegen_Dialect, "index_hint", [Pure]> {
   let assemblyFormat = "$input `(` $hint `)` attr-dict `:` type($input)";
 }
 
+//===----------------------------------------------------------------------===//
+// FenceOp
+//===----------------------------------------------------------------------===//
+
+def IREECodegen_FenceOp : Op<IREECodegen_Dialect, "fence", []> {
+  let summary = "Memory fence with release or acquire semantics.";
+  let description = [{
+    Ensures visibility of memory operations at a specific memory space.
+    Release semantics flush prior writes; acquire semantics ensure subsequent
+    reads see the latest values.
+
+    Examples:
+    ```mlir
+      iree_codegen.fence release #gpu.address_space<workgroup>
+      iree_codegen.fence acquire #gpu.address_space<workgroup>
+    ```
+  }];
+
+  let arguments = (ins
+    BoolAttr:$is_release,
+    AnyAttr:$memory_space
+  );
+  let results = (outs);
+
+  let hasCustomAssemblyFormat = 1;
+}
+
 #endif // IREE_CODEGEN_DIALECT_IREECODEGENOPS
