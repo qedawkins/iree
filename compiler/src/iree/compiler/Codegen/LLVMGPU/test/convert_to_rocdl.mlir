@@ -330,3 +330,18 @@ builtin.module {
 //   CHECK-DAG: llvm.getelementptr %[[A0]][0, 0, 0, 0]
 //   CHECK-DAG: %[[A:.+]] = llvm.mlir.addressof @__shared_memory__
 //   CHECK-DAG: llvm.getelementptr %[[A]][0, 0, 0, 0]
+
+// -----
+
+// Test that global_subgroup_barrier lowers to just the barrier, no fences.
+// On gfx908 (< gfx90a), this uses inline asm s_barrier.
+builtin.module {
+  func.func @global_subgroup_barrier() {
+    iree_gpu.global_subgroup_barrier
+    return
+  }
+}
+// CHECK-LABEL: llvm.func @global_subgroup_barrier
+//   CHECK-NOT: llvm.fence
+//       CHECK: llvm.inline_asm has_side_effects asm_dialect = att ";;;WARNING: BREAKS DEBUG WATCHES{{.*}}s_barrier"
+//   CHECK-NOT: llvm.fence

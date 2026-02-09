@@ -197,3 +197,15 @@ func.func @coalesced_gather_dma_tensor_indices(%idx0: tensor<64xi32>, %source: t
 //       CHECK:   scf.forall
 //       CHECK:     scf.forall.in_parallel
 //       CHECK:       iree_gpu.coalesced_gather_dma %{{.+}}[%{{.+}}] into %{{.+}} lane(%{{.+}}) : tensor<4096xf32>, tensor<64xi32>, tensor<64xf32>, index -> tensor<64xf32>
+
+// -----
+
+func.func @global_subgroup_barrier() {
+  iree_gpu.global_subgroup_barrier
+  iree_gpu.global_subgroup_barrier
+  return
+}
+
+// CHECK-LABEL: func @global_subgroup_barrier
+//       CHECK:   iree_gpu.global_subgroup_barrier
+//       CHECK:   iree_gpu.global_subgroup_barrier
