@@ -151,6 +151,24 @@ def GPUFuseAndHoistParallelLoopsPass :
   ];
 }
 
+def GPUFuseIntoPCFOpsPass :
+    InterfacePass<"iree-codegen-gpu-fuse-into-pcf-ops", "mlir::FunctionOpInterface"> {
+  let summary = "Fuses producers and consumers into subgroup-scoped pcf.generic/loop ops.";
+  let description = [{
+    Runs consumer and producer fusion on pcf.generic and pcf.loop ops whose
+    scope attribute is iree_gpu.subgroup_scope. This eliminates standalone
+    tilable ops (like linalg.fill, linalg.copy) that would otherwise be
+    distributed to threads by GPUGreedilyDistributeToThreads, avoiding
+    unnecessary gpu.barrier generation.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::affine::AffineDialect",
+  ];
+}
+
 def GPUGeneralizeNamedOpsPass :
     InterfacePass<"iree-codegen-gpu-generalize-named-ops", "mlir::FunctionOpInterface"> {
   let summary = "Convert named Linalg ops to linalg.generic ops";
