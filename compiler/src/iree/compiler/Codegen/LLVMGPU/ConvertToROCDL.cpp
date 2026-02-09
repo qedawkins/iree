@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Common/GPU/GPUPatterns.h"
 #include "iree/compiler/Codegen/Common/Transforms.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/LLVMGPU/ConvertToLLVM.h"
@@ -100,9 +101,62 @@ struct LowerGlobalSubgroupBarrier
   }
 };
 
+// Lower iree_codegen.fence to llvm.fence with MMRA attributes.
+// Maps release/acquire semantics and memory space to the appropriate
+// LLVM fence with AMD GPU synchronization annotations.
+struct LowerCodegenFenceToROCDL
+    : public OpRewritePattern<IREE::Codegen::FenceOp> {
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(IREE::Codegen::FenceOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+
+    // Determine LLVM atomic ordering.
+    LLVM::AtomicOrdering ordering = op.getIsRelease()
+                                        ? LLVM::AtomicOrdering::release
+                                        : LLVM::AtomicOrdering::acquire;
+
+    // Map memory space to MMRA tag. For workgroup (LDS), use "local".
+    StringRef mmraValue;
+    if (auto gpuAddrSpace =
+            dyn_cast<gpu::AddressSpaceAttr>(op.getMemorySpace())) {
+      switch (gpuAddrSpace.getValue()) {
+      case gpu::AddressSpace::Workgroup:
+        mmraValue = "local";
+        break;
+      case gpu::AddressSpace::Global:
+        mmraValue = "global";
+        break;
+      default:
+        return op.emitOpError("unsupported address space for ROCDL fence");
+      }
+    } else {
+      return op.emitOpError("expected gpu.address_space attribute");
+    }
+
+    Attribute mmra = rewriter.getAttr<LLVM::MMRATagAttr>(
+        "amdgpu-synchronize-as", mmraValue);
+
+    // Note: while there *is* a workgroup-one-as scope, this, when combined
+    // with the MMRA, will lead to the fence having no effect. This is because
+    // the codepaths for an atomic load or store will observe that a
+    // one-address-space atomic to LDS requires no synchronization because
+    // operations on LDS are totally ordered with respect to each other, and so
+    // will not emit the correct waitcnt operations that these fences are
+    // intended to produce. Therefore, we use "workgroup" scope and rely on the
+    // MMRA to relax it to the semantics we want.
+    auto fence = LLVM::FenceOp::create(rewriter, loc, ordering, "workgroup");
+    fence->setDiscardableAttr(LLVM::LLVMDialect::getMmraAttrName(), mmra);
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 static void populateConvertGPUToAMDGPUPatterns(RewritePatternSet &patterns) {
-  patterns.add<ReplaceGPUBarrierWithLDSBarrier,
-               LowerGlobalSubgroupBarrier>(patterns.getContext());
+  patterns.add<ReplaceGPUBarrierWithLDSBarrier, LowerGlobalSubgroupBarrier,
+               LowerCodegenFenceToROCDL>(patterns.getContext());
 }
 
 /// Hacky pattern to swap `s_setprio` operations with `amdgpu.mfma` ops.

@@ -344,3 +344,18 @@ builtin.module {
 //   CHECK-NOT: llvm.fence
 //       CHECK: llvm.inline_asm has_side_effects asm_dialect = att ";;;WARNING: BREAKS DEBUG WATCHES{{.*}}s_barrier"
 //   CHECK-NOT: llvm.fence
+
+// -----
+
+// Test that iree_codegen.fence lowers to llvm.fence with MMRA.
+builtin.module {
+  func.func @fence_workgroup() {
+    iree_codegen.fence release #gpu.address_space<workgroup>
+    iree_codegen.fence acquire #gpu.address_space<workgroup>
+    return
+  }
+}
+// CHECK: #[[$MMRA:.+]] = #llvm.mmra_tag<"amdgpu-synchronize-as":"local">
+// CHECK-LABEL: llvm.func @fence_workgroup
+//       CHECK: llvm.fence syncscope("workgroup") release {llvm.mmra = #[[$MMRA]]}
+//       CHECK: llvm.fence syncscope("workgroup") acquire {llvm.mmra = #[[$MMRA]]}
