@@ -96,7 +96,22 @@ struct GenericOpInterface
     newGenericOp.setNumLeadingArgs(genericOp.getNumLeadingArgs());
     newGenericOp.getRegion().takeBody(genericOp.getRegion());
     newGenericOp.getInitializer().takeBody(genericOp.getInitializer());
-    replaceOpWithBufferizedValues(rewriter, op, newGenericOp.getResults());
+
+    // For results with tied inits, use the init buffer directly so
+    // bufferization knows the result aliases the init (avoids extraneous
+    // copies). Self-allocated results use the new op's result.
+    SmallVector<Value> replacements;
+    for (int64_t i = 0, e = genericOp->getNumResults(); i < e; ++i) {
+      OpOperand *tiedInit = genericOp.getTiedInit(i);
+      if (tiedInit) {
+        int64_t initIdx =
+            llvm::count(genericOp.getIsTied().take_front(i), true);
+        replacements.push_back(newInits[initIdx]);
+      } else {
+        replacements.push_back(newGenericOp->getResult(i));
+      }
+    }
+    replaceOpWithBufferizedValues(rewriter, op, replacements);
     return success();
   }
 
@@ -195,7 +210,22 @@ struct LoopOpInterface
         newInits, loopOp.getDynamicSizes(), loopOp.getIsTied(),
         loopOp.getSyncOnReturn());
     newLoopOp.getRegion().takeBody(loopOp.getRegion());
-    replaceOpWithBufferizedValues(rewriter, op, newLoopOp.getResults());
+
+    // For results with tied inits, use the init buffer directly so
+    // bufferization knows the result aliases the init (avoids extraneous
+    // copies). Self-allocated results use the new op's result.
+    SmallVector<Value> replacements;
+    for (int64_t i = 0, e = loopOp->getNumResults(); i < e; ++i) {
+      OpOperand *tiedInit = loopOp.getTiedInit(i);
+      if (tiedInit) {
+        int64_t initIdx =
+            llvm::count(loopOp.getIsTied().take_front(i), true);
+        replacements.push_back(newInits[initIdx]);
+      } else {
+        replacements.push_back(newLoopOp->getResult(i));
+      }
+    }
+    replaceOpWithBufferizedValues(rewriter, op, replacements);
     return success();
   }
 
