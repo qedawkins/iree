@@ -334,6 +334,7 @@ builtin.module {
 // -----
 
 // Test that global_subgroup_barrier lowers to just the barrier, no fences.
+// On gfx908 (< gfx90a), this uses inline asm s_barrier.
 builtin.module {
   func.func @global_subgroup_barrier() {
     iree_gpu.global_subgroup_barrier
