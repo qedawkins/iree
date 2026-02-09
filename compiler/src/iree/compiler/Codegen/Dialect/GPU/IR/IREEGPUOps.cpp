@@ -1229,14 +1229,22 @@ LogicalResult ProcessInnerTileOp::inlineImplementationBlocks(
     }
     case 1: {
       // Read LHS from shared memory.
-      // Args: (buf_idx, sg_id, lane_id, lhs_alloc: sref). Returns: type<1>.
-      if (destBlock->getNumArguments() < 4) {
-        return emitOpError("read-LHS block: expected at least 4 arguments");
+      // Double-buffer: (buf_idx, sg_id, lane_id, alloc). Returns: type<1>.
+      // Single-buffer: (sg_id, lane_id, alloc). Returns: type<1>.
+      SmallVector<OpFoldResult> extraLeadingOffsets;
+      Value sgId, laneId, allocArg;
+      if (destBlock->getNumArguments() >= 4) {
+        extraLeadingOffsets.push_back(OpFoldResult(destBlock->getArgument(0)));
+        sgId = destBlock->getArgument(1);
+        laneId = destBlock->getArgument(2);
+        allocArg = destBlock->getArgument(3);
+      } else if (destBlock->getNumArguments() >= 3) {
+        sgId = destBlock->getArgument(0);
+        laneId = destBlock->getArgument(1);
+        allocArg = destBlock->getArgument(2);
+      } else {
+        return emitOpError("read-LHS block: expected at least 3 arguments");
       }
-      Value bufIdx = destBlock->getArgument(0);
-      Value sgId = destBlock->getArgument(1);
-      Value laneId = destBlock->getArgument(2);
-      Value allocArg = destBlock->getArgument(3);
 
       RankedTensorType lhsDistType =
           cast<RankedTensorType>(typeBindings[1][0]);
@@ -1244,22 +1252,30 @@ LogicalResult ProcessInnerTileOp::inlineImplementationBlocks(
 
       Value result = readDistributedFromSref(
           builder, loc, kind, /*operandIdx=*/0, lhsMap, allocArg, sgId, laneId,
-          lhsDistType, /*extraLeadingOffsets=*/{OpFoldResult(bufIdx)},
-          iteratorTypes, outerDimDist, iterDimToDistIdx);
+          lhsDistType, extraLeadingOffsets, iteratorTypes, outerDimDist,
+          iterDimToDistIdx);
 
       Template::ReturnOp::create(builder, loc, result);
       break;
     }
     case 2: {
       // Read RHS from shared memory.
-      // Args: (buf_idx, sg_id, lane_id, rhs_alloc: sref). Returns: type<2>.
-      if (destBlock->getNumArguments() < 4) {
-        return emitOpError("read-RHS block: expected at least 4 arguments");
+      // Double-buffer: (buf_idx, sg_id, lane_id, alloc). Returns: type<2>.
+      // Single-buffer: (sg_id, lane_id, alloc). Returns: type<2>.
+      SmallVector<OpFoldResult> extraLeadingOffsets;
+      Value sgId, laneId, allocArg;
+      if (destBlock->getNumArguments() >= 4) {
+        extraLeadingOffsets.push_back(OpFoldResult(destBlock->getArgument(0)));
+        sgId = destBlock->getArgument(1);
+        laneId = destBlock->getArgument(2);
+        allocArg = destBlock->getArgument(3);
+      } else if (destBlock->getNumArguments() >= 3) {
+        sgId = destBlock->getArgument(0);
+        laneId = destBlock->getArgument(1);
+        allocArg = destBlock->getArgument(2);
+      } else {
+        return emitOpError("read-RHS block: expected at least 3 arguments");
       }
-      Value bufIdx = destBlock->getArgument(0);
-      Value sgId = destBlock->getArgument(1);
-      Value laneId = destBlock->getArgument(2);
-      Value allocArg = destBlock->getArgument(3);
 
       RankedTensorType rhsDistType =
           cast<RankedTensorType>(typeBindings[2][0]);
@@ -1267,8 +1283,8 @@ LogicalResult ProcessInnerTileOp::inlineImplementationBlocks(
 
       Value result = readDistributedFromSref(
           builder, loc, kind, /*operandIdx=*/1, rhsMap, allocArg, sgId, laneId,
-          rhsDistType, /*extraLeadingOffsets=*/{OpFoldResult(bufIdx)},
-          iteratorTypes, outerDimDist, iterDimToDistIdx);
+          rhsDistType, extraLeadingOffsets, iteratorTypes, outerDimDist,
+          iterDimToDistIdx);
 
       Template::ReturnOp::create(builder, loc, result);
       break;

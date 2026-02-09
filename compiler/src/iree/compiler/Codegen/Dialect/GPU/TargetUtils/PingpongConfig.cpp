@@ -14,6 +14,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/Template/IR/Template.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -28,6 +29,12 @@
 namespace mlir::iree_compiler::IREE::GPU {
 
 namespace {
+
+static llvm::cl::opt<bool> clUseQuarterK(
+    "iree-gpu-use-quarter-k-pingpong",
+    llvm::cl::desc(
+        "Use quarter-K pingpong schedule instead of double-buffered"),
+    llvm::cl::init(false));
 
 //===----------------------------------------------------------------------===//
 // Pingpong Template Function Builder
@@ -515,6 +522,358 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
   return funcOp;
 }
 
+//===----------------------------------------------------------------------===//
+// Quarter-K Template Function Builder
+//===----------------------------------------------------------------------===//
+//
+// Creates a template.func with the quarter-K single-buffer loop structure.
+// All subgroups do the same work (no even/odd split). Each K iteration
+// processes 4 quarters of K-elements, reading each quarter via pcf.subview.
+//
+// Template types (same as double-buffer):
+//   type<0>: Per-subgroup distributed accumulator.
+//   type<1>: Per-subgroup distributed LHS input (from LDS).
+//   type<2>: Per-subgroup distributed RHS input (from LDS).
+//
+// Implementation blocks (7 total):
+//   Block 0: Init accumulators (sg_id, lane_id, dest) -> type<0>
+//   Block 1: Copy LHS to shared (k_idx, sg_id, lane_id, lhs, alloc)
+//   Block 2: Copy RHS to shared (k_idx, sg_id, lane_id, rhs, alloc)
+//   Block 3: Read LHS from LDS (sg_id, lane_id, quarter_subview) -> type<1>
+//   Block 4: Read RHS from LDS (sg_id, lane_id, quarter_subview) -> type<2>
+//   Block 5: Compute MMA (acc, lhs_local, rhs_local) -> type<0>
+//   Block 6: Write results (sg_id, lane_id, result, dest)
+
+static IREE::Template::FuncOp createQuarterKTemplateFunc(
+    OpBuilder &builder, Location loc, StringRef name, Type outputTensorType,
+    Type lhsTensorType, Type rhsTensorType, ArrayRef<int64_t> lhsTileShape,
+    ArrayRef<int64_t> rhsTileShape, Type elemType, int64_t lhsKDimIdx,
+    int64_t rhsKDimIdx) {
+  MLIRContext *context = builder.getContext();
+
+  // Template types.
+  IREE::Template::TypeType type0 =
+      IREE::Template::TypeType::get(context, 0); // acc
+  IREE::Template::TypeType type1 =
+      IREE::Template::TypeType::get(context, 1); // lhs local
+  IREE::Template::TypeType type2 =
+      IREE::Template::TypeType::get(context, 2); // rhs local
+  Type indexType = builder.getIndexType();
+
+  // Full K tile size and quarter.
+  int64_t kTileSize = lhsTileShape[lhsKDimIdx];
+  int64_t quarterK = kTileSize / 4;
+
+  // Shared memory allocation types: sref<M x K x elemType> (single buffer).
+  PCF::ScopeAttrInterface subgroupScope = cast<PCF::ScopeAttrInterface>(
+      IREE::GPU::SubgroupScopeAttr::get(context));
+  PCF::ShapedRefType lhsAllocType =
+      PCF::ShapedRefType::get(context, lhsTileShape, elemType, subgroupScope);
+  PCF::ShapedRefType rhsAllocType =
+      PCF::ShapedRefType::get(context, rhsTileShape, elemType, subgroupScope);
+
+  // Quarter subview types for read blocks.
+  SmallVector<int64_t> lhsQuarterShape(lhsTileShape);
+  lhsQuarterShape[lhsKDimIdx] = quarterK;
+  PCF::ShapedRefType lhsQuarterType =
+      PCF::ShapedRefType::get(context, lhsQuarterShape, elemType,
+                              subgroupScope);
+
+  SmallVector<int64_t> rhsQuarterShape(rhsTileShape);
+  rhsQuarterShape[rhsKDimIdx] = quarterK;
+  PCF::ShapedRefType rhsQuarterType =
+      PCF::ShapedRefType::get(context, rhsQuarterShape, elemType,
+                              subgroupScope);
+
+  // Concrete sref type for outputs.
+  auto outputRankedType = cast<RankedTensorType>(outputTensorType);
+  PCF::ShapedRefType outputSrefType = PCF::ShapedRefType::get(
+      context, outputRankedType.getShape(), outputRankedType.getElementType(),
+      subgroupScope);
+
+  // Function signature (same as double-buffer):
+  // (%inits, %k, %lhs, %rhs) -> output
+  FunctionType funcType = FunctionType::get(
+      context, {outputTensorType, indexType, lhsTensorType, rhsTensorType},
+      {outputTensorType});
+  auto funcOp = IREE::Template::FuncOp::create(builder, loc, name, funcType);
+
+  // Create entry block in main region.
+  Region &mainRegion = funcOp.getMain();
+  Block *mainBlock = builder.createBlock(&mainRegion);
+  mainBlock->addArguments(
+      {outputTensorType, indexType, lhsTensorType, rhsTensorType},
+      {loc, loc, loc, loc});
+  OpBuilder::InsertionGuard topGuard(builder);
+  builder.setInsertionPointToStart(mainBlock);
+
+  Value initsArg = mainBlock->getArgument(0);
+  Value kTileSizeArg = mainBlock->getArgument(1);
+  Value lhsArg = mainBlock->getArgument(2);
+  Value rhsArg = mainBlock->getArgument(3);
+
+  // Compute the number of K tiles: numKTiles = ceildiv(totalK, kTileSize).
+  Value kDimIdxConst =
+      arith::ConstantIndexOp::create(builder, loc, lhsKDimIdx);
+  Value totalK = tensor::DimOp::create(builder, loc, lhsArg, kDimIdxConst);
+  Value numKTiles =
+      arith::CeilDivUIOp::create(builder, loc, totalK, kTileSizeArg);
+
+  // Constants.
+  Value c0 = arith::ConstantIndexOp::create(builder, loc, 0);
+  Value c1 = arith::ConstantIndexOp::create(builder, loc, 1);
+
+  // ===== Outer pcf.generic: subgroup scope =====
+  auto outerGeneric = IREE::PCF::GenericOp::create(
+      builder, loc,
+      /*resultTypes=*/TypeRange{outputTensorType},
+      /*scope=*/subgroupScope,
+      /*inits=*/ValueRange{initsArg},
+      /*dynamicSizes=*/ValueRange{},
+      /*isTied=*/ArrayRef<bool>{true},
+      /*numIterators=*/1,
+      /*syncOnReturn=*/false);
+
+  // Insert leading args for allocs (lhs_alloc, rhs_alloc).
+  Block &outerExecBlock = outerGeneric.getRegion().front();
+  outerExecBlock.insertArgument(/*index=*/0u, lhsAllocType, loc);
+  outerExecBlock.insertArgument(/*index=*/1u, rhsAllocType, loc);
+  outerGeneric.setNumLeadingArgs(2);
+
+  // Populate initializer region.
+  {
+    Region &initRegion = outerGeneric.getInitializer();
+    Block *initBlock = builder.createBlock(&initRegion);
+    builder.setInsertionPointToStart(initBlock);
+
+    Value lhsAlloc =
+        IREE::PCF::AllocOp::create(builder, loc, lhsAllocType).getResult();
+    Value rhsAlloc =
+        IREE::PCF::AllocOp::create(builder, loc, rhsAllocType).getResult();
+    IREE::PCF::YieldOp::create(builder, loc, ValueRange{lhsAlloc, rhsAlloc});
+  }
+
+  // Populate outer execute block.
+  {
+    builder.setInsertionPointToStart(&outerExecBlock);
+
+    Value lhsAllocArg = outerExecBlock.getArgument(0);
+    Value rhsAllocArg = outerExecBlock.getArgument(1);
+    Value dest = outerExecBlock.getArgument(2);
+    Value subgroupId = outerExecBlock.getArgument(3);
+
+    auto emitFence = [&](bool isRelease) {
+      IREE::PCF::FenceOp::create(builder, loc, isRelease,
+                                  ValueRange{lhsAllocArg, rhsAllocArg});
+    };
+
+    // No even/odd split: all subgroups do the same work.
+    PCF::ScopeAttrInterface laneScope = cast<PCF::ScopeAttrInterface>(
+        IREE::GPU::LaneScopeAttr::get(context));
+
+    auto innerGeneric = IREE::PCF::GenericOp::create(
+        builder, loc, /*scope=*/laneScope, /*numIterators=*/1,
+        /*syncOnReturn=*/false);
+
+    Block &innerExec = innerGeneric.getRegion().front();
+    builder.setInsertionPointToStart(&innerExec);
+    Value laneId = innerExec.getArgument(0);
+
+    // Init accumulators.
+    auto initBranch = IREE::Template::BranchOp::create(
+        builder, loc, TypeRange{type0}, builder.getI64IntegerAttr(0),
+        ValueRange{subgroupId, laneId, dest});
+    Value acc = initBranch.getResults()[0];
+
+    // Prologue: copy first K chunk to LDS (all subgroups participate).
+    IREE::Template::BranchOp::create(
+        builder, loc, TypeRange{}, builder.getI64IntegerAttr(1),
+        ValueRange{c0, subgroupId, laneId, lhsArg, lhsAllocArg});
+    IREE::Template::BranchOp::create(
+        builder, loc, TypeRange{}, builder.getI64IntegerAttr(2),
+        ValueRange{c0, subgroupId, laneId, rhsArg, rhsAllocArg});
+    emitFence(/*isRelease=*/true);
+    IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
+    emitFence(/*isRelease=*/false);
+
+    // Main loop: k = 0 to numKTiles.
+    auto forOp =
+        scf::ForOp::create(builder, loc, c0, numKTiles, c1, ValueRange{acc});
+    {
+      Block *forBody = forOp.getBody();
+      if (!forBody->empty() &&
+          forBody->back().hasTrait<OpTrait::IsTerminator>())
+        forBody->back().erase();
+      builder.setInsertionPointToEnd(forBody);
+
+      Value iv = forOp.getInductionVar();
+      Value loopAcc = forOp.getRegionIterArg(0);
+
+      // Process 4 quarters of the current K chunk.
+      Value currentAcc = loopAcc;
+      for (int64_t q = 0; q < 4; ++q) {
+        int64_t kOffset = q * quarterK;
+
+        // LHS quarter subview: offset K dim by kOffset.
+        SmallVector<OpFoldResult> lhsOffsets(2, builder.getIndexAttr(0));
+        lhsOffsets[lhsKDimIdx] = builder.getIndexAttr(kOffset);
+        SmallVector<OpFoldResult> lhsSizes = {
+            builder.getIndexAttr(lhsQuarterShape[0]),
+            builder.getIndexAttr(lhsQuarterShape[1])};
+        SmallVector<OpFoldResult> lhsStrides(2, builder.getIndexAttr(1));
+        Value lhsSubview =
+            PCF::SubviewOp::create(builder, loc, lhsQuarterType, lhsAllocArg,
+                                   lhsOffsets, lhsSizes, lhsStrides)
+                .getResult();
+
+        // RHS quarter subview: offset K dim by kOffset.
+        SmallVector<OpFoldResult> rhsOffsets(2, builder.getIndexAttr(0));
+        rhsOffsets[rhsKDimIdx] = builder.getIndexAttr(kOffset);
+        SmallVector<OpFoldResult> rhsSizes = {
+            builder.getIndexAttr(rhsQuarterShape[0]),
+            builder.getIndexAttr(rhsQuarterShape[1])};
+        SmallVector<OpFoldResult> rhsStrides(2, builder.getIndexAttr(1));
+        Value rhsSubview =
+            PCF::SubviewOp::create(builder, loc, rhsQuarterType, rhsAllocArg,
+                                   rhsOffsets, rhsSizes, rhsStrides)
+                .getResult();
+
+        // Read quarter from LDS (3-arg mode: sg_id, lane_id, subview).
+        auto readLhs = IREE::Template::BranchOp::create(
+            builder, loc, TypeRange{type1}, builder.getI64IntegerAttr(3),
+            ValueRange{subgroupId, laneId, lhsSubview});
+        auto readRhs = IREE::Template::BranchOp::create(
+            builder, loc, TypeRange{type2}, builder.getI64IntegerAttr(4),
+            ValueRange{subgroupId, laneId, rhsSubview});
+
+        // Compute MMA for this quarter.
+        auto computeBranch = IREE::Template::BranchOp::create(
+            builder, loc, TypeRange{type0}, builder.getI64IntegerAttr(5),
+            ValueRange{currentAcc, readLhs.getResults()[0],
+                       readRhs.getResults()[0]});
+        currentAcc = computeBranch.getResults()[0];
+      }
+
+      // WAR barrier: ensure all subgroups finish reading from LDS before
+      // any subgroup starts overwriting with the next K chunk. (Single-buffer
+      // quarter-K has no double-buffering to avoid this hazard.)
+      emitFence(/*isRelease=*/true);
+      IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
+      emitFence(/*isRelease=*/false);
+
+      // Copy next K chunk to LDS (harmless OOB on last iteration due to
+      // transfer_read padding).
+      Value kNext = arith::AddIOp::create(builder, loc, iv, c1);
+      IREE::Template::BranchOp::create(
+          builder, loc, TypeRange{}, builder.getI64IntegerAttr(1),
+          ValueRange{kNext, subgroupId, laneId, lhsArg, lhsAllocArg});
+      IREE::Template::BranchOp::create(
+          builder, loc, TypeRange{}, builder.getI64IntegerAttr(2),
+          ValueRange{kNext, subgroupId, laneId, rhsArg, rhsAllocArg});
+      emitFence(/*isRelease=*/true);
+      IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
+      emitFence(/*isRelease=*/false);
+
+      scf::YieldOp::create(builder, loc, ValueRange{currentAcc});
+    }
+
+    // Write results to output.
+    builder.setInsertionPointAfter(forOp);
+    IREE::Template::BranchOp::create(
+        builder, loc, TypeRange{}, builder.getI64IntegerAttr(6),
+        ValueRange{subgroupId, laneId, forOp.getResult(0), dest});
+
+    IREE::PCF::ReturnOp::create(builder, loc);
+
+    // pcf.return (subgroup scope).
+    builder.setInsertionPointAfter(innerGeneric);
+    IREE::PCF::ReturnOp::create(builder, loc);
+  }
+
+  // template.return %res.
+  builder.setInsertionPointAfter(outerGeneric);
+  IREE::Template::ReturnOp::create(builder, loc,
+                                   ValueRange{outerGeneric.getResult(0)});
+
+  // ===== Create implementation blocks =====
+  Region &implRegion = funcOp.getImplementations();
+
+  // Block 0: (sg_id, lane_id, dest: sref) -> type<0>
+  {
+    Block *block = builder.createBlock(&implRegion);
+    block->addArguments({indexType, indexType, outputSrefType},
+                        {loc, loc, loc});
+    builder.setInsertionPointToStart(block);
+    IREE::Template::UnimplementedOp::create(builder, loc, TypeRange{type0},
+                                            ValueRange{});
+  }
+
+  // Block 1: Copy LHS (k_idx, sg_id, lane_id, lhs, lhs_alloc) -- no buf_idx.
+  {
+    Block *block = builder.createBlock(&implRegion);
+    block->addArguments(
+        {indexType, indexType, indexType, lhsTensorType, lhsAllocType},
+        {loc, loc, loc, loc, loc});
+    builder.setInsertionPointToStart(block);
+    IREE::Template::UnimplementedOp::create(builder, loc, TypeRange{},
+                                            ValueRange{});
+  }
+
+  // Block 2: Copy RHS (k_idx, sg_id, lane_id, rhs, rhs_alloc) -- no buf_idx.
+  {
+    Block *block = builder.createBlock(&implRegion);
+    block->addArguments(
+        {indexType, indexType, indexType, rhsTensorType, rhsAllocType},
+        {loc, loc, loc, loc, loc});
+    builder.setInsertionPointToStart(block);
+    IREE::Template::UnimplementedOp::create(builder, loc, TypeRange{},
+                                            ValueRange{});
+  }
+
+  // Block 3: Read LHS (sg_id, lane_id, quarter_subview) -> type<1>
+  // 3 args, no buf_idx. Uses quarter subview sref type.
+  {
+    Block *block = builder.createBlock(&implRegion);
+    block->addArguments({indexType, indexType, lhsQuarterType},
+                        {loc, loc, loc});
+    builder.setInsertionPointToStart(block);
+    IREE::Template::UnimplementedOp::create(builder, loc, TypeRange{type1},
+                                            ValueRange{});
+  }
+
+  // Block 4: Read RHS (sg_id, lane_id, quarter_subview) -> type<2>
+  // 3 args, no buf_idx. Uses quarter subview sref type.
+  {
+    Block *block = builder.createBlock(&implRegion);
+    block->addArguments({indexType, indexType, rhsQuarterType},
+                        {loc, loc, loc});
+    builder.setInsertionPointToStart(block);
+    IREE::Template::UnimplementedOp::create(builder, loc, TypeRange{type2},
+                                            ValueRange{});
+  }
+
+  // Block 5: Compute MMA (acc: type<0>, lhs: type<1>, rhs: type<2>) -> type<0>
+  {
+    Block *block = builder.createBlock(&implRegion);
+    block->addArguments({type0, type1, type2}, {loc, loc, loc});
+    builder.setInsertionPointToStart(block);
+    IREE::Template::UnimplementedOp::create(builder, loc, TypeRange{type0},
+                                            ValueRange{});
+  }
+
+  // Block 6: Write results (sg_id, lane_id, result: type<0>, dest: sref)
+  {
+    Block *block = builder.createBlock(&implRegion);
+    block->addArguments({indexType, indexType, type0, outputSrefType},
+                        {loc, loc, loc, loc});
+    builder.setInsertionPointToStart(block);
+    IREE::Template::UnimplementedOp::create(builder, loc, TypeRange{},
+                                            ValueRange{});
+  }
+
+  return funcOp;
+}
+
 /// Build a copy block implementation that copies a tile from a dynamic input
 /// tensor to shared memory using coalesced 128-bit vector reads.
 ///
@@ -648,6 +1007,131 @@ static void populateCopyBlock(OpBuilder &builder, Block *block, Location loc,
         builder.getIndexAttr(1), builder.getIndexAttr(1),
         builder.getIndexAttr(vecSize)};
     SmallVector<OpFoldResult> writeStrides(3, builder.getIndexAttr(1));
+    PCF::WriteSliceOp::create(builder, loc, shapedVec, sharedAlloc,
+                              writeOffsets, writeSizes, writeStrides);
+
+    scf::YieldOp::create(builder, loc, ValueRange{});
+  }
+
+  // Replace unimplemented with template.return.
+  builder.setInsertionPoint(terminator);
+  IREE::Template::ReturnOp::create(builder, loc, ValueRange{});
+  terminator->erase();
+}
+
+/// Build a copy block for the quarter-K template. Similar to populateCopyBlock
+/// but with key differences:
+///   - No buf_idx argument (single-buffer LDS).
+///   - All subgroups participate in copy (not just half).
+///   - 2D write to sref (not 3D).
+///
+/// Block args: (k_idx, sg_id, lane_id, input_tensor, shared_alloc)
+static void populateQuarterKCopyBlock(OpBuilder &builder, Block *block,
+                                       Location loc, int64_t tileRows,
+                                       int64_t tileCols, int64_t numSubgroups,
+                                       int64_t subgroupSize, Type elemType,
+                                       int64_t rowDimIdx, int64_t colDimIdx,
+                                       int64_t kDimIdx) {
+  // Block args: (k_idx, sg_id, lane_id, input_tensor, shared_alloc).
+  Value kIdx = block->getArgument(0);
+  Value sgId = block->getArgument(1);
+  Value laneId = block->getArgument(2);
+  Value inputTensor = block->getArgument(3);
+  Value sharedAlloc = block->getArgument(4);
+
+  Operation *terminator = block->getTerminator();
+  builder.setInsertionPoint(terminator);
+
+  int64_t elemBits = elemType.getIntOrFloatBitWidth();
+  int64_t vecSize = 128 / elemBits;
+  // All subgroups participate in copy (no even/odd split).
+  int64_t numCopyThreads = numSubgroups * subgroupSize;
+  int64_t numColVecs = tileCols / vecSize;
+  int64_t totalVecs = tileRows * numColVecs;
+
+  Value cSubgroupSize =
+      arith::ConstantIndexOp::create(builder, loc, subgroupSize);
+  Value cNumThreads =
+      arith::ConstantIndexOp::create(builder, loc, numCopyThreads);
+  Value cTotalVecs =
+      arith::ConstantIndexOp::create(builder, loc, totalVecs);
+  Value cNumColVecs =
+      arith::ConstantIndexOp::create(builder, loc, numColVecs);
+  Value cVecSize = arith::ConstantIndexOp::create(builder, loc, vecSize);
+
+  // thread_id = sg_id * subgroup_size + lane_id (all subgroups, no remap).
+  Value threadId = arith::AddIOp::create(
+      builder, loc,
+      arith::MulIOp::create(builder, loc, sgId, cSubgroupSize), laneId);
+
+  // Compute the base offset along the K dimension in the source tensor.
+  int64_t kTileSize = (kDimIdx == rowDimIdx) ? tileRows : tileCols;
+  Value cKTileSize = arith::ConstantIndexOp::create(builder, loc, kTileSize);
+  Value kBase = arith::MulIOp::create(builder, loc, kIdx, cKTileSize);
+
+  // Distribute work: for i = thread_id to total_vecs step num_threads.
+  auto forOp = scf::ForOp::create(builder, loc, threadId, cTotalVecs,
+                                   cNumThreads, ValueRange{});
+  {
+    Block *forBody = forOp.getBody();
+    if (!forBody->empty() &&
+        forBody->back().hasTrait<OpTrait::IsTerminator>())
+      forBody->back().erase();
+    builder.setInsertionPointToEnd(forBody);
+
+    Value iv = forOp.getInductionVar();
+
+    // Decompose iv into (row, col_vec).
+    Value row = arith::DivUIOp::create(builder, loc, iv, cNumColVecs);
+    Value colVec = arith::RemUIOp::create(builder, loc, iv, cNumColVecs);
+    Value col = arith::MulIOp::create(builder, loc, colVec, cVecSize);
+
+    // Source coordinates with K offset.
+    Value srcRow = (kDimIdx == rowDimIdx)
+                       ? arith::AddIOp::create(builder, loc, kBase, row)
+                       : row;
+    Value srcCol = (kDimIdx == colDimIdx)
+                       ? arith::AddIOp::create(builder, loc, kBase, col)
+                       : col;
+
+    // Read a 1D vector along the column dimension.
+    VectorType vecType = VectorType::get({vecSize}, elemType);
+
+    Value padValue;
+    if (isa<FloatType>(elemType)) {
+      padValue = arith::ConstantOp::create(builder, loc, elemType,
+                                           builder.getFloatAttr(elemType, 0.0));
+    } else {
+      padValue = arith::ConstantOp::create(
+          builder, loc, elemType, builder.getIntegerAttr(elemType, 0));
+    }
+
+    int64_t inputRank =
+        cast<RankedTensorType>(inputTensor.getType()).getRank();
+    SmallVector<Value> readIndices(
+        inputRank, arith::ConstantIndexOp::create(builder, loc, 0));
+    readIndices[rowDimIdx] = srcRow;
+    readIndices[colDimIdx] = srcCol;
+
+    AffineMap permMap =
+        AffineMap::get(inputRank, /*symbolCount=*/0,
+                       {builder.getAffineDimExpr(colDimIdx)},
+                       builder.getContext());
+
+    Value readVec = vector::TransferReadOp::create(
+        builder, loc, vecType, inputTensor, readIndices, padValue, permMap,
+        SmallVector<bool>{false});
+
+    // Shape cast vector<vecSize> -> vector<1xvecSize> for rank-2 sref.
+    VectorType writeVecType = VectorType::get({1, vecSize}, elemType);
+    Value shapedVec =
+        vector::ShapeCastOp::create(builder, loc, writeVecType, readVec);
+
+    // Write to shared memory: alloc[row, col] (2D, no buf_idx).
+    SmallVector<OpFoldResult> writeOffsets = {row, col};
+    SmallVector<OpFoldResult> writeSizes = {builder.getIndexAttr(1),
+                                            builder.getIndexAttr(vecSize)};
+    SmallVector<OpFoldResult> writeStrides(2, builder.getIndexAttr(1));
     PCF::WriteSliceOp::create(builder, loc, shapedVec, sharedAlloc,
                               writeOffsets, writeSizes, writeStrides);
 
@@ -831,10 +1315,18 @@ LogicalResult setPingpongLoweringConfig(IREE::GPU::TargetAttr target,
   OpBuilder moduleBuilder(context);
   moduleBuilder.setInsertionPointToStart(moduleOp.getBody());
 
-  auto templateFunc = createPingpongTemplateFunc(
-      moduleBuilder, op->getLoc(), templateName, outputTensorType,
-      lhsTensorType, rhsTensorType, lhsTileShape, rhsTileShape, lhsElemType,
-      lhsColDim);
+  IREE::Template::FuncOp templateFunc;
+  if (clUseQuarterK) {
+    templateFunc = createQuarterKTemplateFunc(
+        moduleBuilder, op->getLoc(), templateName, outputTensorType,
+        lhsTensorType, rhsTensorType, lhsTileShape, rhsTileShape, lhsElemType,
+        lhsColDim, rhsRowDim);
+  } else {
+    templateFunc = createPingpongTemplateFunc(
+        moduleBuilder, op->getLoc(), templateName, outputTensorType,
+        lhsTensorType, rhsTensorType, lhsTileShape, rhsTileShape, lhsElemType,
+        lhsColDim);
+  }
 
   SymbolTable symbolTable(moduleOp);
   symbolTable.insert(templateFunc);
@@ -844,17 +1336,28 @@ LogicalResult setPingpongLoweringConfig(IREE::GPU::TargetAttr target,
   auto blockIt = implRegion.begin();
   std::advance(blockIt, 1); // Block 1: copy LHS.
   Block *lhsCopyBlock = &*blockIt;
-  populateCopyBlock(moduleBuilder, lhsCopyBlock, op->getLoc(),
-                    lhsTileShape[0], lhsTileShape[1], numSubgroups,
-                    subgroupSize, lhsElemType,
-                    /*rowDimIdx=*/0, /*colDimIdx=*/1, /*kDimIdx=*/1);
-
   std::advance(blockIt, 1); // Block 2: copy RHS.
   Block *rhsCopyBlock = &*blockIt;
-  populateCopyBlock(moduleBuilder, rhsCopyBlock, op->getLoc(),
-                    rhsTileShape[0], rhsTileShape[1], numSubgroups,
-                    subgroupSize, lhsElemType,
-                    /*rowDimIdx=*/0, /*colDimIdx=*/1, /*kDimIdx=*/0);
+
+  if (clUseQuarterK) {
+    populateQuarterKCopyBlock(moduleBuilder, lhsCopyBlock, op->getLoc(),
+                              lhsTileShape[0], lhsTileShape[1], numSubgroups,
+                              subgroupSize, lhsElemType,
+                              /*rowDimIdx=*/0, /*colDimIdx=*/1, /*kDimIdx=*/1);
+    populateQuarterKCopyBlock(moduleBuilder, rhsCopyBlock, op->getLoc(),
+                              rhsTileShape[0], rhsTileShape[1], numSubgroups,
+                              subgroupSize, lhsElemType,
+                              /*rowDimIdx=*/0, /*colDimIdx=*/1, /*kDimIdx=*/0);
+  } else {
+    populateCopyBlock(moduleBuilder, lhsCopyBlock, op->getLoc(),
+                      lhsTileShape[0], lhsTileShape[1], numSubgroups,
+                      subgroupSize, lhsElemType,
+                      /*rowDimIdx=*/0, /*colDimIdx=*/1, /*kDimIdx=*/1);
+    populateCopyBlock(moduleBuilder, rhsCopyBlock, op->getLoc(),
+                      rhsTileShape[0], rhsTileShape[1], numSubgroups,
+                      subgroupSize, lhsElemType,
+                      /*rowDimIdx=*/0, /*colDimIdx=*/1, /*kDimIdx=*/0);
+  }
 
   LLVM_DEBUG(llvm::dbgs() << "Created pingpong template: " << templateName
                           << "\n");
@@ -883,7 +1386,7 @@ LogicalResult setPingpongLoweringConfig(IREE::GPU::TargetAttr target,
   SmallVector<int64_t> subgroupTileSizes(linalgOp.getNumLoops(), 0);
   subgroupTileSizes[mDim] = numSubgroupsM;
   subgroupTileSizes[nDim] = numSubgroupsN;
-  subgroupTileSizes[kDim] = kTileSize;
+  subgroupTileSizes[kDim] = clUseQuarterK ? kTileSize / 4 : kTileSize;
   attrs.emplace_back("subgroup", b.getI64ArrayAttr(subgroupTileSizes));
 
   // Reduction tile sizes for K dimension.
