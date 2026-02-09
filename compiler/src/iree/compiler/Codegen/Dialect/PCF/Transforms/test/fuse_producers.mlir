@@ -280,6 +280,7 @@ func.func @no_fuse_no_sync_scope(%dest: tensor<8x16xf32>) -> tensor<8x16xf32> {
 
 // -----
 
+
 // Negative: no read_slice on the sref (only writes).
 func.func @no_fuse_no_reads(%dest: tensor<8x16xf32>) -> tensor<8x16xf32> {
   %cst = arith.constant 0.0 : f32
