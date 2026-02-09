@@ -167,6 +167,12 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
     Value dest = outerExecBlock.getArgument(2);       // type<3>
     Value subgroupId = outerExecBlock.getArgument(3);  // index
 
+    // Helper to emit pcf.fence on LHS and RHS shared memory allocations.
+    auto emitFence = [&](bool isRelease) {
+      IREE::PCF::FenceOp::create(builder, loc, isRelease,
+                                  ValueRange{lhsAllocArg, rhsAllocArg});
+    };
+
     // scf.if (sg_id % 2 == 0) -- even vs odd waves.
     Value rem = arith::RemUIOp::create(builder, loc, subgroupId, c2);
     Value isEven = arith::CmpIOp::create(
@@ -192,10 +198,9 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
     // Barrier counts: 2 + 2*K per path (even), 2 + 2*(K-1) + 2 per path
     //   (odd), both equal 2*K + 2 total.
     //
-    // KNOWN BUG: Consecutive barriers A+B (even) and E+F (odd) are merged
-    // by gpu.barrier canonicalization, shifting barrier pairing and causing
-    // shared memory races. Requires iree_gpu.global_subgroup_barrier +
-    // iree_codegen.fence to fix properly.
+    // Consecutive barriers A+B (even) and E+F (odd) are preserved because
+    // pcf.barrier lowers to iree_gpu.global_subgroup_barrier (no canonicalizer).
+    // Memory fencing is handled explicitly by pcf.fence ops.
 
     // ===== EVEN waves: copy-first schedule =====
     //   copy(buf0, k=0) → A → B → loop(copy, read, C, compute, D) → write
@@ -225,10 +230,16 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
           builder, loc, TypeRange{}, builder.getI64IntegerAttr(2),
           ValueRange{c0, c0, subgroupId, laneId, rhsArg, rhsAllocArg});
 
+      // Fence release: prologue wrote to LDS.
+      emitFence(/*isRelease=*/true);
+
       // Barrier A: prologue copy done (pairs with odd's A).
       IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
       // Barrier B: vacuous for even (pairs with odd's "done reading buf0").
       IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
+
+      // Fence acquire: prepare for loop reads from LDS.
+      emitFence(/*isRelease=*/false);
 
       // Loop k=0..K-1: copy(buf0,k+1), read(buf1), C, compute, D.
       auto forOp =
@@ -260,6 +271,9 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
             builder, loc, TypeRange{type2}, builder.getI64IntegerAttr(4),
             ValueRange{c1, subgroupId, laneId, rhsAllocArg});
 
+        // Fence release: copied to LDS + read from LDS.
+        emitFence(/*isRelease=*/true);
+
         // Barrier C: done copying buf0 + done reading buf1.
         IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
 
@@ -271,6 +285,9 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
 
         // Barrier D: done computing.
         IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
+
+        // Fence acquire: see odd's writes for next iteration.
+        emitFence(/*isRelease=*/false);
 
         scf::YieldOp::create(builder, loc,
                              ValueRange{computeBranch.getResults()[0]});
@@ -314,8 +331,14 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
           builder, loc, TypeRange{}, builder.getI64IntegerAttr(2),
           ValueRange{c1, c0, subgroupId, laneId, rhsArg, rhsAllocArg});
 
+      // Fence release: prologue wrote to LDS.
+      emitFence(/*isRelease=*/true);
+
       // Barrier A: prologue copy done (pairs with even's A).
       IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
+
+      // Fence acquire: prepare to read buf0.
+      emitFence(/*isRelease=*/false);
 
       // Read initial data from buf0 (even's buffer, k=0).
       auto firstLhs = IREE::Template::BranchOp::create(
@@ -353,6 +376,9 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
         // Barrier C: done computing (safe for even to overwrite buf1).
         IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
 
+        // Fence acquire: see even's writes.
+        emitFence(/*isRelease=*/false);
+
         // Copy current tile (k) into buf1 while even computes.
         IREE::Template::BranchOp::create(
             builder, loc, TypeRange{}, builder.getI64IntegerAttr(1),
@@ -368,6 +394,9 @@ createPingpongTemplateFunc(OpBuilder &builder, Location loc, StringRef name,
         auto readRhs = IREE::Template::BranchOp::create(
             builder, loc, TypeRange{type2}, builder.getI64IntegerAttr(4),
             ValueRange{c0, subgroupId, laneId, rhsAllocArg});
+
+        // Fence release: copied to LDS + read from LDS.
+        emitFence(/*isRelease=*/true);
 
         // Barrier D: done copying buf1 + done reading buf0.
         IREE::PCF::BarrierOp::create(builder, loc, subgroupScope);
