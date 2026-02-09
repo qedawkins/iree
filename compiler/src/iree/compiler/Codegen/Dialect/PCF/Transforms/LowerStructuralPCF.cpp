@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCF.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/ConversionDialectInterface.h"
@@ -53,7 +55,8 @@ struct LowerStructuralPCFPass final
     : impl::LowerStructuralPCFPassBase<LowerStructuralPCFPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
     // Direct dialect deps.
-    registry.insert<iree_compiler::IREE::PCF::PCFDialect, scf::SCFDialect,
+    registry.insert<iree_compiler::IREE::Codegen::IREECodegenDialect,
+                    iree_compiler::IREE::PCF::PCFDialect, scf::SCFDialect,
                     cf::ControlFlowDialect>();
     registry.addExtensions<LoadDependentDialectExtension>();
   }
@@ -72,9 +75,29 @@ struct LowerGenericOp : public OpRewritePattern<IREE::PCF::GenericOp> {
     if (genericOp.getSyncOnReturn()) {
       OpBuilder::InsertionGuard g(rewriter);
       rewriter.setInsertionPointAfter(genericOp);
+
+      // Query the memory space for fences. Only emit fences if the scope
+      // provides a concrete (non-null) memory space.
+      FailureOr<Attribute> allocMemSpace =
+          genericOp.getScope().getAllocMemSpace(genericOp.getContext());
+      bool emitFences = succeeded(allocMemSpace) && *allocMemSpace;
+
+      // Emit release fence before barrier.
+      if (emitFences) {
+        IREE::Codegen::FenceOp::create(rewriter, genericOp.getLoc(),
+                                       /*is_release=*/true, *allocMemSpace);
+      }
+
+      // Barrier.
       if (failed(genericOp.getScope().addBarrier(rewriter))) {
         genericOp.emitOpError("failed to construct requested barrier");
         return failure();
+      }
+
+      // Emit acquire fence after barrier.
+      if (emitFences) {
+        IREE::Codegen::FenceOp::create(rewriter, genericOp.getLoc(),
+                                       /*is_release=*/false, *allocMemSpace);
       }
     }
 
@@ -135,9 +158,29 @@ struct LowerLoopOp final : OpRewritePattern<IREE::PCF::LoopOp> {
     if (loopOp.getSyncOnReturn()) {
       OpBuilder::InsertionGuard g(rewriter);
       rewriter.setInsertionPointAfter(loopOp);
+
+      // Query the memory space for fences. Only emit fences if the scope
+      // provides a concrete (non-null) memory space.
+      FailureOr<Attribute> allocMemSpace =
+          loopOp.getScope().getAllocMemSpace(loopOp.getContext());
+      bool emitFences = succeeded(allocMemSpace) && *allocMemSpace;
+
+      // Emit release fence before barrier.
+      if (emitFences) {
+        IREE::Codegen::FenceOp::create(rewriter, loopOp.getLoc(),
+                                       /*is_release=*/true, *allocMemSpace);
+      }
+
+      // Barrier.
       if (failed(loopOp.getScope().addBarrier(rewriter))) {
         loopOp.emitOpError("failed to construct requested barrier");
         return failure();
+      }
+
+      // Emit acquire fence after barrier.
+      if (emitFences) {
+        IREE::Codegen::FenceOp::create(rewriter, loopOp.getLoc(),
+                                       /*is_release=*/false, *allocMemSpace);
       }
     }
 

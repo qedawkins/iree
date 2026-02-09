@@ -126,7 +126,9 @@ util.func private @subgroup_scope_barrier() {
 }
 
 // CHECK-LABEL: @subgroup_scope_barrier
+//       CHECK:   iree_codegen.fence release #gpu.address_space<workgroup>
 //       CHECK:   iree_gpu.global_subgroup_barrier
+//       CHECK:   iree_codegen.fence acquire #gpu.address_space<workgroup>
 //       CHECK:   util.return
 
 // -----
