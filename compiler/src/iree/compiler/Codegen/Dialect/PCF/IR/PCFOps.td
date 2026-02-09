@@ -790,6 +790,91 @@ def PCF_GetMemrefOp : PCF_Op<"get_memref", [
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// SubviewOp
+//===----------------------------------------------------------------------===//
+
+def PCF_SubviewOp : PCF_Op<"subview", [
+       AttrSizedOperandSegments,
+       OffsetSizeAndStrideOpInterface,
+       AllRanksMatch<["source", "result"]>,
+       AllElementTypesMatch<["source", "result"]>,
+  ]> {
+  let summary = [{Take a subview of a `pcf.sref`.}];
+  let description = [{
+    The `pcf.subview` operation takes a subview of a `pcf.sref`, producing a
+    new `pcf.sref` with the same element type and scope but with the shape
+    determined by the provided sizes. This is analogous to `memref.subview`
+    but operates on `pcf.sref` types.
+
+    The operation supports the following arguments:
+
+    * source: the sref from which to take the subview.
+    * offsets: shaped-rank number of offsets into the `source` from which
+               the subview begins.
+    * sizes: shaped-rank number of sizes which specify the shape of the result.
+    * strides: shaped-rank number of strides that specify subsampling in each
+               dimension.
+  }];
+
+  let arguments = (ins
+    PCF_AnyShapedRef:$source,
+    Variadic<Index>:$offsets,
+    Variadic<Index>:$sizes,
+    Variadic<Index>:$strides,
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides
+  );
+
+  let results = (outs PCF_AnyShapedRef:$result);
+
+  let assemblyFormat = [{
+    $source ``
+    custom<DynamicIndexList>($offsets, $static_offsets)
+    custom<DynamicIndexList>($sizes, $static_sizes)
+    custom<DynamicIndexList>($strides, $static_strides)
+    attr-dict `:` type($source) `to` type($result)
+  }];
+
+  let extraClassDeclaration = [{
+    PCF::ShapedRefType getSourceType() {
+      return ::llvm::cast<PCF::ShapedRefType>(getSource().getType());
+    }
+
+    PCF::ShapedRefType getResultType() {
+      return ::llvm::cast<PCF::ShapedRefType>(getResult().getType());
+    }
+
+    /// Return the expected rank of each of the `static_offsets`, `static_sizes`
+    /// and `static_strides` attributes.
+    std::array<unsigned, 3> getArrayAttrMaxRanks() {
+      unsigned rank = getSourceType().getRank();
+      return {rank, rank, rank};
+    }
+
+    /// Return the number of leading operands before `offsets`, `sizes` and
+    /// `strides` operands.
+    static unsigned getOffsetSizeAndStrideStartOperandIndex() { return 1; }
+  }];
+
+  let builders = [
+    // Build a SubviewOp with mixed static and dynamic entries, inferring the
+    // result type from the source type and sizes.
+    OpBuilder<(ins "Value":$source,
+      "ArrayRef<OpFoldResult>":$offsets, "ArrayRef<OpFoldResult>":$sizes,
+      "ArrayRef<OpFoldResult>":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+    // Build a SubviewOp with an explicit result type.
+    OpBuilder<(ins "Type":$resultType, "Value":$source,
+      "ArrayRef<OpFoldResult>":$offsets, "ArrayRef<OpFoldResult>":$sizes,
+      "ArrayRef<OpFoldResult>":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+  ];
+
+  let hasFolder = 1;
+}
+
 } // OpGroupReadOps
 
 //===----------------------------------------------------------------------===//

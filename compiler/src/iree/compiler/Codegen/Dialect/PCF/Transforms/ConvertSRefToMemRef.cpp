@@ -328,6 +328,32 @@ ChangeStatus StridedLayoutValueElement::updateOpResult(
           return;
         }
       })
+      .Case([&](PCF::SubviewOp subviewOp) {
+        // The subview result layout is derived from the source layout.
+        auto &sourceState = solver.getElementFor<StridedLayoutValueElement>(
+            *this, Position::forValue(subviewOp.getSource()),
+            DFX::Resolution::REQUIRED);
+        if (!sourceState.isValidState()) {
+          newState.invalidate();
+          return;
+        }
+        MemRefType sourceMemRef = sourceState.getAssumed();
+        if (!sourceMemRef)
+          return;
+
+        // Compute a conservative result type with dynamic strides and offset.
+        ShapedRefType srefResultType = subviewOp.getResultType();
+        int64_t rank = srefResultType.getRank();
+        SmallVector<int64_t> dynamicStrides(rank, ShapedType::kDynamic);
+        auto layout = StridedLayoutAttr::get(subviewOp.getContext(),
+                                             ShapedType::kDynamic,
+                                             dynamicStrides);
+        newState.setAssumed(
+            MemRefType::get(srefResultType.getShape(),
+                            srefResultType.getElementType(), layout,
+                            sourceMemRef.getMemorySpace()));
+        newState.indicateOptimisticFixpoint();
+      })
       .Case([&](Util::OptimizationBarrierOp barrierOp) {
         auto returnState = solver.getElementFor<StridedLayoutValueElement>(
             *this,
@@ -904,6 +930,21 @@ struct ConvertGetMemrefOp final : OpConversionPattern<PCF::GetMemrefOp> {
   }
 };
 
+/// Converts `pcf.subview` to a `memref.subview` from the analysis-converted
+/// memref source.
+struct ConvertSubviewOp final : OpConversionPattern<PCF::SubviewOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(PCF::SubviewOp subviewOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<memref::SubViewOp>(
+        subviewOp, adaptor.getSource(), subviewOp.getMixedOffsets(),
+        subviewOp.getMixedSizes(), subviewOp.getMixedStrides());
+    return success();
+  }
+};
+
 /// Converts `pcf.alloc` to a `memref.alloc` with the requested memref type.
 /// The memory space was determined during the analysis using the scope and
 /// the alignment is set based on the preferred allocation alignment, also per
@@ -1247,9 +1288,9 @@ void ConvertSRefToMemRefPass::runOnOperation() {
   config.allowPatternRollback = false;
 
   patterns.add<ConvertGenericOp, ConvertLoopOp, ConvertWriteSliceOp,
-               ConvertReadSliceOp, ConvertGetMemrefOp, ConvertAllocOp,
-               ConvertOptimizationBarrier, ConvertFenceOp>(typeConverter,
-                                                           context);
+               ConvertReadSliceOp, ConvertGetMemrefOp, ConvertSubviewOp,
+               ConvertAllocOp, ConvertOptimizationBarrier, ConvertFenceOp>(
+      typeConverter, context);
 
   // Function related conversion patterns need the analysis to lookup function
   // type conversions.

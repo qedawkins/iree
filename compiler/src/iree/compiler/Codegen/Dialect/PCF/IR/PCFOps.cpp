@@ -974,6 +974,42 @@ void GetMemrefOp::build(OpBuilder &b, OperationState &result, Type resultType,
 }
 
 //===----------------------------------------------------------------------===//
+// SubviewOp
+//===----------------------------------------------------------------------===//
+
+void SubviewOp::build(OpBuilder &b, OperationState &result, Value source,
+                      ArrayRef<OpFoldResult> offsets,
+                      ArrayRef<OpFoldResult> sizes,
+                      ArrayRef<OpFoldResult> strides,
+                      ArrayRef<NamedAttribute> attrs) {
+  auto sourceType = cast<ShapedRefType>(source.getType());
+  SmallVector<int64_t> staticSizes;
+  SmallVector<Value> dynamicSizes;
+  dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+  auto resultType = ShapedRefType::get(
+      b.getContext(), staticSizes, sourceType.getElementType(),
+      sourceType.getScope(), sourceType.getSyncScope());
+  build(b, result, resultType, source, offsets, sizes, strides, attrs);
+}
+
+void SubviewOp::build(OpBuilder &b, OperationState &result, Type resultType,
+                      Value source, ArrayRef<OpFoldResult> offsets,
+                      ArrayRef<OpFoldResult> sizes,
+                      ArrayRef<OpFoldResult> strides,
+                      ArrayRef<NamedAttribute> attrs) {
+  SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
+  SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
+  dispatchIndexOpFoldResults(offsets, dynamicOffsets, staticOffsets);
+  dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+  dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides);
+  result.addAttributes(attrs);
+  build(b, result, resultType, source, dynamicOffsets, dynamicSizes,
+        dynamicStrides, b.getDenseI64ArrayAttr(staticOffsets),
+        b.getDenseI64ArrayAttr(staticSizes),
+        b.getDenseI64ArrayAttr(staticStrides));
+}
+
+//===----------------------------------------------------------------------===//
 // Folders
 //===----------------------------------------------------------------------===//
 
@@ -1033,6 +1069,33 @@ OpFoldResult ReadSliceOp::fold(FoldAdaptor adaptor) {
 }
 
 OpFoldResult GetMemrefOp::fold(FoldAdaptor adaptor) {
+  SmallVector<OpFoldResult> mixedOffsets = getMixedOffsets();
+  SmallVector<OpFoldResult> mixedStrides = getMixedStrides();
+
+  // Try to fold dynamic offsets/strides to static.
+  if (failed(foldDynamicIndexList(mixedOffsets, /*onlyNonNegative=*/true)) &&
+      failed(foldDynamicIndexList(mixedStrides))) {
+    return {};
+  }
+
+  OpBuilder builder(getContext());
+
+  // Dispatch back to static/dynamic.
+  SmallVector<int64_t> staticOffsets, staticStrides;
+  SmallVector<Value> dynamicOffsets, dynamicStrides;
+  dispatchIndexOpFoldResults(mixedOffsets, dynamicOffsets, staticOffsets);
+  dispatchIndexOpFoldResults(mixedStrides, dynamicStrides, staticStrides);
+
+  // Update the op's attributes in-place.
+  setStaticOffsetsAttr(builder.getDenseI64ArrayAttr(staticOffsets));
+  setStaticStridesAttr(builder.getDenseI64ArrayAttr(staticStrides));
+  getOffsetsMutable().assign(dynamicOffsets);
+  getStridesMutable().assign(dynamicStrides);
+
+  return {};
+}
+
+OpFoldResult SubviewOp::fold(FoldAdaptor adaptor) {
   SmallVector<OpFoldResult> mixedOffsets = getMixedOffsets();
   SmallVector<OpFoldResult> mixedStrides = getMixedStrides();
 

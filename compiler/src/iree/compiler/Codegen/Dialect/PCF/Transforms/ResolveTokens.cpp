@@ -232,6 +232,39 @@ struct ConvertBranchOp final : OpConversionPattern<cf::BranchOp> {
   }
 };
 
+struct ConvertSubviewOp final : OpConversionPattern<PCF::SubviewOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(PCF::SubviewOp subviewOp, OneToNOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ValueRange splitSource = adaptor.getSource();
+    if (splitSource.size() == 1) {
+      // No tokens to split.
+      return failure();
+    }
+
+    // Create a new SubviewOp with just the unscoped sref as source.
+    Value unscopedSource = splitSource.front();
+    auto unscopedSourceType =
+        cast<PCF::ShapedRefType>(unscopedSource.getType());
+    auto resultType = PCF::ShapedRefType::get(
+        subviewOp.getContext(), subviewOp.getStaticSizes(),
+        unscopedSourceType.getElementType(), unscopedSourceType.getScope());
+    auto newSubview = PCF::SubviewOp::create(
+        rewriter, subviewOp.getLoc(), resultType, unscopedSource,
+        subviewOp.getMixedOffsets(), subviewOp.getMixedSizes(),
+        subviewOp.getMixedStrides());
+
+    // Replace with [new_subview_result, tokens from source...].
+    SmallVector<Value> replacements;
+    replacements.push_back(newSubview);
+    llvm::append_range(replacements, splitSource.drop_front());
+    rewriter.replaceOp(subviewOp, replacements);
+    return success();
+  }
+};
+
 struct ConvertOptimizationBarrier final
     : OpConversionPattern<Util::OptimizationBarrierOp> {
   using Base::Base;
@@ -286,7 +319,8 @@ void ResolveTokensPass::runOnOperation() {
 
   patterns
       .add<ConvertGenericOp, ConvertLoopOp, ConvertAllocOp, ConvertWriteSliceOp,
-           ConvertOptimizationBarrier, ConvertBranchOp>(typeConverter, context);
+           ConvertSubviewOp, ConvertOptimizationBarrier, ConvertBranchOp>(
+          typeConverter, context);
 
   // Verify that all operand, result, and region argument types have been
   // converted.
