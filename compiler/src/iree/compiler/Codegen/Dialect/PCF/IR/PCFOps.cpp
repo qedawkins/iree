@@ -756,6 +756,47 @@ BranchCondReturnOp::getSuccessorForOperands(ArrayRef<Attribute> operands) {
 }
 
 //===----------------------------------------------------------------------===//
+// FenceOp
+//===----------------------------------------------------------------------===//
+
+ParseResult FenceOp::parse(OpAsmParser &parser, OperationState &result) {
+  MLIRContext *context = parser.getContext();
+  bool isRelease = false;
+  if (succeeded(parser.parseOptionalKeyword("release"))) {
+    isRelease = true;
+  } else if (failed(parser.parseKeyword("acquire"))) {
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected 'release' or 'acquire'");
+  }
+  result.addAttribute("is_release", BoolAttr::get(context, isRelease));
+
+  SmallVector<OpAsmParser::UnresolvedOperand> operands;
+  SmallVector<Type> types;
+  if (failed(parser.parseOperandList(operands)))
+    return failure();
+  if (!operands.empty()) {
+    if (failed(parser.parseColonTypeList(types)))
+      return failure();
+    if (failed(parser.resolveOperands(operands, types, parser.getNameLoc(),
+                                      result.operands)))
+      return failure();
+  }
+  return parser.parseOptionalAttrDict(result.attributes);
+}
+
+void FenceOp::print(OpAsmPrinter &p) {
+  p << (getIsRelease() ? " release" : " acquire");
+  if (!getSrefs().empty()) {
+    p << " ";
+    llvm::interleaveComma(getSrefs(), p);
+    p << " : ";
+    llvm::interleaveComma(getSrefs().getTypes(), p);
+  }
+  SmallVector<StringRef> elidedAttrs = {"is_release"};
+  p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+}
+
+//===----------------------------------------------------------------------===//
 // WriteOps
 //===----------------------------------------------------------------------===//
 

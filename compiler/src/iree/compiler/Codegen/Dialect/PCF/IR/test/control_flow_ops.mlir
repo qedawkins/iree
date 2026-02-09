@@ -206,3 +206,16 @@ util.func private @loop_memref(%0: memref<?xi32>, %1: memref<?x?xi32>, %d0: inde
 //  CHECK-NEXT:       util.optimization_barrier %[[NUM_THREADS]], %[[REF]], %[[REF1]], %[[REF2]], %[[REF3]]
 //  CHECK-NEXT:       pcf.return
 //  CHECK-NEXT:     }
+
+// -----
+
+util.func private @fence(%alloc: !pcf.sref<128x64xf16, #pcf.test_scope>) {
+  pcf.fence release %alloc : !pcf.sref<128x64xf16, #pcf.test_scope>
+  pcf.fence acquire %alloc : !pcf.sref<128x64xf16, #pcf.test_scope>
+  util.return
+}
+
+// CHECK-LABEL: @fence
+//  CHECK-SAME:   %[[ALLOC:[A-Za-z0-9]+]]: !pcf.sref<128x64xf16, #pcf.test_scope>
+//       CHECK:   pcf.fence release %[[ALLOC]] : !pcf.sref<128x64xf16, #pcf.test_scope>
+//       CHECK:   pcf.fence acquire %[[ALLOC]] : !pcf.sref<128x64xf16, #pcf.test_scope>
