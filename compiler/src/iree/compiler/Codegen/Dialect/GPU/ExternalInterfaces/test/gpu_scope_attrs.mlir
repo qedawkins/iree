@@ -116,7 +116,7 @@ util.func private @lane_scope_multiple_ids() {
 
 // -----
 
-// Test barrier for subgroup scope - uses gpu.barrier.
+// Test barrier for subgroup scope - uses iree_gpu.global_subgroup_barrier.
 util.func private @subgroup_scope_barrier() {
   pcf.generic sync true scope(#iree_gpu.subgroup_scope)
     execute[%id: index, %n: index] {
@@ -126,7 +126,7 @@ util.func private @subgroup_scope_barrier() {
 }
 
 // CHECK-LABEL: @subgroup_scope_barrier
-//       CHECK:   gpu.barrier
+//       CHECK:   iree_gpu.global_subgroup_barrier
 //       CHECK:   util.return
 
 // -----

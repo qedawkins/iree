@@ -8,6 +8,7 @@
 
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/ConversionDialectInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -75,7 +76,7 @@ struct SubgroupScopeModel
   }
 
   LogicalResult addBarrier(Attribute attr, OpBuilder &builder) const {
-    gpu::BarrierOp::create(builder, builder.getUnknownLoc());
+    GlobalSubgroupBarrierOp::create(builder, builder.getUnknownLoc());
     return success();
   }
 
