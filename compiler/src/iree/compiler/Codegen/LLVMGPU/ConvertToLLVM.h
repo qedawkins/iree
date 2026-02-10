@@ -19,6 +19,11 @@ void populateLLVMConversionPatterns(MLIRContext *context,
                                     RewritePatternSet &patterns,
                                     LLVMTypeConverter &converter);
 
+/// Lower iree_codegen.fence to llvm.fence. Generic lowering without target-
+/// specific attributes (e.g., MMRA). Target-specific passes should provide
+/// their own lowering if needed.
+void populateCodegenFenceToLLVMPatterns(RewritePatternSet &patterns);
+
 /// Lower hal.interface ops to the equivalent gpu ops.
 void populateLowerHALInterfaceOp(RewritePatternSet &patterns);
 
