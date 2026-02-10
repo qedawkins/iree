@@ -16,6 +16,7 @@ iree_lit_test_suite(
   SRCS
     "gpu_scope_alloc.mlir"
     "gpu_scope_attrs.mlir"
+    "gpu_scope_fence.mlir"
   TOOLS
     FileCheck
     iree-opt

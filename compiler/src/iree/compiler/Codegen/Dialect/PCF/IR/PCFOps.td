@@ -468,6 +468,37 @@ def BarrierOp : PCF_Op<"barrier", []> {
   let assemblyFormat = [{`(` $scope `)` attr-dict}];
 }
 
+//===----------------------------------------------------------------------===//
+// FenceOp
+//===----------------------------------------------------------------------===//
+
+def FenceOp : PCF_Op<"fence", []> {
+  let summary = [{Memory fence on shared references.}];
+  let description = [{
+    Ensures visibility of memory operations on the given sref values.
+    Release semantics flush prior writes; acquire semantics ensure subsequent
+    reads see the latest values.
+
+    Lowered to `iree_codegen.fence` in ConvertSRefToMemRef, using the memory
+    space from each sref's scope. Multiple srefs with the same memory space
+    produce a single `iree_codegen.fence`.
+
+    Examples:
+    ```mlir
+      pcf.fence release %alloc : !pcf.sref<128x64xf16, #pcf.test_scope>
+      pcf.fence acquire %alloc : !pcf.sref<128x64xf16, #pcf.test_scope>
+    ```
+  }];
+
+  let arguments = (ins
+    BoolAttr:$is_release,
+    Variadic<PCF_AnyShapedRef>:$srefs
+  );
+  let results = (outs);
+
+  let hasCustomAssemblyFormat = 1;
+}
+
 } // OpGroupControlFlowOps
 
 //===----------------------------------------------------------------------===//

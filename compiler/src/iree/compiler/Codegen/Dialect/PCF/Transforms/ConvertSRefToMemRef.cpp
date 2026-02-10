@@ -16,6 +16,7 @@
 #include "iree/compiler/Dialect/Util/Analysis/Explorer.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
@@ -928,6 +929,45 @@ struct ConvertOptimizationBarrier final
   }
 };
 
+/// Converts `pcf.fence` to one or more `iree_codegen.fence` ops by resolving
+/// each sref operand's scope to a concrete memory space attribute. Multiple
+/// srefs with the same memory space produce a single `iree_codegen.fence`.
+struct ConvertFenceOp final : OpConversionPattern<PCF::FenceOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(PCF::FenceOp fenceOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Collect unique memory spaces from sref operands.
+    llvm::SmallDenseSet<Attribute> seenSpaces;
+    SmallVector<Attribute> uniqueSpaces;
+    for (Value sref : fenceOp.getSrefs()) {
+      auto srefType = cast<PCF::ShapedRefType>(sref.getType());
+      FailureOr<Attribute> memSpace =
+          srefType.getScope().getAllocMemSpace(fenceOp.getContext());
+      if (failed(memSpace)) {
+        return fenceOp.emitOpError("failed to get memory space for sref");
+      }
+      if (!(*memSpace)) {
+        return fenceOp.emitOpError(
+            "scope does not provide a concrete memory space for fence");
+      }
+      if (seenSpaces.insert(*memSpace).second) {
+        uniqueSpaces.push_back(*memSpace);
+      }
+    }
+
+    // Emit one iree_codegen.fence per unique memory space.
+    for (Attribute space : uniqueSpaces) {
+      IREE::Codegen::FenceOp::create(rewriter, fenceOp.getLoc(),
+                                     fenceOp.getIsRelease(), space);
+    }
+
+    rewriter.eraseOp(fenceOp);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // Control Flow Conversion Patterns
 //===----------------------------------------------------------------------===//
@@ -1193,7 +1233,8 @@ void ConvertSRefToMemRefPass::runOnOperation() {
 
   patterns.add<ConvertGenericOp, ConvertLoopOp, ConvertWriteSliceOp,
                ConvertReadSliceOp, ConvertGetMemrefOp, ConvertAllocOp,
-               ConvertOptimizationBarrier>(typeConverter, context);
+               ConvertOptimizationBarrier, ConvertFenceOp>(typeConverter,
+                                                           context);
 
   // Function related conversion patterns need the analysis to lookup function
   // type conversions.

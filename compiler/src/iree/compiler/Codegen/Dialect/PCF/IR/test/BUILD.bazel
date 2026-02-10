@@ -20,6 +20,7 @@ iree_lit_test_suite(
             "control_flow_ops.mlir",
             "folders.mlir",
             "invalid.mlir",
+            "sync_ops.mlir",
             "types.mlir",
             "write_ops.mlir",
         ],
