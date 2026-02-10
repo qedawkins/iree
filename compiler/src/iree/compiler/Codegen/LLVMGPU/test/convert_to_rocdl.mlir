@@ -330,3 +330,18 @@ builtin.module {
 //   CHECK-DAG: llvm.getelementptr %[[A0]][0, 0, 0, 0]
 //   CHECK-DAG: %[[A:.+]] = llvm.mlir.addressof @__shared_memory__
 //   CHECK-DAG: llvm.getelementptr %[[A]][0, 0, 0, 0]
+
+// -----
+
+// Test that iree_codegen.fence lowers to llvm.fence with MMRA.
+builtin.module {
+  func.func @fence_workgroup() {
+    iree_codegen.fence release #gpu.address_space<workgroup>
+    iree_codegen.fence acquire #gpu.address_space<workgroup>
+    return
+  }
+}
+// CHECK: #[[$MMRA:.+]] = #llvm.mmra_tag<"amdgpu-synchronize-as":"local">
+// CHECK-LABEL: llvm.func @fence_workgroup
+//       CHECK: llvm.fence syncscope("workgroup") release {llvm.mmra = #[[$MMRA]]}
+//       CHECK: llvm.fence syncscope("workgroup") acquire {llvm.mmra = #[[$MMRA]]}

@@ -669,7 +669,49 @@ struct ConvertIREEUtilAssumeIntOp final
     return success();
   }
 };
+// Lower iree_codegen.fence to llvm.fence. This is the generic (non-target-
+// specific) lowering. Target-specific passes (e.g., ConvertToROCDL) may
+// provide their own lowering with additional attributes (e.g., MMRA).
+struct LowerCodegenFenceToLLVM
+    : public OpRewritePattern<IREE::Codegen::FenceOp> {
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(IREE::Codegen::FenceOp op,
+                                PatternRewriter &rewriter) const override {
+    LLVM::AtomicOrdering ordering = op.getIsRelease()
+                                        ? LLVM::AtomicOrdering::release
+                                        : LLVM::AtomicOrdering::acquire;
+
+    // Map memory space to syncscope. Workgroup memory requires workgroup-level
+    // synchronization; global memory uses the default (system) scope.
+    StringRef syncscope;
+    if (auto gpuAddrSpace =
+            dyn_cast<gpu::AddressSpaceAttr>(op.getMemorySpace())) {
+      switch (gpuAddrSpace.getValue()) {
+      case gpu::AddressSpace::Workgroup:
+        syncscope = "workgroup";
+        break;
+      case gpu::AddressSpace::Global:
+        // Default (empty) syncscope = system/agent scope.
+        break;
+      default:
+        return op.emitOpError("unsupported address space for LLVM fence");
+      }
+    } else {
+      return op.emitOpError("expected gpu.address_space attribute");
+    }
+
+    LLVM::FenceOp::create(rewriter, op.getLoc(), ordering, syncscope);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
+
+void populateCodegenFenceToLLVMPatterns(RewritePatternSet &patterns) {
+  patterns.add<LowerCodegenFenceToLLVM>(patterns.getContext());
+}
 
 void populateLLVMConversionPatterns(MLIRContext *context,
                                     RewritePatternSet &patterns,

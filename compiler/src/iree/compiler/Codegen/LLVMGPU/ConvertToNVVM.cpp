@@ -123,6 +123,7 @@ struct ConvertToNVVMPass final
     {
       RewritePatternSet patterns(&getContext());
       populateGpuRewritePatterns(patterns);
+      populateCodegenFenceToLLVMPatterns(patterns);
       if (failed(applyPatternsGreedily(m, std::move(patterns)))) {
         return signalPassFailure();
       }
