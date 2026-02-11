@@ -103,6 +103,56 @@ const SubgroupOps allSubgroupOps =
 
 const DotProductOps allDotProductOps = DotProductOps::DP4xI8ToI32;
 
+// Returns an `extra` DictionaryAttr with ATT-validated instruction timing
+// for targets where this data is available. Returns empty dict otherwise.
+//
+// Timing is encoded as DenseI32ArrayAttr pairs: {issue_cycles, exec_cycles}.
+// These values come from hardware ATT traces on real silicon.
+static DictionaryAttr getInstructionTimingDict(StringRef arch,
+                                               MLIRContext *context) {
+  // ATT-validated timing for RDNA4 (gfx1200/gfx1201).
+  // Source: rocprofv3 ATT traces on RX 9070 XT (gfx1201).
+  if (arch == "gfx1200" || arch == "gfx1201" || arch == "rdna4") {
+    Builder b(context);
+    SmallVector<NamedAttribute> attrs;
+
+    // Instruction timing: {issue_cycles, exec_latency_cycles}.
+    attrs.push_back(b.getNamedAttr(
+        "timing_mma", b.getDenseI32ArrayAttr({2, 32})));
+    attrs.push_back(b.getNamedAttr(
+        "timing_valu", b.getDenseI32ArrayAttr({2, 2})));
+    attrs.push_back(b.getNamedAttr(
+        "timing_salu", b.getDenseI32ArrayAttr({1, 1})));
+    attrs.push_back(b.getNamedAttr(
+        "timing_lds_read", b.getDenseI32ArrayAttr({2, 25})));
+    attrs.push_back(b.getNamedAttr(
+        "timing_lds_write", b.getDenseI32ArrayAttr({2, 10})));
+    attrs.push_back(b.getNamedAttr(
+        "timing_global_load", b.getDenseI32ArrayAttr({2, 300})));
+    attrs.push_back(b.getNamedAttr(
+        "timing_barrier", b.getDenseI32ArrayAttr({2, 12})));
+
+    // Pipeline conflict: on gfx1201, WMMA uses the VALU pipeline (no
+    // dedicated XDL unit). Address computation cannot overlap with MMA.
+    attrs.push_back(b.getNamedAttr(
+        "mma_uses_valu_pipeline", b.getBoolAttr(true)));
+
+    // Occupancy limit per SIMD unit.
+    attrs.push_back(b.getNamedAttr(
+        "max_waves_per_simd", b.getI32IntegerAttr(16)));
+
+    // LDS banking parameters.
+    attrs.push_back(b.getNamedAttr(
+        "lds_banks", b.getI32IntegerAttr(32)));
+    attrs.push_back(b.getNamedAttr(
+        "lds_bank_width_bytes", b.getI32IntegerAttr(4)));
+
+    return DictionaryAttr::get(context, attrs);
+  }
+
+  return DictionaryAttr{};
+}
+
 // Creates the corresponding TargetAttr from the given target |details|.
 TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
                             StringRef features, MLIRContext *context) {
@@ -150,7 +200,7 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
       wgp->maxThreadSize, wgp->maxWorkgroupMemoryBytes,
       DenseI32ArrayAttr::get(context, wgp->maxWorkgroupCounts),
       wgp->maxLoadInstructionBits, wgp->simdsPerWgp, wgp->vgprSpaceBits,
-      dmaSizesAttr, DictionaryAttr{});
+      dmaSizesAttr, getInstructionTimingDict(arch, context));
 
   TargetChipAttr targetChip;
   if (details.chip) {

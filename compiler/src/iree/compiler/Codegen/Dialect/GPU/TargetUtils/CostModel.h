@@ -62,6 +62,37 @@ struct VGPRBudget {
 std::optional<VGPRBudget> computeVGPRBudget(TargetAttr target,
                                             int64_t occupancy);
 
+//===----------------------------------------------------------------------===//
+// Instruction Timing Queries
+//===----------------------------------------------------------------------===//
+
+/// Instruction timing pair: {issue_cycles, exec_latency_cycles}.
+struct InstructionTiming {
+  int32_t issueCycles;  /// Cycles before the next instruction can issue.
+  int32_t execCycles;   /// Cycles for the operation to complete.
+};
+
+/// Query instruction timing from the target's extra dict.
+///
+/// |category| is the timing key suffix, e.g. "mma", "valu", "lds_read".
+/// Returns std::nullopt if the target doesn't have timing data for the
+/// given category.
+std::optional<InstructionTiming> getInstructionTiming(TargetAttr target,
+                                                      StringRef category);
+
+/// Returns true if MMA uses the VALU pipeline on this target (i.e., WMMA
+/// and address arithmetic cannot overlap). This is the case on gfx1201
+/// (RDNA4) but NOT on CDNA or RDNA4.5+.
+bool mmaUsesValuPipeline(TargetAttr target);
+
+/// Query max waves per SIMD from the target's extra dict. Returns 0 if
+/// not populated.
+int64_t getMaxWavesPerSimd(TargetAttr target);
+
+//===----------------------------------------------------------------------===//
+// VGPR Budget (continued)
+//===----------------------------------------------------------------------===//
+
 /// Compute the maximum occupancy (waves per SIMD) that can be achieved with
 /// the given VGPR usage per wave.
 ///

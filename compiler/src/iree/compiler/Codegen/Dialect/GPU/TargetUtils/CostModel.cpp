@@ -10,6 +10,7 @@
 
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/CostModel.h"
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/Support/MathExtras.h"
 
 namespace mlir::iree_compiler::IREE::GPU {
@@ -33,6 +34,50 @@ MMARegisterCost computeMMARegisterCost(MMAIntrinsic intrinsic,
       computeMMAOperandVGPRs(rhsLayout, rhsBits),
       computeMMAOperandVGPRs(accLayout, accBits),
   };
+}
+
+//===----------------------------------------------------------------------===//
+// VGPR Budget (needs TargetAttr)
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// Instruction Timing Queries (needs TargetAttr extra dict)
+//===----------------------------------------------------------------------===//
+
+std::optional<InstructionTiming> getInstructionTiming(TargetAttr target,
+                                                      StringRef category) {
+  TargetWgpAttr wgp = target.getWgp();
+  DictionaryAttr extra = wgp.getExtra();
+  if (!extra)
+    return std::nullopt;
+  std::string key = ("timing_" + category).str();
+  Attribute attr = extra.get(key);
+  if (auto dense = dyn_cast_or_null<DenseI32ArrayAttr>(attr)) {
+    if (dense.size() == 2)
+      return InstructionTiming{dense[0], dense[1]};
+  }
+  return std::nullopt;
+}
+
+bool mmaUsesValuPipeline(TargetAttr target) {
+  // Check for explicit flag in extra dict.
+  TargetWgpAttr wgp = target.getWgp();
+  DictionaryAttr extra = wgp.getExtra();
+  if (!extra)
+    return false;
+  if (auto attr = dyn_cast_or_null<BoolAttr>(extra.get("mma_uses_valu_pipeline")))
+    return attr.getValue();
+  return false;
+}
+
+int64_t getMaxWavesPerSimd(TargetAttr target) {
+  TargetWgpAttr wgp = target.getWgp();
+  DictionaryAttr extra = wgp.getExtra();
+  if (!extra)
+    return 0;
+  if (auto attr = dyn_cast_or_null<IntegerAttr>(extra.get("max_waves_per_simd")))
+    return attr.getInt();
+  return 0;
 }
 
 //===----------------------------------------------------------------------===//
