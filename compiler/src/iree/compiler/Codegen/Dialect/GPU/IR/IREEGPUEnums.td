@@ -408,6 +408,44 @@ def IREEGPU_ScaledMMAIntrinsic : IREEGPU_I32Enum<"ScaledMMAIntrinsic",
     ]>;
 
 //===----------------------------------------------------------------------===//
+// Instruction categories for scheduling cost model
+//
+// Abstract instruction categories for the analytical scheduling cost model.
+// These represent coarse-grain operation types that the scheduler reasons about
+// for latency estimation, overlap analysis, and dependency graph construction.
+// Target-specific instructions map to these categories; the cost model never
+// references vendor-specific instruction names directly.
+
+// Matrix multiply-accumulate operation.
+def IREEGPU_IC_MMA : I32EnumAttrCase<"MMA", 0, "mma">;
+// Vector ALU operation (non-MMA vector compute).
+def IREEGPU_IC_VALU : I32EnumAttrCase<"VALU", 1, "valu">;
+// Scalar ALU operation (address computation, loop counters).
+def IREEGPU_IC_SALU : I32EnumAttrCase<"SALU", 2, "salu">;
+// Global memory load operation.
+def IREEGPU_IC_GlobalLoad : I32EnumAttrCase<"GlobalLoad", 3, "global_load">;
+// Global memory store operation.
+def IREEGPU_IC_GlobalStore : I32EnumAttrCase<"GlobalStore", 4, "global_store">;
+// Shared memory (LDS) read operation.
+def IREEGPU_IC_LDSRead : I32EnumAttrCase<"LDSRead", 5, "lds_read">;
+// Shared memory (LDS) write operation.
+def IREEGPU_IC_LDSWrite : I32EnumAttrCase<"LDSWrite", 6, "lds_write">;
+// Synchronization barrier.
+def IREEGPU_IC_Barrier : I32EnumAttrCase<"Barrier", 7, "barrier">;
+
+def IREEGPU_InstructionCategory : IREEGPU_I32EnumAttr<"InstructionCategory",
+    "Coarse-grain instruction category for scheduling cost model", [
+      IREEGPU_IC_MMA,
+      IREEGPU_IC_VALU,
+      IREEGPU_IC_SALU,
+      IREEGPU_IC_GlobalLoad,
+      IREEGPU_IC_GlobalStore,
+      IREEGPU_IC_LDSRead,
+      IREEGPU_IC_LDSWrite,
+      IREEGPU_IC_Barrier,
+    ]>;
+
+//===----------------------------------------------------------------------===//
 // Tiling levels
 
 def Workgroup : I32EnumAttrCase<"Workgroup", 0>;
