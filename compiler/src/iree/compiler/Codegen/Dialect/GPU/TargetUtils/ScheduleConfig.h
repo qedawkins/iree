@@ -37,43 +37,43 @@ enum class ScheduleVariant {
 /// and MMA intrinsic. This struct is the output of deriveScheduleConfig().
 struct ScheduleConfig {
   //--- Problem parameters (echoed back for convenience) ---//
-  int64_t workgroupM;   /// Workgroup tile M dimension.
-  int64_t workgroupN;   /// Workgroup tile N dimension.
-  int64_t kTile;        /// K tile size per iteration.
+  int64_t workgroupM = 0;   /// Workgroup tile M dimension.
+  int64_t workgroupN = 0;   /// Workgroup tile N dimension.
+  int64_t kTile = 0;        /// K tile size per iteration.
 
   //--- Subgroup layout ---//
-  int64_t subgroupCountM; /// Number of subgroups along M.
-  int64_t subgroupCountN; /// Number of subgroups along N.
-  int64_t subgroupM;      /// Per-subgroup tile M = workgroupM / subgroupCountM.
-  int64_t subgroupN;      /// Per-subgroup tile N = workgroupN / subgroupCountN.
+  int64_t subgroupCountM = 0; /// Number of subgroups along M.
+  int64_t subgroupCountN = 0; /// Number of subgroups along N.
+  int64_t subgroupM = 0;      /// Per-subgroup tile M = workgroupM / subgroupCountM.
+  int64_t subgroupN = 0;      /// Per-subgroup tile N = workgroupN / subgroupCountN.
 
   //--- Threading ---//
-  int64_t numSubgroups;   /// Total subgroups = subgroupCountM * subgroupCountN.
-  int64_t subgroupSize;   /// Threads per subgroup (wave32=32, wave64=64).
-  int64_t numThreads;     /// Total threads = numSubgroups * subgroupSize.
+  int64_t numSubgroups = 0;   /// Total subgroups = subgroupCountM * subgroupCountN.
+  int64_t subgroupSize = 0;   /// Threads per subgroup (wave32=32, wave64=64).
+  int64_t numThreads = 0;     /// Total threads = numSubgroups * subgroupSize.
 
   //--- MMA ---//
-  MMAIntrinsic mmaIntrinsic; /// Selected MMA intrinsic.
-  int64_t mmaM;              /// MMA tile M.
-  int64_t mmaN;              /// MMA tile N.
-  int64_t mmaK;              /// MMA tile K.
+  MMAIntrinsic mmaIntrinsic{}; /// Selected MMA intrinsic.
+  int64_t mmaM = 0;            /// MMA tile M.
+  int64_t mmaN = 0;            /// MMA tile N.
+  int64_t mmaK = 0;            /// MMA tile K.
 
   //--- Schedule ---//
-  ScheduleVariant variant;   /// Original or early-write.
-  int64_t numQuarters;       /// Number of K quarters per iteration.
-  int64_t quarterK;          /// K elements per quarter = kTile / numQuarters.
+  ScheduleVariant variant = ScheduleVariant::Original; /// Original or early-write.
+  int64_t numQuarters = 0;    /// Number of K quarters per iteration.
+  int64_t quarterK = 0;       /// K elements per quarter = kTile / numQuarters.
 
   //--- Budgets ---//
-  int64_t peakVGPRs;         /// Predicted peak VGPR usage.
-  int64_t availableVGPRs;    /// VGPR budget at target occupancy.
-  int64_t headroom;          /// availableVGPRs - peakVGPRs (positive = fits).
-  int64_t ldsBytes;          /// Total LDS allocation (all buffers).
-  int64_t bufferDepth;       /// Multi-buffering depth.
+  int64_t peakVGPRs = 0;         /// Predicted peak VGPR usage.
+  int64_t availableVGPRs = 0;    /// VGPR budget at target occupancy.
+  int64_t headroom = 0;          /// availableVGPRs - peakVGPRs (positive = fits).
+  int64_t ldsBytes = 0;          /// Total LDS allocation (all buffers).
+  int64_t bufferDepth = 0;       /// Multi-buffering depth.
 
   //--- Latency estimate ---//
-  int64_t cyclesPerIteration; /// Estimated cycles per K iteration.
-  int64_t wmmaPerIteration;   /// Total WMMA instructions per K iteration.
-  int64_t flopsPerIteration;  /// FLOPs per K iteration.
+  int64_t cyclesPerIteration = 0; /// Estimated cycles per K iteration.
+  int64_t wmmaPerIteration = 0;   /// Total WMMA instructions per K iteration.
+  int64_t flopsPerIteration = 0;  /// FLOPs per K iteration.
 };
 
 //===----------------------------------------------------------------------===//
