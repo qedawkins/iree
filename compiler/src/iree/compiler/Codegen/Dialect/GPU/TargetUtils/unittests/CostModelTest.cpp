@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/CostModel.h"
+#include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/ScheduleConfig.h"
 
 namespace mlir::iree_compiler::IREE::GPU {
 namespace {
@@ -383,6 +384,271 @@ TEST(CostModelArithTest, PeakVGPRUsageMassiveSpill) {
   EXPECT_TRUE(usage.spills);
   EXPECT_EQ(usage.headroom, 256 - usage.totalVGPRs);
   EXPECT_LT(usage.headroom, -200); // Massively over budget.
+}
+
+//===----------------------------------------------------------------------===//
+// computePipelinedBurst
+//===----------------------------------------------------------------------===//
+
+TEST(LatencyModelTest, PipelinedBurstBasic) {
+  // (N-1)*issue + exec: (10-1)*2 + 32 = 50.
+  EXPECT_EQ(computePipelinedBurst(10, 2, 32), 50);
+}
+
+TEST(LatencyModelTest, PipelinedBurstSingleInstruction) {
+  // Single instruction: just exec latency.
+  EXPECT_EQ(computePipelinedBurst(1, 2, 32), 32);
+}
+
+TEST(LatencyModelTest, PipelinedBurstZeroCount) {
+  EXPECT_EQ(computePipelinedBurst(0, 2, 32), 0);
+}
+
+TEST(LatencyModelTest, PipelinedBurstNegativeCount) {
+  EXPECT_EQ(computePipelinedBurst(-1, 2, 32), 0);
+}
+
+TEST(LatencyModelTest, PipelinedBurstLargeCount) {
+  // 100 WMMAs: (100-1)*2 + 32 = 230.
+  EXPECT_EQ(computePipelinedBurst(100, 2, 32), 230);
+}
+
+//===----------------------------------------------------------------------===//
+// computePhaseTiming
+//===----------------------------------------------------------------------===//
+
+TEST(LatencyModelTest, PhaseTimingPureCompute) {
+  // Pure WMMA phase: no LDS, no global loads.
+  // 16 WMMAs: (16-1)*2 + 32 = 62 cycles.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  PhaseInstructionCounts counts;
+  counts.numWMMA = 16;
+  counts.numVALUAddr = 0;
+  counts.numLDSLoads = 0;
+  counts.numLDSStores = 0;
+  counts.numGlobalLoads = 0;
+  counts.hasBarrier = true;
+
+  PhaseTiming timing =
+      computePhaseTiming(counts, mma, ldsRead, ldsWrite, globalLoad, 20);
+
+  EXPECT_EQ(timing.valuPipelineCycles, 62); // (15)*2 + 32
+  EXPECT_EQ(timing.ldsBusCycles, 0);
+  EXPECT_EQ(timing.vmemIssueCycles, 0);
+  EXPECT_EQ(timing.barrierCycles, 20);
+  EXPECT_EQ(timing.totalCycles, 62 + 20); // max(62,0,0) + 20
+}
+
+TEST(LatencyModelTest, PhaseTimingMemoryPhase) {
+  // Memory phase: LDS reads + global loads, no WMMA.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  PhaseInstructionCounts counts;
+  counts.numWMMA = 0;
+  counts.numVALUAddr = 20; // Address computation VALU ops.
+  counts.numLDSLoads = 8;
+  counts.numLDSStores = 0;
+  counts.numGlobalLoads = 4;
+  counts.hasBarrier = true;
+
+  PhaseTiming timing =
+      computePhaseTiming(counts, mma, ldsRead, ldsWrite, globalLoad, 20);
+
+  // VALU pipeline: 0 (no WMMA) + 20 (addr) = 20.
+  EXPECT_EQ(timing.valuPipelineCycles, 20);
+  // LDS bus: reads only = (8-1)*2 + 25 = 39.
+  EXPECT_EQ(timing.ldsBusCycles, 39);
+  // VMEM issue: 4*2 = 8.
+  EXPECT_EQ(timing.vmemIssueCycles, 8);
+  // Total: max(20, 39, 8) + 20 = 59.
+  EXPECT_EQ(timing.totalCycles, 59);
+}
+
+TEST(LatencyModelTest, PhaseTimingLDSReadWrite2Port) {
+  // LDS reads + writes simultaneously: 2-port overlap = max(read, write).
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  PhaseInstructionCounts counts;
+  counts.numWMMA = 0;
+  counts.numVALUAddr = 0;
+  counts.numLDSLoads = 8;
+  counts.numLDSStores = 4;
+  counts.numGlobalLoads = 0;
+  counts.hasBarrier = true;
+
+  PhaseTiming timing =
+      computePhaseTiming(counts, mma, ldsRead, ldsWrite, globalLoad, 20);
+
+  // LDS read: (8-1)*2 + 25 = 39.
+  // LDS write: (4-1)*2 + 10 = 16.
+  // 2-port overlap: max(39, 16) = 39.
+  EXPECT_EQ(timing.ldsBusCycles, 39);
+  EXPECT_EQ(timing.totalCycles, 39 + 20);
+}
+
+TEST(LatencyModelTest, PhaseTimingNoBarrier) {
+  // Phase without barrier.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  PhaseInstructionCounts counts;
+  counts.numWMMA = 4;
+  counts.numVALUAddr = 0;
+  counts.numLDSLoads = 0;
+  counts.numLDSStores = 0;
+  counts.numGlobalLoads = 0;
+  counts.hasBarrier = false;
+
+  PhaseTiming timing =
+      computePhaseTiming(counts, mma, ldsRead, ldsWrite, globalLoad, 20);
+
+  // WMMA: (4-1)*2 + 32 = 38.
+  EXPECT_EQ(timing.valuPipelineCycles, 38);
+  EXPECT_EQ(timing.barrierCycles, 0);
+  EXPECT_EQ(timing.totalCycles, 38); // No barrier added.
+}
+
+TEST(LatencyModelTest, PhaseTimingWMMADominates) {
+  // Compute-bound phase: WMMA pipeline >> LDS and VMEM.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  PhaseInstructionCounts counts;
+  counts.numWMMA = 64;
+  counts.numVALUAddr = 10;
+  counts.numLDSLoads = 4;
+  counts.numLDSStores = 2;
+  counts.numGlobalLoads = 2;
+  counts.hasBarrier = true;
+
+  PhaseTiming timing =
+      computePhaseTiming(counts, mma, ldsRead, ldsWrite, globalLoad, 20);
+
+  // WMMA: (64-1)*2 + 32 = 158, + 10 addr = 168.
+  EXPECT_EQ(timing.valuPipelineCycles, 168);
+  // LDS: max((4-1)*2+25, (2-1)*2+10) = max(31, 12) = 31.
+  EXPECT_EQ(timing.ldsBusCycles, 31);
+  // VMEM: 2*2 = 4.
+  EXPECT_EQ(timing.vmemIssueCycles, 4);
+  // Total: max(168, 31, 4) + 20 = 188.
+  EXPECT_EQ(timing.totalCycles, 188);
+}
+
+//===----------------------------------------------------------------------===//
+// computeIterationCycles
+//===----------------------------------------------------------------------===//
+
+TEST(LatencyModelTest, IterationCyclesRDNA4Reference) {
+  // RDNA4 reference: 64x64 subgroup, K=64, WMMA_F32_16x16x16_F16.
+  // MMA: 16x16x16, f16 input (16-bit), 512 threads.
+  // 4 quarters, early-write schedule.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  int64_t cycles = computeIterationCycles(
+      /*subgroupM=*/64, /*subgroupN=*/64, /*kTile=*/64,
+      /*mmaM=*/16, /*mmaN=*/16, /*mmaK=*/16,
+      /*numThreads=*/512, /*inputBits=*/16,
+      /*earlyWrite=*/true, mma, ldsRead, ldsWrite, globalLoad,
+      /*barrierCycles=*/20);
+
+  // Should produce a positive cycle count.
+  EXPECT_GT(cycles, 0);
+  // 8 phases with barriers, WMMA-dominant: expect a few hundred cycles.
+  // Rough lower bound: 4 WMMA phases × ~82 cycles each = ~328.
+  EXPECT_GT(cycles, 300);
+  // Upper bound sanity: shouldn't exceed 2000 for this config.
+  EXPECT_LT(cycles, 2000);
+}
+
+TEST(LatencyModelTest, IterationCycles2Quarter) {
+  // K=32 with mmaK=16: 2 quarters, not 4.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  int64_t cycles = computeIterationCycles(
+      /*subgroupM=*/64, /*subgroupN=*/64, /*kTile=*/32,
+      /*mmaM=*/16, /*mmaN=*/16, /*mmaK=*/16,
+      /*numThreads=*/512, /*inputBits=*/16,
+      /*earlyWrite=*/true, mma, ldsRead, ldsWrite, globalLoad,
+      /*barrierCycles=*/20);
+
+  // 2-quarter schedule: 4 phases. Should be roughly half of 4-quarter.
+  EXPECT_GT(cycles, 100);
+  EXPECT_LT(cycles, 1000);
+}
+
+TEST(LatencyModelTest, IterationCyclesOriginalVsEarlyWrite) {
+  // Compare original and early-write schedules. They should produce
+  // different cycle counts since the phase structure differs.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  int64_t earlyWriteCycles = computeIterationCycles(
+      64, 64, 64, 16, 16, 16, 512, 16, /*earlyWrite=*/true, mma, ldsRead,
+      ldsWrite, globalLoad, 20);
+
+  int64_t originalCycles = computeIterationCycles(
+      64, 64, 64, 16, 16, 16, 512, 16, /*earlyWrite=*/false, mma, ldsRead,
+      ldsWrite, globalLoad, 20);
+
+  // Both should be positive.
+  EXPECT_GT(earlyWriteCycles, 0);
+  EXPECT_GT(originalCycles, 0);
+  // They should differ (different phase layouts).
+  EXPECT_NE(earlyWriteCycles, originalCycles);
+}
+
+TEST(LatencyModelTest, IterationCyclesZeroKTile) {
+  // Edge case: kTile=0 should return 0.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  int64_t cycles = computeIterationCycles(64, 64, 0, 16, 16, 16, 512, 16,
+                                           true, mma, ldsRead, ldsWrite,
+                                           globalLoad, 20);
+  EXPECT_EQ(cycles, 0);
+}
+
+TEST(LatencyModelTest, IterationCyclesLargerSubgroup) {
+  // 128x128 subgroup: more WMMAs, should take more cycles.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  int64_t small = computeIterationCycles(
+      64, 64, 64, 16, 16, 16, 512, 16, true, mma, ldsRead, ldsWrite,
+      globalLoad, 20);
+
+  int64_t large = computeIterationCycles(
+      128, 128, 64, 16, 16, 16, 512, 16, true, mma, ldsRead, ldsWrite,
+      globalLoad, 20);
+
+  // 128x128 has 4× more WMMAs per quarter than 64x64.
+  EXPECT_GT(large, small);
 }
 
 } // namespace

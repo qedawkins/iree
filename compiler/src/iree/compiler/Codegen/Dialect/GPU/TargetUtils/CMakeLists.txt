@@ -44,10 +44,26 @@ iree_cc_library(
     CostModelArith
   HDRS
     "CostModel.h"
+    "ScheduleConfig.h"
   SRCS
     "CostModelArith.cpp"
   DEPS
     LLVMSupport
+    iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
+    ScheduleConfig
+  HDRS
+    "ScheduleConfig.h"
+  SRCS
+    "ScheduleConfig.cpp"
+  DEPS
+    LLVMSupport
+    iree::compiler::Codegen::Dialect::GPU::TargetUtils::CostModel
+    iree::compiler::Codegen::Dialect::GPU::TargetUtils::CostModelArith
     iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
   PUBLIC
 )
