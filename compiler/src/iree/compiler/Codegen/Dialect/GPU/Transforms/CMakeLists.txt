@@ -51,6 +51,7 @@ iree_cc_library(
     "CombineBarrierRegions.cpp"
     "DistributeInnerTiledToLanes.cpp"
     "ExpandUndistributedInnerTiles.cpp"
+    "GenerateScheduleIR.cpp"
     "LowerIREEGPUOps.cpp"
     "Passes.cpp"
     "ConvertForallToGenericNestGPU.cpp"

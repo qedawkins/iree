@@ -88,4 +88,42 @@ def ConvertForallToGenericNestGPUPass :
   ];
 }
 
+def GenerateScheduleIRPass :
+    InterfacePass<"iree-gpu-generate-schedule-ir",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Generates structured schedule IR for GPU matmul.";
+  let description = [{
+    Takes a function containing a contraction op (linalg.generic with matmul
+    semantics) and replaces it with a structured schedule using PCF ops,
+    barriers, and MMA operations.
+
+    The schedule follows the quarter-K pingpong pattern with configurable
+    early-write optimization. It generates:
+      - Outer pcf.generic at subgroup scope.
+      - Inner pcf.generic at lane scope.
+      - LDS allocation via pcf.alloc.
+      - K-loop (scf.for) with phased computation:
+        P1: Global load LHS + LDS read q0.
+        P2: WMMA compute q0.
+        P3: Global load RHS + LDS read q1.
+        P4: WMMA compute q1.
+        P5: LDS write LHS + LDS read q2.
+        P6: WMMA compute q2 + LDS write RHS + LDS read q3.
+        P7: WMMA compute q3.
+        P8: Barrier + loop control.
+      - Barriers (pcf.barrier) between phases.
+
+    Configuration is derived from a ScheduleConfig, which can be computed
+    by deriveScheduleConfig() from the cost model.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::tensor::TensorDialect",
+    "::mlir::vector::VectorDialect",
+  ];
+}
+
 #endif // IREE_CODEGEN_DIALECt_GPU_TRANSFORMS_PASSES
