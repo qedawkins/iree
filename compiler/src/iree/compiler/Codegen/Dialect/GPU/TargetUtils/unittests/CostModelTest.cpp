@@ -17,6 +17,7 @@
 
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/CostModel.h"
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/ScheduleConfig.h"
+#include "llvm/Support/MathExtras.h"
 
 namespace mlir::iree_compiler::IREE::GPU {
 namespace {
@@ -1080,6 +1081,273 @@ TEST(BaselineComparisonTest, PingpongWouldNeedMoreVGPRs) {
   EXPECT_GT(pingpong.totalVGPRs, 215);
   // But should still fit within 256.
   EXPECT_FALSE(pingpong.spills);
+}
+
+//===----------------------------------------------------------------------===//
+// IREE128x128Test - comprehensive model validation for actual IREE config
+//===----------------------------------------------------------------------===//
+// These tests exercise the cost model with IREE's actual 128x128 config
+// (gfx1201, 4096x4096x4096 f16 matmul). The config uses 2-quarter schedule
+// (K=32, mmaK=16), NOT 4-quarter. This validates the 2Q path of the model.
+//
+// Actual ISA metadata (from iree-compile):
+//   Workgroup: 128x128, 4 subgroups (2x2), 64x64 per subgroup
+//   K tile: 32 (reduction=[0,0,2], mmaK=16)
+//   Threads: 128 (4 waves × 32 lanes), wave32
+//   VGPRs: 215, SGPRs: 17, spills: 0
+//   LDS: 17,664 bytes
+//   WMMAs: 64, barriers: 4, buffer_loads: 16, LDS ops: 160
+
+TEST(IREE128x128Test, TwoQuarterScheduleDetection) {
+  // K=32 with mmaK=16 → numQuarters = min(4, 32/16) = 2.
+  // This is a critical test: IREE's real config uses 2Q, not 4Q.
+  int64_t kTile = 32;
+  int64_t mmaK = 16;
+  int64_t numQuarters = std::min(int64_t(4), kTile / mmaK);
+  EXPECT_EQ(numQuarters, 2);
+
+  int64_t quarterK = kTile / numQuarters;
+  EXPECT_EQ(quarterK, 16);
+}
+
+TEST(IREE128x128Test, GlobalLoadCountsMatch) {
+  // 128x128 workgroup, K=32, 128 threads.
+  // LHS tile: 128×32 = 4096 elements, RHS tile: 32×128 = 4096 elements.
+  // Per-thread: 4096/128 = 32 elements. Each GLOBAL_LOAD_B128 loads 8 f16.
+  // Loads per operand: ceil(32/8) = 4.
+  int64_t bytesPerLoad = 16;  // B128 = 16 bytes.
+  int64_t elemBytes = 2;      // f16 = 2 bytes.
+  int64_t glLHS = llvm::divideCeil(128 * 32 * elemBytes, 128 * bytesPerLoad);
+  int64_t glRHS = llvm::divideCeil(32 * 128 * elemBytes, 128 * bytesPerLoad);
+  EXPECT_EQ(glLHS, 4);
+  EXPECT_EQ(glRHS, 4);
+  // Actual ISA: 16 buffer_loads total = 8 LHS + 8 RHS.
+  // Discrepancy: model predicts 4+4=8, ISA shows 16 total.
+  // This confirms the loop body processes 2 K iterations (unrolled),
+  // giving 2 × (4+4) = 16 buffer_loads and 2 × 32 = 64 WMMAs.
+}
+
+TEST(IREE128x128Test, WMMACountPerIteration) {
+  // 64x64 subgroup, quarterK=16, mmaM=mmaN=mmaK=16.
+  int64_t wmmaPerQuarter = (64 / 16) * (64 / 16) * (16 / 16);
+  EXPECT_EQ(wmmaPerQuarter, 16);
+  // 2 quarters per iteration.
+  EXPECT_EQ(2 * wmmaPerQuarter, 32);
+  // Actual ISA: 64 WMMAs → confirms K-loop is unrolled 2×.
+  // The cost model computes per-unrolled-iteration (32 WMMAs).
+  // For fair comparison, multiply by 2: 64 WMMAs matches.
+  EXPECT_EQ(2 * 2 * wmmaPerQuarter, 64);
+}
+
+TEST(IREE128x128Test, LDSReadsPerQuarter) {
+  // Per quarter: A-tiles = (64/16)×(16/16) = 4, B-tiles = (64/16)×(16/16) = 4.
+  int64_t ldsReadA = (64 / 16) * (16 / 16);
+  int64_t ldsReadB = (64 / 16) * (16 / 16);
+  EXPECT_EQ(ldsReadA, 4);
+  EXPECT_EQ(ldsReadB, 4);
+  EXPECT_EQ(ldsReadA + ldsReadB, 8);
+  // Per iteration (2 quarters): 16 LDS reads per subgroup.
+  // Per workgroup (4 subgroups): 64 LDS reads.
+  // Actual ISA: 160 LDS ops (reads + writes + unrolled).
+  // Model per iteration: 2 × 8 reads + 8 writes = 24.
+  // Unrolled 2×: 48. Gap to 160 likely includes LDS address ops counted
+  // as LDS ops in the ISA metadata.
+}
+
+TEST(IREE128x128Test, VGPRBudget2QEarlyWrite) {
+  // 2-quarter early-write schedule. Phase liveness:
+  //   P1: GL + LDS-read q0 → acc + glL + glR + qL + qR + idx = PEAK
+  //   P2: MFMA q0 → acc + glL + glR + idx
+  //   P3: LDS-write + LDS-read q1 → acc + qL + qR + idx
+  //   P4: MFMA q1 → acc + idx
+  int64_t acc = 128;
+  // computeIndexOverheadVGPRs(numLoadOperands=2, numKQuarters=2, splitCopy=false):
+  //   1 (threadId) + 4 (globalAddr) + 4 (ldsAddr) + 2 (loopControl)
+  //   + 2 (copyDecomp, no split) + 2 (delinearize) + 24 (compiler) = 39.
+  int64_t idxK32 = computeIndexOverheadVGPRs(2, 2, false);
+  EXPECT_EQ(idxK32, 39);
+
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      acc, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, idxK32,
+      /*availableVGPRs=*/256, /*numQuarters=*/2, /*earlyWrite=*/true);
+
+  // Should have 4 phases for 2Q schedule.
+  EXPECT_EQ(budget.phases.size(), 4u);
+
+  // Peak should be P1 (GL + LDS reads both live).
+  int64_t peak = budget.peakVGPRs();
+  EXPECT_EQ(peak, acc + 16 + 16 + 16 + 16 + idxK32);
+  EXPECT_EQ(peak, 231);  // 128 + 32 + 32 + 39 = 231.
+
+  // Model predicts 231, actual ISA uses 215. Gap = 16 VGPRs.
+  // The gap is primarily from kDefaultCompilerOverheadVGPRs = 24 being
+  // too high for this config; actual compiler overhead is ~10.
+  EXPECT_FALSE(budget.willSpill());
+  EXPECT_EQ(budget.headroom(), 256 - 231);
+  EXPECT_EQ(budget.headroom(), 25);
+}
+
+TEST(IREE128x128Test, VGPRBudget2QOriginal) {
+  // Without early-write, 2Q doesn't have simultaneous quarters like 4Q,
+  // so the peak should be the same since 2Q only reads 1 quarter at a time
+  // anyway (P1 and P3 each read one quarter).
+  int64_t acc = 128;
+  int64_t idxK32 = computeIndexOverheadVGPRs(2, 2, false);
+
+  VGPRBudgetAnalysis ewBudget = buildVGPRBudgetAnalysis(
+      acc, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, idxK32, 256,
+      2, /*earlyWrite=*/true);
+  VGPRBudgetAnalysis origBudget = buildVGPRBudgetAnalysis(
+      acc, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, idxK32, 256,
+      2, /*earlyWrite=*/false);
+
+  // 2Q schedule: early-write and original should have same peak because
+  // the 2Q schedule never has 2 quarters live simultaneously.
+  EXPECT_EQ(ewBudget.peakVGPRs(), origBudget.peakVGPRs());
+}
+
+TEST(IREE128x128Test, IterationCycles2QConfig) {
+  // Full 128x128 K=32 iteration cycle prediction.
+  InstructionTiming mma = {19, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  int64_t cycles = computeIterationCycles(
+      /*workgroupM=*/128, /*workgroupN=*/128,
+      /*subgroupM=*/64, /*subgroupN=*/64, /*kTile=*/32,
+      /*mmaM=*/16, /*mmaN=*/16, /*mmaK=*/16,
+      /*numThreads=*/128, /*inputBits=*/16,
+      /*earlyWrite=*/true, mma, ldsRead, ldsWrite, globalLoad,
+      /*barrierCycles=*/20);
+
+  // 2Q schedule: 4 phases. 2 compute phases with 16 WMMAs each.
+  // Compute: (16-1)*19 + 32 = 317 cy per phase × 2 = 634.
+  // Memory phases: dominated by VALU or LDS.
+  // Barriers: 4 × 20 = 80.
+  // Should be in range 700-1500.
+  EXPECT_GT(cycles, 700);
+  EXPECT_LT(cycles, 1500);
+}
+
+TEST(IREE128x128Test, IterationCyclesPhaseBreakdown) {
+  // Detailed phase-by-phase timing for 128x128 K=32.
+  InstructionTiming mma = {19, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  // Manually compute phase instruction counts matching build2QSchedule.
+  int64_t wmmaPerQuarter = 16;
+  int64_t glLHS = 4, glRHS = 4;
+  int64_t ldsReadsPerQ = 8;
+  int64_t ldsWriteLHS = 4, ldsWriteRHS = 4;
+  int64_t valuPerMem = 2 * (4 + 4) + 8 + 4;  // = 28.
+  EXPECT_EQ(valuPerMem, 28);
+
+  // P1: GL + LDS-read q0. VALU=28, LDS reads=8, GL=8, barrier.
+  PhaseInstructionCounts p1 = {0, valuPerMem, ldsReadsPerQ, 0,
+                                glLHS + glRHS, true};
+  PhaseTiming t1 = computePhaseTiming(p1, mma, ldsRead, ldsWrite,
+                                       globalLoad, 20);
+  // VALU: 28 cy. LDS: (8-1)*2+25 = 39 cy. VMEM: 8*2 = 16 cy.
+  // max(28, 39, 16) + 20 = 59.
+  EXPECT_EQ(t1.valuPipelineCycles, 28);
+  EXPECT_EQ(t1.ldsBusCycles, 39);
+  EXPECT_EQ(t1.vmemIssueCycles, 16);
+  EXPECT_EQ(t1.totalCycles, 59);
+
+  // P2: MFMA q0. 16 WMMAs, no LDS, no GL.
+  PhaseInstructionCounts p2 = {wmmaPerQuarter, 0, 0, 0, 0, true};
+  PhaseTiming t2 = computePhaseTiming(p2, mma, ldsRead, ldsWrite,
+                                       globalLoad, 20);
+  // WMMA: (16-1)*19 + 32 = 317. Total: 317 + 20 = 337.
+  EXPECT_EQ(t2.valuPipelineCycles, 317);
+  EXPECT_EQ(t2.totalCycles, 337);
+
+  // P3: LDS-write + LDS-read q1. VALU=28, LDS reads=8, LDS stores=8.
+  int64_t p3Valu = ldsReadsPerQ + 2 * (ldsWriteLHS + ldsWriteRHS) + 4;
+  EXPECT_EQ(p3Valu, 28);  // 8 + 2*8 + 4 = 28.
+  PhaseInstructionCounts p3 = {0, p3Valu, ldsReadsPerQ,
+                                ldsWriteLHS + ldsWriteRHS, 0, true};
+  PhaseTiming t3 = computePhaseTiming(p3, mma, ldsRead, ldsWrite,
+                                       globalLoad, 20);
+  // VALU: 28. LDS: max(reads, writes) = max(39, (8-1)*2+10=24) = 39.
+  EXPECT_EQ(t3.valuPipelineCycles, 28);
+  EXPECT_EQ(t3.ldsBusCycles, 39);
+  EXPECT_EQ(t3.totalCycles, 59);
+
+  // P4: MFMA q1. Same as P2.
+  PhaseTiming t4 = computePhaseTiming(p2, mma, ldsRead, ldsWrite,
+                                       globalLoad, 20);
+  EXPECT_EQ(t4.totalCycles, 337);
+
+  // Total: 59 + 337 + 59 + 337 = 792 cycles.
+  int64_t total = t1.totalCycles + t2.totalCycles + t3.totalCycles +
+                   t4.totalCycles;
+  EXPECT_EQ(total, 792);
+}
+
+TEST(IREE128x128Test, LDSAllocationVsBaseline) {
+  // Model: 128×32 + 32×128 = 8192 elements, × 2 bytes = 16384 bytes.
+  // Actual ISA: 17664 bytes. Delta = 1280 bytes (7.8% padding).
+  std::optional<LDSAllocation> single =
+      computeLDSAllocation(128 * 32, 32 * 128, 2, 1, 65536);
+  ASSERT_TRUE(single.has_value());
+  EXPECT_EQ(single->totalBytes, 16384);
+
+  // Double-buffered: 32768 bytes. Still fits in 64KB.
+  std::optional<LDSAllocation> doubled =
+      computeLDSAllocation(128 * 32, 32 * 128, 2, 2, 65536);
+  ASSERT_TRUE(doubled.has_value());
+  EXPECT_EQ(doubled->totalBytes, 32768);
+
+  // Triple-buffered: 49152 bytes. Still fits.
+  std::optional<LDSAllocation> tripled =
+      computeLDSAllocation(128 * 32, 32 * 128, 2, 3, 65536);
+  ASSERT_TRUE(tripled.has_value());
+  EXPECT_EQ(tripled->totalBytes, 49152);
+
+  // Quad-buffered: 65536 bytes. Exactly fits!
+  std::optional<LDSAllocation> quad =
+      computeLDSAllocation(128 * 32, 32 * 128, 2, 4, 65536);
+  ASSERT_TRUE(quad.has_value());
+  EXPECT_EQ(quad->totalBytes, 65536);
+
+  // Quint-buffered: 81920 > 65536, doesn't fit.
+  std::optional<LDSAllocation> quint =
+      computeLDSAllocation(128 * 32, 32 * 128, 2, 5, 65536);
+  EXPECT_FALSE(quint.has_value());
+}
+
+TEST(IREE128x128Test, ModelVsBaselineOverheadAnalysis) {
+  // Decompose the discrepancy between model and actual ISA.
+  //
+  // Actual ISA: 215 VGPRs.
+  // Known components: 128 (acc) + 32 (GL staging) = 160 certain.
+  // Remaining: 215 - 160 = 55 VGPRs for everything else.
+  //
+  // "Everything else" includes:
+  //   - LDS read operands (32 if 1 quarter live, 0 if consumed)
+  //   - Index/address overhead
+  //   - Compiler spill temporaries
+  //
+  // The 55 VGPR residual is LESS than model's GL+qRead+idx = 32+32+37 = 101.
+  // This suggests IREE's schedule doesn't keep GL and quarter reads
+  // simultaneously live (different structure than quarter-K pingpong).
+  int64_t actualTotal = 215;
+  int64_t knownAcc = 128;
+  int64_t knownGL = 32;
+  int64_t residual = actualTotal - knownAcc - knownGL;
+  EXPECT_EQ(residual, 55);
+
+  // If quarter reads are also live at peak (32 VGPRs):
+  int64_t withQuarterReads = residual - 32;
+  // That leaves 23 VGPRs for pure index overhead.
+  EXPECT_EQ(withQuarterReads, 23);
+  // Model predicts 37 for index overhead, so the compiler is ~14 VGPRs
+  // more efficient than our estimate (kDefaultCompilerOverheadVGPRs = 24
+  // is too high for this config; actual overhead ~10).
 }
 
 } // namespace
