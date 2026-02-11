@@ -62,6 +62,14 @@ struct VGPRBudget {
 std::optional<VGPRBudget> computeVGPRBudget(TargetAttr target,
                                             int64_t occupancy);
 
+/// Compute the maximum occupancy (waves per SIMD) that can be achieved with
+/// the given VGPR usage per wave.
+///
+/// Returns std::nullopt if the target doesn't have vgpr_space_bits populated
+/// or if vgprsUsed is zero.
+std::optional<int64_t> computeMaxOccupancyFromVGPRs(TargetAttr target,
+                                                     int64_t vgprsUsed);
+
 //===----------------------------------------------------------------------===//
 // Instruction Timing Queries
 //===----------------------------------------------------------------------===//
@@ -90,16 +98,16 @@ bool mmaUsesValuPipeline(TargetAttr target);
 int64_t getMaxWavesPerSimd(TargetAttr target);
 
 //===----------------------------------------------------------------------===//
-// VGPR Budget (continued)
+// LDS Banking Queries
 //===----------------------------------------------------------------------===//
 
-/// Compute the maximum occupancy (waves per SIMD) that can be achieved with
-/// the given VGPR usage per wave.
-///
-/// Returns std::nullopt if the target doesn't have vgpr_space_bits populated
-/// or if vgprsUsed is zero.
-std::optional<int64_t> computeMaxOccupancyFromVGPRs(TargetAttr target,
-                                                     int64_t vgprsUsed);
+/// Query the number of LDS banks from the target's extra dict.
+/// Returns 0 if not populated. Typical value: 32 (RDNA4, CDNA).
+int64_t getLDSBankCount(TargetAttr target);
+
+/// Query the LDS bank width in bytes from the target's extra dict.
+/// Returns 0 if not populated. Typical value: 4 (32-bit DWORD per bank).
+int64_t getLDSBankWidthBytes(TargetAttr target);
 
 //===----------------------------------------------------------------------===//
 // Accumulator Budget

@@ -37,10 +37,6 @@ MMARegisterCost computeMMARegisterCost(MMAIntrinsic intrinsic,
 }
 
 //===----------------------------------------------------------------------===//
-// VGPR Budget (needs TargetAttr)
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
 // Instruction Timing Queries (needs TargetAttr extra dict)
 //===----------------------------------------------------------------------===//
 
@@ -76,6 +72,31 @@ int64_t getMaxWavesPerSimd(TargetAttr target) {
   if (!extra)
     return 0;
   if (auto attr = dyn_cast_or_null<IntegerAttr>(extra.get("max_waves_per_simd")))
+    return attr.getInt();
+  return 0;
+}
+
+//===----------------------------------------------------------------------===//
+// LDS Banking Queries (needs TargetAttr extra dict)
+//===----------------------------------------------------------------------===//
+
+int64_t getLDSBankCount(TargetAttr target) {
+  TargetWgpAttr wgp = target.getWgp();
+  DictionaryAttr extra = wgp.getExtra();
+  if (!extra)
+    return 0;
+  if (auto attr = dyn_cast_or_null<IntegerAttr>(extra.get("lds_banks")))
+    return attr.getInt();
+  return 0;
+}
+
+int64_t getLDSBankWidthBytes(TargetAttr target) {
+  TargetWgpAttr wgp = target.getWgp();
+  DictionaryAttr extra = wgp.getExtra();
+  if (!extra)
+    return 0;
+  if (auto attr =
+          dyn_cast_or_null<IntegerAttr>(extra.get("lds_bank_width_bytes")))
     return attr.getInt();
   return 0;
 }
