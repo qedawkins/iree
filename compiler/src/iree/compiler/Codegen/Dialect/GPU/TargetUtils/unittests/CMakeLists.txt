@@ -16,11 +16,8 @@ iree_cc_test(
   SRCS
     "CostModelTest.cpp"
   DEPS
-    MLIRIR
     gtest
-    iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
-    iree::compiler::Codegen::Dialect::GPU::TargetUtils::CostModel
-    iree::compiler::Utils
+    iree::compiler::Codegen::Dialect::GPU::TargetUtils::CostModelArith
     iree::testing::gtest_main
 )
 

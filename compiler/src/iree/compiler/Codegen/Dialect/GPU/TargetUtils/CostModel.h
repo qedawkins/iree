@@ -140,6 +140,58 @@ computeLDSQuarterReadVGPRs(MMAIntrinsic intrinsic, int64_t subgroupM,
                             int64_t lhsBits, int64_t rhsBits);
 
 //===----------------------------------------------------------------------===//
+// Index/Address Overhead
+//===----------------------------------------------------------------------===//
+
+/// Estimate the VGPR overhead from index/address computations.
+///
+/// This is an approximate model based on empirical observation. The overhead
+/// includes thread identification, global load base addresses, LDS base
+/// addresses, loop control variables, copy phase decomposition indices, and
+/// an empirical compiler overhead for LLVM register allocator inefficiency.
+///
+/// The model produces ~41 VGPRs for a reference RDNA4 configuration (64x64
+/// subgroup, K=64, 16 subgroups). Empirical ISA measurement shows ~48. The
+/// gap is attributed to compiler register allocation decisions not captured
+/// by the structural model.
+///
+/// |numLoadOperands|: number of distinct load operands (typically 2: LHS+RHS).
+/// |numKQuarters|: number of K quarters in the pingpong schedule (K/mmaK/4).
+/// |splitCopy|: whether the copy phase uses per-dimension index decomposition.
+int64_t computeIndexOverheadVGPRs(int64_t numLoadOperands, int64_t numKQuarters,
+                                  bool splitCopy);
+
+//===----------------------------------------------------------------------===//
+// Peak VGPR Usage
+//===----------------------------------------------------------------------===//
+
+/// Peak VGPR usage summary for a quarter-K pingpong schedule.
+struct PeakVGPRUsage {
+  int64_t totalVGPRs; /// Peak VGPR count across all schedule phases.
+  int64_t headroom;    /// Available - peak (positive = fits, negative = spills).
+  bool spills;         /// Whether totalVGPRs exceeds available budget.
+};
+
+/// Compute peak VGPR usage for the quarter-K pingpong schedule.
+///
+/// The peak depends on the schedule variant:
+///
+/// **Original schedule**: The peak phase has global load staging and 2
+/// simultaneous quarter reads (q_i and q_{i+1}) all live at once:
+///   peak = acc + GL_LHS + GL_RHS + 2*(qLHS + qRHS) + index
+///
+/// **Early-write schedule**: Global load staging VGPRs are consumed (written
+/// to LDS) before the second quarter read, so only 1 quarter is live at peak:
+///   peak = acc + GL_LHS + GL_RHS + 1*(qLHS + qRHS) + index
+///
+/// |earlyWrite|: true for the early-write schedule variant.
+PeakVGPRUsage computePeakVGPRUsage(int64_t accumulatorVGPRs,
+                                    GlobalLoadVGPRs globalLoadVGPRs,
+                                    LDSQuarterReadVGPRs quarterReadVGPRs,
+                                    int64_t indexOverheadVGPRs,
+                                    int64_t availableVGPRs, bool earlyWrite);
+
+//===----------------------------------------------------------------------===//
 // LDS Allocation
 //===----------------------------------------------------------------------===//
 
