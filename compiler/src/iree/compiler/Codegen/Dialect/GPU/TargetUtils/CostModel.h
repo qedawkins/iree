@@ -110,6 +110,36 @@ GlobalLoadVGPRs computeGlobalLoadVGPRs(int64_t lhsTileElements,
                                         int64_t elementBits);
 
 //===----------------------------------------------------------------------===//
+// LDS Quarter Read Budget
+//===----------------------------------------------------------------------===//
+
+/// VGPR cost of reading one quarter of the K tile from LDS.
+///
+/// During the quarter-K pingpong schedule, each quarter reads a slice of the
+/// LHS and RHS operands from LDS into registers before feeding them to MMA
+/// instructions. These registers are live only during the quarter's compute
+/// phase.
+struct LDSQuarterReadVGPRs {
+  int64_t lhsVGPRs; /// VGPRs per thread for one quarter's LHS reads.
+  int64_t rhsVGPRs; /// VGPRs per thread for one quarter's RHS reads.
+};
+
+/// Compute the VGPRs needed for LDS quarter reads of MMA operands.
+///
+/// For each quarter of the K tile:
+///   lhsTiles = (subgroupM / mmaM) * (quarterK / mmaK)
+///   rhsTiles = (quarterK / mmaK) * (subgroupN / mmaN)
+///   lhsVGPRs = lhsTiles * computeMMAOperandVGPRs(lhsLayout, lhsBits)
+///   rhsVGPRs = rhsTiles * computeMMAOperandVGPRs(rhsLayout, rhsBits)
+///
+/// Returns std::nullopt if subgroup or quarter dimensions are not evenly
+/// divisible by the MMA tile dimensions.
+std::optional<LDSQuarterReadVGPRs>
+computeLDSQuarterReadVGPRs(MMAIntrinsic intrinsic, int64_t subgroupM,
+                            int64_t subgroupN, int64_t quarterK,
+                            int64_t lhsBits, int64_t rhsBits);
+
+//===----------------------------------------------------------------------===//
 // LDS Allocation
 //===----------------------------------------------------------------------===//
 

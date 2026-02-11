@@ -99,6 +99,39 @@ std::optional<int64_t> computeAccumulatorVGPRs(MMAIntrinsic intrinsic,
 }
 
 //===----------------------------------------------------------------------===//
+// LDS Quarter Read Budget
+//===----------------------------------------------------------------------===//
+
+std::optional<LDSQuarterReadVGPRs>
+computeLDSQuarterReadVGPRs(MMAIntrinsic intrinsic, int64_t subgroupM,
+                            int64_t subgroupN, int64_t quarterK,
+                            int64_t lhsBits, int64_t rhsBits) {
+  int64_t mmaM = getMSize(intrinsic);
+  int64_t mmaN = getNSize(intrinsic);
+  int64_t mmaK = getKSize(intrinsic);
+
+  if (subgroupM % mmaM != 0 || subgroupN % mmaN != 0 || quarterK % mmaK != 0)
+    return std::nullopt;
+
+  int64_t tilesM = subgroupM / mmaM;
+  int64_t tilesN = subgroupN / mmaN;
+  int64_t tilesK = quarterK / mmaK;
+
+  MMASingleSubgroupLayout lhsLayout =
+      getSingleSubgroupLayout(intrinsic, kMMAOperandLhs);
+  MMASingleSubgroupLayout rhsLayout =
+      getSingleSubgroupLayout(intrinsic, kMMAOperandRhs);
+
+  int64_t lhsVGPRsPerTile = computeMMAOperandVGPRs(lhsLayout, lhsBits);
+  int64_t rhsVGPRsPerTile = computeMMAOperandVGPRs(rhsLayout, rhsBits);
+
+  int64_t lhsVGPRs = tilesM * tilesK * lhsVGPRsPerTile;
+  int64_t rhsVGPRs = tilesK * tilesN * rhsVGPRsPerTile;
+
+  return LDSQuarterReadVGPRs{lhsVGPRs, rhsVGPRs};
+}
+
+//===----------------------------------------------------------------------===//
 // Global Load Staging Budget
 //===----------------------------------------------------------------------===//
 
