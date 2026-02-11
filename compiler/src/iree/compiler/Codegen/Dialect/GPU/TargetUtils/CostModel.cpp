@@ -41,23 +41,26 @@ MMARegisterCost computeMMARegisterCost(MMAIntrinsic intrinsic,
 
 std::optional<VGPRBudget> computeVGPRBudget(TargetAttr target,
                                             int64_t occupancy) {
-  TargetWgpAttr wgp = target.getWgp();
-  std::optional<int32_t> vgprBits = wgp.getVgprSpaceBits();
-  if (!vgprBits || occupancy <= 0)
+  if (occupancy <= 0)
     return std::nullopt;
-
-  int64_t totalVGPRs = *vgprBits / (occupancy * 32);
-  return VGPRBudget{totalVGPRs, occupancy};
+  TargetWgpAttr wgp = target.getWgp();
+  if (std::optional<int32_t> vgprBits = wgp.getVgprSpaceBits()) {
+    int64_t totalVGPRs = *vgprBits / (occupancy * kVGPRBitWidth);
+    return VGPRBudget{totalVGPRs, occupancy};
+  }
+  return std::nullopt;
 }
 
-int64_t computeMaxOccupancyFromVGPRs(TargetAttr target, int64_t vgprsUsed) {
+std::optional<int64_t> computeMaxOccupancyFromVGPRs(TargetAttr target,
+                                                     int64_t vgprsUsed) {
+  if (vgprsUsed <= 0)
+    return std::nullopt;
   TargetWgpAttr wgp = target.getWgp();
-  std::optional<int32_t> vgprBits = wgp.getVgprSpaceBits();
-  if (!vgprBits || vgprsUsed <= 0)
-    return 0;
-
-  int64_t totalVGPRsAtOcc1 = *vgprBits / 32;
-  return totalVGPRsAtOcc1 / vgprsUsed;
+  if (std::optional<int32_t> vgprBits = wgp.getVgprSpaceBits()) {
+    int64_t totalVGPRsAtOcc1 = *vgprBits / kVGPRBitWidth;
+    return totalVGPRsAtOcc1 / vgprsUsed;
+  }
+  return std::nullopt;
 }
 
 //===----------------------------------------------------------------------===//

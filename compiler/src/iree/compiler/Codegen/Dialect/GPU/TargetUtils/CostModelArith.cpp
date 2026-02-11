@@ -12,6 +12,8 @@
 
 #include "llvm/Support/MathExtras.h"
 
+#include <cassert>
+
 namespace mlir::iree_compiler::IREE::GPU {
 
 //===----------------------------------------------------------------------===//
@@ -32,8 +34,8 @@ computeElementsPerThread(const MMASingleSubgroupLayout &layout) {
 
 int64_t computeMMAOperandVGPRs(const MMASingleSubgroupLayout &layout,
                                int64_t elementBits) {
-  int64_t elts = computeElementsPerThread(layout);
-  return llvm::divideCeil(elts * elementBits, 32);
+  int64_t elements = computeElementsPerThread(layout);
+  return llvm::divideCeil(elements * elementBits, kVGPRBitWidth);
 }
 
 //===----------------------------------------------------------------------===//
@@ -44,11 +46,12 @@ GlobalLoadVGPRs computeGlobalLoadVGPRs(int64_t lhsTileElements,
                                         int64_t rhsTileElements,
                                         int64_t numThreads,
                                         int64_t elementBits) {
-  int64_t lhsEltsPerThread = llvm::divideCeil(lhsTileElements, numThreads);
-  int64_t rhsEltsPerThread = llvm::divideCeil(rhsTileElements, numThreads);
+  assert(numThreads > 0 && "numThreads must be positive");
+  int64_t lhsPerThread = llvm::divideCeil(lhsTileElements, numThreads);
+  int64_t rhsPerThread = llvm::divideCeil(rhsTileElements, numThreads);
 
-  int64_t lhsVGPRs = llvm::divideCeil(lhsEltsPerThread * elementBits, 32);
-  int64_t rhsVGPRs = llvm::divideCeil(rhsEltsPerThread * elementBits, 32);
+  int64_t lhsVGPRs = llvm::divideCeil(lhsPerThread * elementBits, kVGPRBitWidth);
+  int64_t rhsVGPRs = llvm::divideCeil(rhsPerThread * elementBits, kVGPRBitWidth);
 
   return GlobalLoadVGPRs{lhsVGPRs, rhsVGPRs};
 }

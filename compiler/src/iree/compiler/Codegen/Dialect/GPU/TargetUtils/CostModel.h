@@ -12,6 +12,9 @@
 
 namespace mlir::iree_compiler::IREE::GPU {
 
+/// Bitwidth of a single VGPR on AMD GPUs (32-bit scalar registers).
+static constexpr int64_t kVGPRBitWidth = 32;
+
 //===----------------------------------------------------------------------===//
 // MMA Register Cost
 //===----------------------------------------------------------------------===//
@@ -19,7 +22,7 @@ namespace mlir::iree_compiler::IREE::GPU {
 /// Compute the number of 32-bit VGPRs each thread needs to hold one MMA
 /// operand, given the operand's subgroup layout and element bitwidth.
 ///
-/// VGPRs = ceil(elementsPerThread * elementBits / 32), where
+/// VGPRs = ceil(elementsPerThread * elementBits / kVGPRBitWidth), where
 /// elementsPerThread = product(layout.outer) * product(layout.element).
 int64_t computeMMAOperandVGPRs(const MMASingleSubgroupLayout &layout,
                                int64_t elementBits);
@@ -47,22 +50,25 @@ MMARegisterCost computeMMARegisterCost(MMAIntrinsic intrinsic,
 
 /// VGPR budget for a single wave at a given occupancy level.
 struct VGPRBudget {
-  int64_t totalVGPRs;  /// Total 32-bit VGPRs available per wave.
+  int64_t totalVGPRs;  /// 32-bit VGPRs available per thread at this occupancy.
   int64_t occupancy;    /// Occupancy level (waves per SIMD).
 };
 
 /// Compute the VGPR budget per wave for the given target and occupancy.
 ///
-/// Formula: totalVGPRs = vgpr_space_bits / (occupancy * 32)
+/// Formula: totalVGPRs = vgpr_space_bits / (occupancy * kVGPRBitWidth)
 ///
 /// Returns std::nullopt if the target doesn't have vgpr_space_bits populated.
 std::optional<VGPRBudget> computeVGPRBudget(TargetAttr target,
                                             int64_t occupancy);
 
 /// Compute the maximum occupancy (waves per SIMD) that can be achieved with
-/// the given VGPR usage per wave. Returns 0 if the target doesn't have
-/// vgpr_space_bits populated or if vgprsUsed is zero.
-int64_t computeMaxOccupancyFromVGPRs(TargetAttr target, int64_t vgprsUsed);
+/// the given VGPR usage per wave.
+///
+/// Returns std::nullopt if the target doesn't have vgpr_space_bits populated
+/// or if vgprsUsed is zero.
+std::optional<int64_t> computeMaxOccupancyFromVGPRs(TargetAttr target,
+                                                     int64_t vgprsUsed);
 
 //===----------------------------------------------------------------------===//
 // Accumulator Budget
@@ -98,11 +104,11 @@ struct GlobalLoadVGPRs {
 ///
 /// For each operand tile:
 ///   elementsPerThread = ceil(tileElements / numThreads)
-///   vgprs = ceil(elementsPerThread * elementBits / 32)
+///   vgprs = ceil(elementsPerThread * elementBits / kVGPRBitWidth)
 ///
 /// |lhsTileElements|: M * K elements in the LHS tile.
 /// |rhsTileElements|: K * N elements in the RHS tile.
-/// |numThreads|: total threads per workgroup.
+/// |numThreads|: total threads per workgroup. Must be > 0.
 /// |elementBits|: bitwidth of input data type (e.g., 16 for f16).
 GlobalLoadVGPRs computeGlobalLoadVGPRs(int64_t lhsTileElements,
                                         int64_t rhsTileElements,
