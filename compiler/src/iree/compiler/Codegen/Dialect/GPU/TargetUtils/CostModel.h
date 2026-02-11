@@ -262,6 +262,93 @@ int64_t computeMaxBufferDepth(int64_t lhsTileElements,
                               int64_t rhsTileElements, int64_t elementBytes,
                               int64_t maxLDSBytes);
 
+//===----------------------------------------------------------------------===//
+// VGPR Budget Analysis (phase-by-phase liveness)
+//===----------------------------------------------------------------------===//
+
+/// VGPR liveness snapshot at a specific schedule phase.
+///
+/// Each field represents a category of VGPRs that are live (allocated) during
+/// this phase of the quarter-K pingpong schedule.
+struct PhaseVGPRLiveness {
+  const char *phaseName;  /// Human-readable phase identifier.
+  int64_t accumulator;    /// Accumulator VGPRs live in this phase.
+  int64_t globalLoadLHS;  /// Global load LHS staging VGPRs.
+  int64_t globalLoadRHS;  /// Global load RHS staging VGPRs.
+  int64_t ldsReadLHS;     /// LDS-read LHS operand VGPRs.
+  int64_t ldsReadRHS;     /// LDS-read RHS operand VGPRs.
+  int64_t indexOverhead;  /// Index/address computation overhead.
+
+  /// Total VGPRs live at this phase.
+  int64_t total() const {
+    return accumulator + globalLoadLHS + globalLoadRHS + ldsReadLHS +
+           ldsReadRHS + indexOverhead;
+  }
+};
+
+/// Complete VGPR budget analysis with phase-by-phase liveness for the
+/// quarter-K pingpong schedule.
+///
+/// This provides the detailed breakdown needed to understand *why* a
+/// configuration spills: which VGPR categories are live at each phase,
+/// which phase is the bottleneck, and how much headroom exists.
+struct VGPRBudgetAnalysis {
+  //--- Per-category base costs ---//
+  int64_t accumulatorVGPRs;      /// Total accumulator VGPRs per thread.
+  int64_t globalLoadLHSVGPRs;   /// Global load staging for LHS.
+  int64_t globalLoadRHSVGPRs;   /// Global load staging for RHS.
+  int64_t ldsReadLHSPerQuarter; /// LDS-read LHS per quarter.
+  int64_t ldsReadRHSPerQuarter; /// LDS-read RHS per quarter.
+  int64_t indexOverheadVGPRs;   /// Index/address overhead.
+
+  //--- Phase-by-phase liveness ---//
+  SmallVector<PhaseVGPRLiveness> phases;
+
+  //--- Hardware budget ---//
+  int64_t availableVGPRs;    /// ArchVGPR budget per wave.
+  int64_t availableAccVGPRs; /// AccVGPR budget per wave (CDNA only, 0 on RDNA).
+  bool hasAccVGPR;           /// Whether target has separate AccVGPR file.
+
+  //--- Computed properties ---//
+
+  /// Returns the phase with the highest total VGPR usage.
+  const PhaseVGPRLiveness &peakPhase() const;
+
+  /// Peak total VGPR usage across all schedule phases.
+  int64_t peakVGPRs() const;
+
+  /// Peak ArchVGPR usage (excludes accumulators if hasAccVGPR).
+  /// On CDNA: accumulators use AccVGPRs and don't count against ArchVGPR.
+  /// On RDNA: same as peakVGPRs().
+  int64_t peakArchVGPRs() const;
+
+  /// ArchVGPR headroom: availableVGPRs - peakArchVGPRs (or peakVGPRs on RDNA).
+  /// Positive = fits, negative = spills.
+  int64_t headroom() const;
+
+  /// AccVGPR headroom (CDNA only): availableAccVGPRs - accumulatorVGPRs.
+  int64_t accHeadroom() const;
+
+  /// Whether peak VGPRs exceed available budget.
+  bool willSpill() const;
+};
+
+/// Build a complete VGPR budget analysis with phase-by-phase liveness.
+///
+/// Takes pre-computed per-category VGPR costs (from computeAccumulatorVGPRs,
+/// computeGlobalLoadVGPRs, computeLDSQuarterReadVGPRs, etc.) and builds the
+/// phase-by-phase liveness table for the quarter-K pingpong schedule.
+///
+/// Supports 4-quarter (8 phases), 2-quarter (4 phases), and 1-quarter (2
+/// phases) schedules, in both original and early-write variants.
+///
+/// This is a pure arithmetic function with no dialect dependencies.
+VGPRBudgetAnalysis buildVGPRBudgetAnalysis(
+    int64_t accumulatorVGPRs, GlobalLoadVGPRs globalLoadVGPRs,
+    LDSQuarterReadVGPRs quarterReadVGPRs, int64_t indexOverheadVGPRs,
+    int64_t availableVGPRs, int64_t numQuarters, bool earlyWrite,
+    bool hasAccVGPR = false, int64_t availableAccVGPRs = 0);
+
 } // namespace mlir::iree_compiler::IREE::GPU
 
 #endif // IREE_COMPILER_CODEGEN_DIALECT_GPU_TARGETUTILS_COSTMODEL_H_

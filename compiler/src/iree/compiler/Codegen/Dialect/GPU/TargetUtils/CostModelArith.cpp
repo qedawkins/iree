@@ -153,6 +153,170 @@ int64_t computeMaxBufferDepth(int64_t lhsTileElements,
 }
 
 //===----------------------------------------------------------------------===//
+// VGPR Budget Analysis (phase-by-phase liveness)
+//===----------------------------------------------------------------------===//
+
+const PhaseVGPRLiveness &VGPRBudgetAnalysis::peakPhase() const {
+  assert(!phases.empty() && "no phases in budget analysis");
+  const PhaseVGPRLiveness *peak = &phases[0];
+  for (const PhaseVGPRLiveness &phase : phases) {
+    if (phase.total() > peak->total())
+      peak = &phase;
+  }
+  return *peak;
+}
+
+int64_t VGPRBudgetAnalysis::peakVGPRs() const { return peakPhase().total(); }
+
+int64_t VGPRBudgetAnalysis::peakArchVGPRs() const {
+  if (hasAccVGPR) {
+    // On CDNA: accumulators use AccVGPRs, not ArchVGPRs.
+    const PhaseVGPRLiveness &peak = peakPhase();
+    return peak.total() - peak.accumulator;
+  }
+  return peakVGPRs();
+}
+
+int64_t VGPRBudgetAnalysis::headroom() const {
+  if (hasAccVGPR)
+    return availableVGPRs - peakArchVGPRs();
+  return availableVGPRs - peakVGPRs();
+}
+
+int64_t VGPRBudgetAnalysis::accHeadroom() const {
+  if (hasAccVGPR)
+    return availableAccVGPRs - accumulatorVGPRs;
+  return 0;
+}
+
+bool VGPRBudgetAnalysis::willSpill() const {
+  if (hasAccVGPR)
+    return headroom() < 0 || accHeadroom() < 0;
+  return headroom() < 0;
+}
+
+/// Build the 8-phase liveness table for the 4-quarter original schedule.
+static SmallVector<PhaseVGPRLiveness>
+buildPhaseLiveness4QOriginal(int64_t acc, int64_t glL, int64_t glR,
+                             int64_t qL, int64_t qR, int64_t idx,
+                             int64_t simultaneousQuarters) {
+  return {
+      // P1: GL-LHS + LDS-read q0.
+      {"P1: GL-LHS + LDS-read q0", acc, glL, 0, qL, qR, idx},
+      // P2: MFMA q0 (q0 reads consumed).
+      {"P2: MFMA q0", acc, glL, 0, 0, 0, idx},
+      // P3: GL-RHS + LDS-read q1.
+      {"P3: GL-RHS + LDS-read q1", acc, glL, glR, qL, qR, idx},
+      // P4: MFMA q1 (q1 reads consumed).
+      {"P4: MFMA q1", acc, glL, glR, 0, 0, idx},
+      // P5: LDS-read q2+q3 simultaneously (PEAK).
+      {"P5: LDS-read q2+q3 (PEAK)", acc, glL, glR,
+       qL * simultaneousQuarters, qR * simultaneousQuarters, idx},
+      // P6: MFMA q2 (q3 still live).
+      {"P6: MFMA q2 (q3 live)", acc, glL, glR, qL, qR, idx},
+      // P7: LDS-write (GL regs consumed).
+      {"P7: LDS-write (GL consumed)", acc, 0, 0, qL, qR, idx},
+      // P8: MFMA q3 (q3 consumed).
+      {"P8: MFMA q3", acc, 0, 0, 0, 0, idx},
+  };
+}
+
+/// Build the 8-phase liveness table for the 4-quarter early-write schedule.
+static SmallVector<PhaseVGPRLiveness>
+buildPhaseLiveness4QEarlyWrite(int64_t acc, int64_t glL, int64_t glR,
+                               int64_t qL, int64_t qR, int64_t idx) {
+  return {
+      // P1: GL-LHS + LDS-read q0.
+      {"P1: GL-LHS + LDS-read q0", acc, glL, 0, qL, qR, idx},
+      // P2: MFMA q0.
+      {"P2: MFMA q0", acc, glL, 0, 0, 0, idx},
+      // P3: GL-RHS + LDS-read q1.
+      {"P3: GL-RHS + LDS-read q1", acc, glL, glR, qL, qR, idx},
+      // P4: MFMA q1.
+      {"P4: MFMA q1", acc, glL, glR, 0, 0, idx},
+      // P5: LDS-write-LHS + LDS-read q2 (GL-LHS consumed).
+      {"P5: LDS-write-LHS + LDS-read q2", acc, 0, glR, qL, qR, idx},
+      // P6: MFMA q2 + LDS-write-RHS + LDS-read q3 (GL-RHS consumed).
+      {"P6: MFMA q2 + LDS-write-RHS + LDS-read q3", acc, 0, 0, qL, qR, idx},
+      // P7: MFMA q3.
+      {"P7: MFMA q3", acc, 0, 0, 0, 0, idx},
+      // P8: structural.
+      {"P8: structural", acc, 0, 0, 0, 0, idx},
+  };
+}
+
+/// Build the 4-phase liveness table for the 2-quarter schedule.
+static SmallVector<PhaseVGPRLiveness>
+buildPhaseLiveness2Q(int64_t acc, int64_t glL, int64_t glR, int64_t qL,
+                     int64_t qR, int64_t idx) {
+  return {
+      // P1: GL-LHS+RHS + LDS-read q0.
+      {"P1: GL + LDS-read q0", acc, glL, glR, qL, qR, idx},
+      // P2: MFMA q0 (q0 consumed, GL still live).
+      {"P2: MFMA q0", acc, glL, glR, 0, 0, idx},
+      // P3: LDS-write + LDS-read q1 (GL consumed).
+      {"P3: LDS-write + LDS-read q1", acc, 0, 0, qL, qR, idx},
+      // P4: MFMA q1 (q1 consumed).
+      {"P4: MFMA q1", acc, 0, 0, 0, 0, idx},
+  };
+}
+
+/// Build the 2-phase liveness table for a 1-quarter (no-pingpong) schedule.
+static SmallVector<PhaseVGPRLiveness>
+buildPhaseLiveness1Q(int64_t acc, int64_t glL, int64_t glR, int64_t qL,
+                     int64_t qR, int64_t idx) {
+  return {
+      // P1: GL + LDS-read q0.
+      {"P1: GL + LDS-read q0", acc, glL, glR, qL, qR, idx},
+      // P2: MFMA q0 + LDS-write.
+      {"P2: MFMA q0 + LDS-write", acc, 0, 0, 0, 0, idx},
+  };
+}
+
+VGPRBudgetAnalysis buildVGPRBudgetAnalysis(
+    int64_t accumulatorVGPRs, GlobalLoadVGPRs globalLoadVGPRs,
+    LDSQuarterReadVGPRs quarterReadVGPRs, int64_t indexOverheadVGPRs,
+    int64_t availableVGPRs, int64_t numQuarters, bool earlyWrite,
+    bool hasAccVGPR, int64_t availableAccVGPRs) {
+  int64_t glL = globalLoadVGPRs.lhsVGPRs;
+  int64_t glR = globalLoadVGPRs.rhsVGPRs;
+  int64_t qL = quarterReadVGPRs.lhsVGPRs;
+  int64_t qR = quarterReadVGPRs.rhsVGPRs;
+  int64_t acc = accumulatorVGPRs;
+  int64_t idx = indexOverheadVGPRs;
+
+  // Build the phase-by-phase liveness table.
+  SmallVector<PhaseVGPRLiveness> phases;
+  if (numQuarters >= 4) {
+    if (earlyWrite) {
+      phases = buildPhaseLiveness4QEarlyWrite(acc, glL, glR, qL, qR, idx);
+    } else {
+      // Default: 2 simultaneous quarter reads at peak.
+      phases =
+          buildPhaseLiveness4QOriginal(acc, glL, glR, qL, qR, idx, /*n=*/2);
+    }
+  } else if (numQuarters == 2) {
+    phases = buildPhaseLiveness2Q(acc, glL, glR, qL, qR, idx);
+  } else {
+    // 1 quarter or fallback.
+    phases = buildPhaseLiveness1Q(acc, glL, glR, qL, qR, idx);
+  }
+
+  VGPRBudgetAnalysis result;
+  result.accumulatorVGPRs = accumulatorVGPRs;
+  result.globalLoadLHSVGPRs = glL;
+  result.globalLoadRHSVGPRs = glR;
+  result.ldsReadLHSPerQuarter = qL;
+  result.ldsReadRHSPerQuarter = qR;
+  result.indexOverheadVGPRs = idx;
+  result.phases = std::move(phases);
+  result.availableVGPRs = availableVGPRs;
+  result.availableAccVGPRs = availableAccVGPRs;
+  result.hasAccVGPR = hasAccVGPR;
+  return result;
+}
+
+//===----------------------------------------------------------------------===//
 // Pipelined Burst Model
 //===----------------------------------------------------------------------===//
 

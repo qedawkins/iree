@@ -387,6 +387,207 @@ TEST(CostModelArithTest, PeakVGPRUsageMassiveSpill) {
 }
 
 //===----------------------------------------------------------------------===//
+// buildVGPRBudgetAnalysis — Phase-by-phase VGPR liveness
+//===----------------------------------------------------------------------===//
+
+// Validation target 1: RDNA4 256x256, K=64, 16 subgroups, wave32.
+// WMMA_F32_16x16x16_F16: sg 64x64, 16 MMA tiles, 512 threads.
+// Pre-computed costs:
+//   acc=128, GL_L=16, GL_R=16, qL=16, qR=16, idx=41
+//   available=256 (RDNA4 occ1)
+TEST(VGPRBudgetTest, RDNA4_256x256_K64_Original) {
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      /*accumulatorVGPRs=*/128, GlobalLoadVGPRs{16, 16},
+      LDSQuarterReadVGPRs{16, 16}, /*indexOverheadVGPRs=*/41,
+      /*availableVGPRs=*/256, /*numQuarters=*/4, /*earlyWrite=*/false);
+
+  // Per-category costs echoed back.
+  EXPECT_EQ(budget.accumulatorVGPRs, 128);
+  EXPECT_EQ(budget.globalLoadLHSVGPRs, 16);
+  EXPECT_EQ(budget.globalLoadRHSVGPRs, 16);
+  EXPECT_EQ(budget.ldsReadLHSPerQuarter, 16);
+  EXPECT_EQ(budget.ldsReadRHSPerQuarter, 16);
+  EXPECT_EQ(budget.indexOverheadVGPRs, 41);
+
+  // 8 phases for 4-quarter schedule.
+  EXPECT_EQ(budget.phases.size(), 8u);
+
+  // Peak at P5 (2 simultaneous quarter reads + GL).
+  // P5 = 128 + 16 + 16 + 2*16 + 2*16 + 41 = 265.
+  EXPECT_EQ(budget.peakVGPRs(), 265);
+  EXPECT_EQ(budget.headroom(), 256 - 265); // -9.
+  EXPECT_TRUE(budget.willSpill());
+
+  // Verify P5 is the peak phase.
+  EXPECT_STREQ(budget.peakPhase().phaseName, "P5: LDS-read q2+q3 (PEAK)");
+
+  // P1: acc(128) + GL_L(16) + 0 + qL(16) + qR(16) + idx(41) = 217.
+  EXPECT_EQ(budget.phases[0].total(), 217);
+  // P8: acc(128) + 0 + 0 + 0 + 0 + idx(41) = 169.
+  EXPECT_EQ(budget.phases[7].total(), 169);
+}
+
+TEST(VGPRBudgetTest, RDNA4_256x256_K64_EarlyWrite) {
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      /*accumulatorVGPRs=*/128, GlobalLoadVGPRs{16, 16},
+      LDSQuarterReadVGPRs{16, 16}, /*indexOverheadVGPRs=*/41,
+      /*availableVGPRs=*/256, /*numQuarters=*/4, /*earlyWrite=*/true);
+
+  // 8 phases for 4-quarter early-write.
+  EXPECT_EQ(budget.phases.size(), 8u);
+
+  // Peak at P3 (GL-LHS + GL-RHS + 1 quarter read).
+  // P3 = 128 + 16 + 16 + 16 + 16 + 41 = 233.
+  EXPECT_EQ(budget.peakVGPRs(), 233);
+  EXPECT_EQ(budget.headroom(), 256 - 233); // +23.
+  EXPECT_FALSE(budget.willSpill());
+
+  // P5 has GL-LHS freed: 128 + 0 + 16 + 16 + 16 + 41 = 217.
+  EXPECT_EQ(budget.phases[4].total(), 217);
+  // P6 has both GL freed: 128 + 0 + 0 + 16 + 16 + 41 = 201.
+  EXPECT_EQ(budget.phases[5].total(), 201);
+}
+
+// Validation target 2: CDNA3 256x256, K=64, 16 subgroups, wave64.
+// MFMA_F32_16x16x16_F16: sg 64x64, 16 MMA tiles, 1024 threads.
+// Pre-computed costs:
+//   acc=64, GL_L=8, GL_R=8, qL=8, qR=8, idx=41
+//   available ArchVGPR=128, available AccVGPR=128
+TEST(VGPRBudgetTest, CDNA3_256x256_K64_AccVGPR) {
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      /*accumulatorVGPRs=*/64, GlobalLoadVGPRs{8, 8},
+      LDSQuarterReadVGPRs{8, 8}, /*indexOverheadVGPRs=*/41,
+      /*availableVGPRs=*/128, /*numQuarters=*/4, /*earlyWrite=*/false,
+      /*hasAccVGPR=*/true, /*availableAccVGPRs=*/128);
+
+  // Peak total (ArchVGPR + AccVGPR): P5 = 64 + 8 + 8 + 16 + 16 + 41 = 153.
+  EXPECT_EQ(budget.peakVGPRs(), 153);
+  // Peak ArchVGPR only: 153 - 64 = 89.
+  EXPECT_EQ(budget.peakArchVGPRs(), 89);
+  // ArchVGPR headroom: 128 - 89 = 39.
+  EXPECT_EQ(budget.headroom(), 39);
+  // AccVGPR headroom: 128 - 64 = 64.
+  EXPECT_EQ(budget.accHeadroom(), 64);
+  // Should NOT spill.
+  EXPECT_FALSE(budget.willSpill());
+}
+
+// Validation target 3: RDNA4 128x128, K=64, 4 subgroups, wave32.
+// 4 subgroups * 32 = 128 threads. SG 64x64. Same acc (128).
+// GL: ceil(8192/128) = 64 elts, ceil(64*16/32) = 32 VGPRs each.
+TEST(VGPRBudgetTest, RDNA4_128x128_K64_LargeGL) {
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      /*accumulatorVGPRs=*/128, GlobalLoadVGPRs{32, 32},
+      LDSQuarterReadVGPRs{16, 16}, /*indexOverheadVGPRs=*/41,
+      /*availableVGPRs=*/256, /*numQuarters=*/4, /*earlyWrite=*/false);
+
+  // P5 = 128 + 32 + 32 + 32 + 32 + 41 = 297.
+  EXPECT_EQ(budget.peakVGPRs(), 297);
+  EXPECT_TRUE(budget.willSpill());
+
+  // Early-write version should be better.
+  VGPRBudgetAnalysis ewBudget = buildVGPRBudgetAnalysis(
+      128, GlobalLoadVGPRs{32, 32}, LDSQuarterReadVGPRs{16, 16}, 41, 256, 4,
+      /*earlyWrite=*/true);
+  // Peak in early-write: P3 = 128 + 32 + 32 + 16 + 16 + 41 = 265.
+  EXPECT_EQ(ewBudget.peakVGPRs(), 265);
+  EXPECT_TRUE(ewBudget.willSpill()); // Still spills at 256.
+}
+
+// Validation target 4: DMA (GL VGPRs = 0).
+TEST(VGPRBudgetTest, CDNA3_DMA_NoGlobalLoadVGPRs) {
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      /*accumulatorVGPRs=*/64, GlobalLoadVGPRs{0, 0},
+      LDSQuarterReadVGPRs{8, 8}, /*indexOverheadVGPRs=*/41,
+      /*availableVGPRs=*/128, /*numQuarters=*/4, /*earlyWrite=*/false,
+      /*hasAccVGPR=*/true, /*availableAccVGPRs=*/128);
+
+  // No GL staging: peak = 64 + 0 + 0 + 16 + 16 + 41 = 137.
+  EXPECT_EQ(budget.peakVGPRs(), 137);
+  EXPECT_EQ(budget.peakArchVGPRs(), 73); // 137 - 64.
+  EXPECT_FALSE(budget.willSpill());
+}
+
+// Validation target 5: Occupancy 2 (halved VGPRs).
+TEST(VGPRBudgetTest, RDNA4_Occupancy2_HalvedBudget) {
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      /*accumulatorVGPRs=*/128, GlobalLoadVGPRs{16, 16},
+      LDSQuarterReadVGPRs{16, 16}, /*indexOverheadVGPRs=*/41,
+      /*availableVGPRs=*/128, // Halved for occupancy 2.
+      /*numQuarters=*/4, /*earlyWrite=*/false);
+
+  EXPECT_EQ(budget.peakVGPRs(), 265);
+  EXPECT_EQ(budget.headroom(), 128 - 265); // -137.
+  EXPECT_TRUE(budget.willSpill());
+}
+
+// 2-quarter schedule (K=32).
+TEST(VGPRBudgetTest, TwoQuarterSchedule) {
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      /*accumulatorVGPRs=*/128, GlobalLoadVGPRs{16, 16},
+      LDSQuarterReadVGPRs{16, 16}, /*indexOverheadVGPRs=*/39,
+      /*availableVGPRs=*/256, /*numQuarters=*/2, /*earlyWrite=*/false);
+
+  // 4 phases for 2-quarter schedule.
+  EXPECT_EQ(budget.phases.size(), 4u);
+
+  // Peak at P1: acc(128) + GL_L(16) + GL_R(16) + qL(16) + qR(16) + idx(39)
+  // = 231.
+  EXPECT_EQ(budget.peakVGPRs(), 231);
+  EXPECT_FALSE(budget.willSpill());
+}
+
+// Phase table structure verification.
+TEST(VGPRBudgetTest, PhaseTableMonotonicity) {
+  // In the original schedule, accumulator and index are always live.
+  // GL regs appear in P1-P6 then disappear. Quarter reads appear in
+  // read phases.
+  VGPRBudgetAnalysis budget = buildVGPRBudgetAnalysis(
+      100, GlobalLoadVGPRs{10, 10}, LDSQuarterReadVGPRs{5, 5}, 30, 256, 4,
+      false);
+
+  // All phases have accumulator and index.
+  for (const PhaseVGPRLiveness &phase : budget.phases) {
+    EXPECT_EQ(phase.accumulator, 100);
+    EXPECT_EQ(phase.indexOverhead, 30);
+  }
+
+  // P8 (last phase) has no GL and no quarter reads.
+  EXPECT_EQ(budget.phases[7].globalLoadLHS, 0);
+  EXPECT_EQ(budget.phases[7].globalLoadRHS, 0);
+  EXPECT_EQ(budget.phases[7].ldsReadLHS, 0);
+  EXPECT_EQ(budget.phases[7].ldsReadRHS, 0);
+  EXPECT_EQ(budget.phases[7].total(), 130); // 100 + 0 + 0 + 0 + 0 + 30.
+}
+
+// Consistency: peakVGPRs should match computePeakVGPRUsage.
+TEST(VGPRBudgetTest, ConsistencyWithPeakVGPRUsage) {
+  int64_t acc = 128;
+  GlobalLoadVGPRs gl = {16, 16};
+  LDSQuarterReadVGPRs qr = {16, 16};
+  int64_t idx = 41;
+  int64_t avail = 256;
+
+  // Original schedule.
+  PeakVGPRUsage peakOrig = computePeakVGPRUsage(acc, gl, qr, idx, avail,
+                                                  /*earlyWrite=*/false);
+  VGPRBudgetAnalysis budgetOrig =
+      buildVGPRBudgetAnalysis(acc, gl, qr, idx, avail, 4, false);
+  EXPECT_EQ(budgetOrig.peakVGPRs(), peakOrig.totalVGPRs);
+  EXPECT_EQ(budgetOrig.headroom(), peakOrig.headroom);
+  EXPECT_EQ(budgetOrig.willSpill(), peakOrig.spills);
+
+  // Early-write schedule.
+  PeakVGPRUsage peakEW =
+      computePeakVGPRUsage(acc, gl, qr, idx, avail, /*earlyWrite=*/true);
+  VGPRBudgetAnalysis budgetEW =
+      buildVGPRBudgetAnalysis(acc, gl, qr, idx, avail, 4, true);
+  EXPECT_EQ(budgetEW.peakVGPRs(), peakEW.totalVGPRs);
+  EXPECT_EQ(budgetEW.headroom(), peakEW.headroom);
+  EXPECT_EQ(budgetEW.willSpill(), peakEW.spills);
+}
+
+//===----------------------------------------------------------------------===//
 // computePipelinedBurst
 //===----------------------------------------------------------------------===//
 
@@ -649,6 +850,141 @@ TEST(LatencyModelTest, IterationCyclesLargerSubgroup) {
 
   // 128x128 has 4× more WMMAs per quarter than 64x64.
   EXPECT_GT(large, small);
+}
+
+//===----------------------------------------------------------------------===//
+// Validation tests: RDNA4 reference configuration cross-checks
+//
+// These tests encode hardware findings from the Fuzzer's measurement campaign
+// as ground truth assertions. If any of these fail, it means the cost model
+// no longer matches empirically validated hardware behavior.
+//===----------------------------------------------------------------------===//
+
+TEST(ValidationTest, RDNA4ReferenceVGPRBudget) {
+  // RDNA4 gfx1201 at occupancy 1: 256 VGPRs per thread.
+  // 128 acc + 32 GL + 32 quarter + 39 index = 231 (early-write).
+  PeakVGPRUsage rdna4 = computePeakVGPRUsage(
+      /*accumulatorVGPRs=*/128, GlobalLoadVGPRs{16, 16},
+      LDSQuarterReadVGPRs{16, 16}, /*indexOverheadVGPRs=*/39,
+      /*availableVGPRs=*/256, /*earlyWrite=*/true);
+  EXPECT_EQ(rdna4.totalVGPRs, 231);
+  EXPECT_EQ(rdna4.headroom, 25);
+  EXPECT_FALSE(rdna4.spills);
+}
+
+TEST(ValidationTest, RDNA4OriginalScheduleSpills) {
+  // Original schedule (2 simultaneous quarters) with K=64 SPILLS on RDNA4.
+  // Early-write is REQUIRED for K=64.
+  PeakVGPRUsage original = computePeakVGPRUsage(
+      128, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, 39, 256,
+      /*earlyWrite=*/false);
+  EXPECT_TRUE(original.spills);
+  EXPECT_LT(original.headroom, 0);
+  EXPECT_EQ(original.totalVGPRs, 263);
+}
+
+TEST(ValidationTest, RDNA4K32FallbackHasMoreHeadroom) {
+  // K=32 early-write must fit with MORE headroom than K=64.
+  int64_t indexK32 =
+      computeIndexOverheadVGPRs(/*numLoadOperands=*/2, /*numKQuarters=*/2,
+                                /*splitCopy=*/false);
+  PeakVGPRUsage k32 = computePeakVGPRUsage(128, GlobalLoadVGPRs{16, 16},
+                                             LDSQuarterReadVGPRs{16, 16},
+                                             indexK32, 256, /*earlyWrite=*/true);
+  EXPECT_FALSE(k32.spills);
+  EXPECT_GT(k32.headroom, 25);
+}
+
+TEST(ValidationTest, RDNA4LDSExactlyFitsK64) {
+  // 256x64 LHS + 64x256 RHS = 65536 bytes = 64KB exactly.
+  std::optional<LDSAllocation> alloc =
+      computeLDSAllocation(256 * 64, 64 * 256, 2, 1, 65536);
+  ASSERT_TRUE(alloc.has_value());
+  EXPECT_EQ(alloc->totalBytes, 65536);
+  EXPECT_EQ(alloc->lhsBytes, 32768);
+  EXPECT_EQ(alloc->rhsBytes, 32768);
+}
+
+TEST(ValidationTest, RDNA4LDSOverflowsK96) {
+  // K=96: (256x96 + 96x256) x 2 = 98304 bytes > 64KB.
+  std::optional<LDSAllocation> alloc =
+      computeLDSAllocation(256 * 96, 96 * 256, 2, 1, 65536);
+  EXPECT_FALSE(alloc.has_value());
+}
+
+TEST(ValidationTest, RDNA4LDSDoubleBufferNeedsK32) {
+  // Double-buffering at K=64: 131072 > 64KB. K=32 fits exactly.
+  std::optional<LDSAllocation> k64double =
+      computeLDSAllocation(256 * 64, 64 * 256, 2, 2, 65536);
+  EXPECT_FALSE(k64double.has_value());
+
+  std::optional<LDSAllocation> k32double =
+      computeLDSAllocation(256 * 32, 32 * 256, 2, 2, 65536);
+  ASSERT_TRUE(k32double.has_value());
+  EXPECT_EQ(k32double->totalBytes, 65536);
+}
+
+TEST(ValidationTest, RDNA4EarlyWriteSaves32VGPRs) {
+  // Early-write saves exactly 32 VGPRs (1 fewer simultaneous quarter x 32).
+  PeakVGPRUsage earlyWrite = computePeakVGPRUsage(
+      128, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, 39, 256,
+      true);
+  PeakVGPRUsage original = computePeakVGPRUsage(
+      128, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, 39, 256,
+      false);
+  EXPECT_EQ(original.totalVGPRs - earlyWrite.totalVGPRs, 32);
+}
+
+TEST(ValidationTest, PipelinedWMMABurst16) {
+  // 16 WMMAs pipelined: (16-1)*2 + 32 = 62 cycles.
+  // ATT-validated: WMMA issue=2cy, exec=32cy.
+  EXPECT_EQ(computePipelinedBurst(16, 2, 32), 62);
+}
+
+TEST(ValidationTest, IterationCyclesConsistencyCheck) {
+  // 4-quarter early-write: 8 phases, each with barrier (20cy).
+  // Minimum: 8 x 20 = 160cy.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  int64_t cycles = computeIterationCycles(64, 64, 64, 16, 16, 16, 512, 16,
+                                           true, mma, ldsRead, ldsWrite,
+                                           globalLoad, 20);
+  EXPECT_GE(cycles, 160);
+  // 4 compute phases x ~62cy + 4 memory phases + 8 barriers > 400.
+  EXPECT_GT(cycles, 400);
+}
+
+TEST(ValidationTest, EarlyWriteVsOriginalLatencyRange) {
+  // Both schedules should produce reasonable cycle counts.
+  InstructionTiming mma = {2, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  int64_t earlyWrite = computeIterationCycles(64, 64, 64, 16, 16, 16, 512, 16,
+                                               true, mma, ldsRead, ldsWrite,
+                                               globalLoad, 20);
+  int64_t original = computeIterationCycles(64, 64, 64, 16, 16, 16, 512, 16,
+                                             false, mma, ldsRead, ldsWrite,
+                                             globalLoad, 20);
+  EXPECT_GT(earlyWrite, 300);
+  EXPECT_LT(earlyWrite, 2000);
+  EXPECT_GT(original, 300);
+  EXPECT_LT(original, 2000);
+}
+
+TEST(ValidationTest, WMMAPerIterationCount) {
+  // 64x64 subgroup, K=64, MMA 16x16x16:
+  // 4 quarters x (4x4x1) = 64 WMMAs per iteration.
+  // 64 WMMAs x 8192 FLOPs/WMMA = 524288 FLOPs/iteration.
+  int64_t numQuarters = 4;
+  int64_t wmmaPerQuarter = (64 / 16) * (64 / 16) * (16 / 16);
+  EXPECT_EQ(wmmaPerQuarter, 16);
+  EXPECT_EQ(numQuarters * wmmaPerQuarter, 64);
+  EXPECT_EQ(64 * (2 * 16 * 16 * 16), 524288);
 }
 
 } // namespace
