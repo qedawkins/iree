@@ -117,8 +117,14 @@ static DictionaryAttr getInstructionTimingDict(StringRef arch,
     SmallVector<NamedAttribute> attrs;
 
     // Instruction timing: {issue_cycles, exec_latency_cycles}.
+    //
+    // WMMA throughput: Measured on gfx1201 via wmma_throughput_test.hip.
+    // Dependent chain: ~25 cy/WMMA. Independent (16-deep): 1.3x faster
+    // → ~19 cy/WMMA. The WMMA execution unit cannot accept a new WMMA
+    // every 2 cycles (VALU slot rate); the effective throughput for
+    // independent back-to-back WMMAs is ~19 cycles.
     attrs.push_back(b.getNamedAttr(
-        "timing_mma", b.getDenseI32ArrayAttr({2, 32})));
+        "timing_mma", b.getDenseI32ArrayAttr({19, 32})));
     attrs.push_back(b.getNamedAttr(
         "timing_valu", b.getDenseI32ArrayAttr({2, 2})));
     attrs.push_back(b.getNamedAttr(

@@ -286,8 +286,9 @@ VGPRBudgetAnalysis buildVGPRBudgetAnalysis(
   int64_t idx = indexOverheadVGPRs;
 
   // Build the phase-by-phase liveness table.
+  // numQuarters is expected to be 1, 2, or 4 (capped by callers).
   SmallVector<PhaseVGPRLiveness> phases;
-  if (numQuarters >= 4) {
+  if (numQuarters == 4) {
     if (earlyWrite) {
       phases = buildPhaseLiveness4QEarlyWrite(acc, glL, glR, qL, qR, idx);
     } else {
