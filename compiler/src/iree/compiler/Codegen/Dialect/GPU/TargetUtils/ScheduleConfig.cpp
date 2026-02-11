@@ -152,9 +152,9 @@ deriveScheduleConfig(int64_t workgroupM, int64_t workgroupN,
 
         // Compute latency estimate.
         int64_t iterCycles = computeIterationCycles(
-            sgM, sgN, kTile, mmaM, mmaN, mmaK, numThreads, params.inputBits,
-            earlyWrite, mmaTiming, ldsReadTiming, ldsWriteTiming,
-            globalLoadTiming, barrierCycles);
+            workgroupM, workgroupN, sgM, sgN, kTile, mmaM, mmaN, mmaK,
+            numThreads, params.inputBits, earlyWrite, mmaTiming, ldsReadTiming,
+            ldsWriteTiming, globalLoadTiming, barrierCycles);
 
         // WMMAs per iteration.
         int64_t wmmaPerIter =

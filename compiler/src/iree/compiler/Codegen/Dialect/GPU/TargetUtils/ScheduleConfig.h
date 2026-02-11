@@ -172,7 +172,13 @@ PhaseTiming computePhaseTiming(const PhaseInstructionCounts &counts,
 ///
 /// Builds per-phase instruction counts for the given configuration, computes
 /// per-phase timing, and sums to get the total iteration time.
-int64_t computeIterationCycles(int64_t subgroupM, int64_t subgroupN,
+///
+/// |workgroupM|, |workgroupN|: Full workgroup tile dimensions. Used for global
+///   load instruction counts (loads are cooperative across all threads).
+/// |subgroupM|, |subgroupN|: Per-subgroup tile dimensions. Used for MMA tile
+///   counts and LDS read counts.
+int64_t computeIterationCycles(int64_t workgroupM, int64_t workgroupN,
+                               int64_t subgroupM, int64_t subgroupN,
                                int64_t kTile, int64_t mmaM, int64_t mmaN,
                                int64_t mmaK, int64_t numThreads,
                                int64_t inputBits, bool earlyWrite,

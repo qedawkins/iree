@@ -445,7 +445,8 @@ build2QSchedule(int64_t wmmaPerQuarter, int64_t glLHS, int64_t glRHS,
   };
 }
 
-int64_t computeIterationCycles(int64_t subgroupM, int64_t subgroupN,
+int64_t computeIterationCycles(int64_t workgroupM, int64_t workgroupN,
+                               int64_t subgroupM, int64_t subgroupN,
                                int64_t kTile, int64_t mmaM, int64_t mmaN,
                                int64_t mmaK, int64_t numThreads,
                                int64_t inputBits, bool earlyWrite,
@@ -460,15 +461,15 @@ int64_t computeIterationCycles(int64_t subgroupM, int64_t subgroupN,
     return 0;
   int64_t quarterK = kTile / numQuarters;
 
-  // WMMAs per quarter.
+  // WMMAs per quarter (per subgroup).
   int64_t wmmaPerQuarter =
       (subgroupM / mmaM) * (subgroupN / mmaN) * (quarterK / mmaK);
 
-  // Global loads per operand: distributed across all threads.
-  // M*K elements for LHS, K*N elements for RHS.
+  // Global loads per thread: cooperative across all threads in the workgroup.
+  // Uses workgroup-level tile dimensions, NOT subgroup.
   // GLOBAL_LOAD_B128 = 16 bytes = 128 bits.
-  int64_t lhsTileElements = subgroupM * kTile;
-  int64_t rhsTileElements = kTile * subgroupN;
+  int64_t lhsTileElements = workgroupM * kTile;
+  int64_t rhsTileElements = kTile * workgroupN;
   int64_t bytesPerLoad = 16;
   int64_t elemBytes = inputBits / 8;
   int64_t glLHS =

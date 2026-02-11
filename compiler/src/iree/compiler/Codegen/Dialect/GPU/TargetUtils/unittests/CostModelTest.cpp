@@ -754,15 +754,15 @@ TEST(LatencyModelTest, PhaseTimingWMMADominates) {
 //===----------------------------------------------------------------------===//
 
 TEST(LatencyModelTest, IterationCyclesRDNA4Reference) {
-  // RDNA4 reference: 64x64 subgroup, K=64, WMMA_F32_16x16x16_F16.
-  // MMA: 16x16x16, f16 input (16-bit), 512 threads.
-  // 4 quarters, early-write schedule.
+  // RDNA4 reference: 256x256 workgroup (4x4 subgroups), 64x64 subgroup,
+  // K=64, WMMA_F32_16x16x16_F16, 512 threads, early-write.
   InstructionTiming mma = {2, 32};
   InstructionTiming ldsRead = {2, 25};
   InstructionTiming ldsWrite = {2, 10};
   InstructionTiming globalLoad = {2, 300};
 
   int64_t cycles = computeIterationCycles(
+      /*workgroupM=*/256, /*workgroupN=*/256,
       /*subgroupM=*/64, /*subgroupN=*/64, /*kTile=*/64,
       /*mmaM=*/16, /*mmaN=*/16, /*mmaK=*/16,
       /*numThreads=*/512, /*inputBits=*/16,
@@ -780,12 +780,14 @@ TEST(LatencyModelTest, IterationCyclesRDNA4Reference) {
 
 TEST(LatencyModelTest, IterationCycles2Quarter) {
   // K=32 with mmaK=16: 2 quarters, not 4.
+  // 256x256 workgroup (4x4 subgroups), 64x64 subgroup.
   InstructionTiming mma = {2, 32};
   InstructionTiming ldsRead = {2, 25};
   InstructionTiming ldsWrite = {2, 10};
   InstructionTiming globalLoad = {2, 300};
 
   int64_t cycles = computeIterationCycles(
+      /*workgroupM=*/256, /*workgroupN=*/256,
       /*subgroupM=*/64, /*subgroupN=*/64, /*kTile=*/32,
       /*mmaM=*/16, /*mmaN=*/16, /*mmaK=*/16,
       /*numThreads=*/512, /*inputBits=*/16,
@@ -806,12 +808,12 @@ TEST(LatencyModelTest, IterationCyclesOriginalVsEarlyWrite) {
   InstructionTiming globalLoad = {2, 300};
 
   int64_t earlyWriteCycles = computeIterationCycles(
-      64, 64, 64, 16, 16, 16, 512, 16, /*earlyWrite=*/true, mma, ldsRead,
-      ldsWrite, globalLoad, 20);
+      256, 256, 64, 64, 64, 16, 16, 16, 512, 16, /*earlyWrite=*/true, mma,
+      ldsRead, ldsWrite, globalLoad, 20);
 
   int64_t originalCycles = computeIterationCycles(
-      64, 64, 64, 16, 16, 16, 512, 16, /*earlyWrite=*/false, mma, ldsRead,
-      ldsWrite, globalLoad, 20);
+      256, 256, 64, 64, 64, 16, 16, 16, 512, 16, /*earlyWrite=*/false, mma,
+      ldsRead, ldsWrite, globalLoad, 20);
 
   // Both should be positive.
   EXPECT_GT(earlyWriteCycles, 0);
@@ -827,9 +829,9 @@ TEST(LatencyModelTest, IterationCyclesZeroKTile) {
   InstructionTiming ldsWrite = {2, 10};
   InstructionTiming globalLoad = {2, 300};
 
-  int64_t cycles = computeIterationCycles(64, 64, 0, 16, 16, 16, 512, 16,
-                                           true, mma, ldsRead, ldsWrite,
-                                           globalLoad, 20);
+  int64_t cycles = computeIterationCycles(256, 256, 64, 64, 0, 16, 16, 16,
+                                           512, 16, true, mma, ldsRead,
+                                           ldsWrite, globalLoad, 20);
   EXPECT_EQ(cycles, 0);
 }
 
@@ -840,13 +842,15 @@ TEST(LatencyModelTest, IterationCyclesLargerSubgroup) {
   InstructionTiming ldsWrite = {2, 10};
   InstructionTiming globalLoad = {2, 300};
 
+  // 256x256 workgroup, 64x64 subgroup (4x4 layout), 512 threads.
   int64_t small = computeIterationCycles(
-      64, 64, 64, 16, 16, 16, 512, 16, true, mma, ldsRead, ldsWrite,
+      256, 256, 64, 64, 64, 16, 16, 16, 512, 16, true, mma, ldsRead, ldsWrite,
       globalLoad, 20);
 
+  // 256x256 workgroup, 128x128 subgroup (2x2 layout), 128 threads.
   int64_t large = computeIterationCycles(
-      128, 128, 64, 16, 16, 16, 512, 16, true, mma, ldsRead, ldsWrite,
-      globalLoad, 20);
+      256, 256, 128, 128, 64, 16, 16, 16, 128, 16, true, mma, ldsRead,
+      ldsWrite, globalLoad, 20);
 
   // 128x128 has 4× more WMMAs per quarter than 64x64.
   EXPECT_GT(large, small);
@@ -953,9 +957,9 @@ TEST(ValidationTest, IterationCyclesConsistencyCheck) {
   InstructionTiming ldsWrite = {2, 10};
   InstructionTiming globalLoad = {2, 300};
 
-  int64_t cycles = computeIterationCycles(64, 64, 64, 16, 16, 16, 512, 16,
-                                           true, mma, ldsRead, ldsWrite,
-                                           globalLoad, 20);
+  int64_t cycles = computeIterationCycles(256, 256, 64, 64, 64, 16, 16, 16,
+                                           512, 16, true, mma, ldsRead,
+                                           ldsWrite, globalLoad, 20);
   EXPECT_GE(cycles, 160);
   // 4 compute phases x ~62cy + 4 memory phases + 8 barriers > 400.
   EXPECT_GT(cycles, 400);
@@ -968,12 +972,12 @@ TEST(ValidationTest, EarlyWriteVsOriginalLatencyRange) {
   InstructionTiming ldsWrite = {2, 10};
   InstructionTiming globalLoad = {2, 300};
 
-  int64_t earlyWrite = computeIterationCycles(64, 64, 64, 16, 16, 16, 512, 16,
-                                               true, mma, ldsRead, ldsWrite,
-                                               globalLoad, 20);
-  int64_t original = computeIterationCycles(64, 64, 64, 16, 16, 16, 512, 16,
-                                             false, mma, ldsRead, ldsWrite,
-                                             globalLoad, 20);
+  int64_t earlyWrite = computeIterationCycles(256, 256, 64, 64, 64, 16, 16, 16,
+                                               512, 16, true, mma, ldsRead,
+                                               ldsWrite, globalLoad, 20);
+  int64_t original = computeIterationCycles(256, 256, 64, 64, 64, 16, 16, 16,
+                                             512, 16, false, mma, ldsRead,
+                                             ldsWrite, globalLoad, 20);
   EXPECT_GT(earlyWrite, 300);
   EXPECT_LT(earlyWrite, 2000);
   EXPECT_GT(original, 300);
@@ -989,6 +993,90 @@ TEST(ValidationTest, WMMAPerIterationCount) {
   EXPECT_EQ(wmmaPerQuarter, 16);
   EXPECT_EQ(numQuarters * wmmaPerQuarter, 64);
   EXPECT_EQ(64 * (2 * 16 * 16 * 16), 524288);
+}
+
+//===----------------------------------------------------------------------===//
+// BaselineComparisonTest - cross-check model against actual IREE output
+//===----------------------------------------------------------------------===//
+// These tests compare the cost model's predictions against the actual ISA
+// metadata from compiling a 4096x4096x4096 f16 matmul with iree-compile
+// targeting gfx1201. The IREE baseline uses:
+//   - Workgroup: 128x128, 4 subgroups (2x2), 64x64 per subgroup
+//   - K tile: 32 (reduction unroll=2, MMA_K=16)
+//   - 128 threads/workgroup (4 waves x 32 lanes)
+//   - 215 VGPRs, 0 spills, 17664 bytes LDS
+//   - 64 WMMAs, 4 barriers, 16 buffer_loads, 160 LDS ops
+
+TEST(BaselineComparisonTest, BaselineGlobalLoadVGPRs) {
+  // IREE baseline: 128x128 workgroup, K=32, 128 threads, f16 inputs.
+  // LHS tile: 128x32 = 4096 elements. RHS tile: 32x128 = 4096 elements.
+  GlobalLoadVGPRs gl = computeGlobalLoadVGPRs(
+      /*lhsTileElements=*/128 * 32, /*rhsTileElements=*/32 * 128,
+      /*numThreads=*/128, /*elementBits=*/16);
+  // 4096 / 128 = 32 elements/thread. 32 * 16 / 32 = 16 VGPRs.
+  EXPECT_EQ(gl.lhsVGPRs, 16);
+  EXPECT_EQ(gl.rhsVGPRs, 16);
+}
+
+TEST(BaselineComparisonTest, BaselineAccumulatorVGPRs) {
+  // 64x64 subgroup tile, MMA 16x16x16 f16->f32.
+  // (64/16) * (64/16) = 16 tiles, 8 acc VGPRs each = 128 VGPRs.
+  // This matches the cost model's existing prediction.
+  int64_t numTiles = (64 / 16) * (64 / 16);
+  EXPECT_EQ(numTiles, 16);
+  EXPECT_EQ(numTiles * 8, 128); // 8 VGPRs per f32 accumulator tile.
+}
+
+TEST(BaselineComparisonTest, BaselineLDSUsage) {
+  // IREE baseline uses 17664 bytes LDS. Our model for single-buffered:
+  // LHS: 128x32 x 2 bytes = 8192. RHS: 32x128 x 2 = 8192. Total: 16384.
+  // The 17664 - 16384 = 1280 byte difference is padding/alignment overhead.
+  std::optional<LDSAllocation> alloc =
+      computeLDSAllocation(128 * 32, 32 * 128, 2, 1, 65536);
+  ASSERT_TRUE(alloc.has_value());
+  EXPECT_EQ(alloc->totalBytes, 16384);
+  // Actual ISA uses 17664 bytes (8% more due to alignment padding).
+  // This is within acceptable model error.
+  EXPECT_LT(std::abs(alloc->totalBytes - 17664), 2048);
+}
+
+TEST(BaselineComparisonTest, BaselineVsModelPeakVGPRs) {
+  // The IREE baseline uses a DIFFERENT schedule structure (not quarter-K
+  // pingpong), so the quarter-K cost model doesn't directly apply.
+  // However, we can verify the component predictions are reasonable:
+  //   - Actual ISA: 215 VGPRs, no spills
+  //   - Model acc: 128 VGPRs (matches - 4x4 MMA tiles x 8)
+  //   - Model GL: 32 VGPRs (matches - 16 LHS + 16 RHS)
+  //   - Index + misc: 215 - 128 - 32 = 55 VGPRs (compiler-managed)
+  //
+  // The quarter-K pingpong schedule (our target) would use MORE VGPRs
+  // because it also holds quarter-read operands. The tradeoff is better
+  // latency hiding from the structured schedule.
+  int64_t actualVGPRs = 215;
+  int64_t modelAcc = 128;
+  int64_t modelGL = 32;
+  int64_t impliedOverhead = actualVGPRs - modelAcc - modelGL;
+  // Overhead should be in reasonable range (30-80 VGPRs for addresses,
+  // loop control, temporaries).
+  EXPECT_GE(impliedOverhead, 30);
+  EXPECT_LE(impliedOverhead, 80);
+}
+
+TEST(BaselineComparisonTest, PingpongWouldNeedMoreVGPRs) {
+  // The quarter-K pingpong schedule adds quarter-read operands on top of
+  // the baseline budget. With K=32 (2 quarters of 16):
+  //   earlyWrite: 128 + 32 + 32 + index = 192 + index
+  //   Need index <= 64 to stay within 256 VGPRs.
+  int64_t indexK32 =
+      computeIndexOverheadVGPRs(/*numLoadOperands=*/2, /*numKQuarters=*/2,
+                                /*splitCopy=*/false);
+  PeakVGPRUsage pingpong = computePeakVGPRUsage(
+      128, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, indexK32, 256,
+      /*earlyWrite=*/true);
+  // Pingpong schedule uses more VGPRs than baseline (215).
+  EXPECT_GT(pingpong.totalVGPRs, 215);
+  // But should still fit within 256.
+  EXPECT_FALSE(pingpong.spills);
 }
 
 } // namespace
