@@ -268,5 +268,122 @@ TEST(CostModelArithTest, MaxBufferDepthZeroElements) {
   EXPECT_EQ(computeMaxBufferDepth(0, 0, 2, 64 * 1024), 0);
 }
 
+//===----------------------------------------------------------------------===//
+// Stress tests: realistic RDNA4 configurations and edge cases
+//===----------------------------------------------------------------------===//
+
+TEST(CostModelArithTest, RDNA4PingpongSchedulePeakVGPRs) {
+  // Canonical RDNA4 64x64 subgroup, WMMA_F32_16x16x16_F16, 4 K quarters.
+  // This matches the reference schedule from the design doc.
+  //
+  // Accumulator: 128 VGPRs (4x4 tiles × 8 VGPRs each for f32)
+  // GL staging: 16+16 = 32 VGPRs (256×64 tile, 512 threads, f16)
+  // Quarter read: 16+16 = 32 VGPRs per quarter
+  // Index overhead: 39 VGPRs (2 operands, 4 quarters, no split)
+  // Total (original): 128 + 32 + 2*32 + 39 = 263 → SPILLS
+  // Total (early-write): 128 + 32 + 1*32 + 39 = 231 → fits in 256
+
+  PeakVGPRUsage original = computePeakVGPRUsage(
+      128, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, 39, 256,
+      /*earlyWrite=*/false);
+  EXPECT_TRUE(original.spills);
+  EXPECT_EQ(original.totalVGPRs, 263);
+
+  PeakVGPRUsage earlyWrite = computePeakVGPRUsage(
+      128, GlobalLoadVGPRs{16, 16}, LDSQuarterReadVGPRs{16, 16}, 39, 256,
+      /*earlyWrite=*/true);
+  EXPECT_FALSE(earlyWrite.spills);
+  EXPECT_EQ(earlyWrite.totalVGPRs, 231);
+  EXPECT_EQ(earlyWrite.headroom, 25);
+}
+
+TEST(CostModelArithTest, GlobalLoadVGPRsMinimum) {
+  // Minimal tile: 1 element per operand, 1 thread.
+  // 1 element × 16 bits / 32 = 1 VGPR each.
+  GlobalLoadVGPRs vgprs = computeGlobalLoadVGPRs(1, 1, 1, 16);
+  EXPECT_EQ(vgprs.lhsVGPRs, 1);
+  EXPECT_EQ(vgprs.rhsVGPRs, 1);
+}
+
+TEST(CostModelArithTest, GlobalLoadVGPRsCeilDiv) {
+  // 3 elements per thread at 16 bits: ceil(3*16/32) = ceil(1.5) = 2.
+  GlobalLoadVGPRs vgprs = computeGlobalLoadVGPRs(3, 3, 1, 16);
+  EXPECT_EQ(vgprs.lhsVGPRs, 2);
+  EXPECT_EQ(vgprs.rhsVGPRs, 2);
+}
+
+TEST(CostModelArithTest, GlobalLoadVGPRsLargeAsymmetric) {
+  // Very large tile: 512x128 LHS + 128x512 RHS, 1024 threads, f16.
+  // LHS: ceil(65536/1024)=64 elts, ceil(64*16/32)=32.
+  // RHS: same = 32.
+  GlobalLoadVGPRs vgprs = computeGlobalLoadVGPRs(512 * 128, 128 * 512, 1024,
+                                                   16);
+  EXPECT_EQ(vgprs.lhsVGPRs, 32);
+  EXPECT_EQ(vgprs.rhsVGPRs, 32);
+}
+
+TEST(CostModelArithTest, IndexOverheadManyQuarters) {
+  // 8 K quarters, 3 load operands (e.g., LHS+RHS+bias), split copy.
+  // = 1 (tid) + 6 (global) + 4 (lds+quarter offsets) + 2 (loop) + 4 (split)
+  //   + 2 (delin) + 24 (compiler) = 43.
+  int64_t overhead =
+      computeIndexOverheadVGPRs(/*numLoadOperands=*/3, /*numKQuarters=*/8,
+                                /*splitCopy=*/true);
+  EXPECT_EQ(overhead, 43);
+}
+
+TEST(CostModelArithTest, IndexOverheadMinimal) {
+  // 1 load operand, 1 K quarter, no split.
+  // = 1 (tid) + 2 (global) + 2 (lds, no quarter offsets) + 2 (loop)
+  //   + 2 (copy) + 2 (delin) + 24 (compiler) = 35.
+  int64_t overhead =
+      computeIndexOverheadVGPRs(/*numLoadOperands=*/1, /*numKQuarters=*/1,
+                                /*splitCopy=*/false);
+  EXPECT_EQ(overhead, 35);
+}
+
+TEST(CostModelArithTest, LDSAllocationMaxFit) {
+  // Exactly fills 64KB with single buffer at 2 bytes/element.
+  // Total = (16384 + 16384) * 2 = 65536 = 64KB.
+  std::optional<LDSAllocation> alloc =
+      computeLDSAllocation(16384, 16384, 2, 1, 64 * 1024);
+  ASSERT_TRUE(alloc.has_value());
+  EXPECT_EQ(alloc->totalBytes, 65536);
+}
+
+TEST(CostModelArithTest, LDSAllocationOneByteOver) {
+  // One element over 64KB: should fail.
+  std::optional<LDSAllocation> alloc =
+      computeLDSAllocation(16385, 16384, 2, 1, 64 * 1024);
+  EXPECT_FALSE(alloc.has_value());
+}
+
+TEST(CostModelArithTest, MaxBufferDepthLargeRatio) {
+  // Small tile: (64+64)*2 = 256 bytes per buffer, 64KB LDS: depth = 256.
+  EXPECT_EQ(
+      computeMaxBufferDepth(/*lhsTileElements=*/64, /*rhsTileElements=*/64,
+                            /*elementBytes=*/2, /*maxLDSBytes=*/64 * 1024),
+      256);
+}
+
+TEST(CostModelArithTest, PeakVGPRUsageZeroAccumulator) {
+  // Degenerate case: no accumulator (e.g., pure copy kernel).
+  PeakVGPRUsage usage = computePeakVGPRUsage(
+      0, GlobalLoadVGPRs{8, 8}, LDSQuarterReadVGPRs{4, 4}, 30, 256,
+      /*earlyWrite=*/true);
+  EXPECT_EQ(usage.totalVGPRs, 0 + 16 + 8 + 30);
+  EXPECT_FALSE(usage.spills);
+}
+
+TEST(CostModelArithTest, PeakVGPRUsageMassiveSpill) {
+  // Way over budget: 512 VGPRs needed, only 256 available.
+  PeakVGPRUsage usage = computePeakVGPRUsage(
+      256, GlobalLoadVGPRs{64, 64}, LDSQuarterReadVGPRs{32, 32}, 50, 256,
+      /*earlyWrite=*/false);
+  EXPECT_TRUE(usage.spills);
+  EXPECT_EQ(usage.headroom, 256 - usage.totalVGPRs);
+  EXPECT_LT(usage.headroom, -200); // Massively over budget.
+}
+
 } // namespace
 } // namespace mlir::iree_compiler::IREE::GPU
