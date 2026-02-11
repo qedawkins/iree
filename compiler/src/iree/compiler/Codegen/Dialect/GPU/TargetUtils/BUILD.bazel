@@ -44,6 +44,21 @@ iree_compiler_cc_library(
 )
 
 iree_compiler_cc_library(
+    name = "CostModel",
+    srcs = [
+        "CostModel.cpp",
+    ],
+    hdrs = [
+        "CostModel.h",
+    ],
+    deps = [
+        "//compiler/src/iree/compiler/Codegen/Dialect/GPU/IR:IREEGPUDialect",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+    ],
+)
+
+iree_compiler_cc_library(
     name = "KnownTargets",
     srcs = [
         "KnownTargets.cpp",
