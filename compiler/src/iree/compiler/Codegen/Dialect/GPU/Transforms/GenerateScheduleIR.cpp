@@ -264,7 +264,7 @@ generateScheduleForContraction(IRRewriter &rewriter,
   Value kBound = arith::ConstantIndexOp::create(rewriter, loc, kDim);
 
   // Create scf.for K loop carrying the accumulator.
-  scf::ForOp::create(
+  scf::ForOp kLoop = scf::ForOp::create(
       rewriter, loc, c0, kBound, kStep, /*initArgs=*/ValueRange{accInit},
       [&](OpBuilder &bodyBuilder, Location bodyLoc, Value /*iv*/,
           ValueRange iterArgs) {
@@ -273,6 +273,19 @@ generateScheduleForContraction(IRRewriter &rewriter,
                                 inputElementType, accElementType);
         scf::YieldOp::create(bodyBuilder, bodyLoc, ValueRange{acc});
       });
+
+  // Write the final accumulator back to the output sref.
+  // destRef is the subgroup body's first block arg (tied init → sref).
+  Value destRef = sgBody->getArgument(0);
+  Value kLoopResult = kLoop.getResult(0);
+  SmallVector<OpFoldResult> writeOffsets = {rewriter.getIndexAttr(0),
+                                            rewriter.getIndexAttr(0)};
+  SmallVector<OpFoldResult> writeSizes = {rewriter.getIndexAttr(config.mmaM),
+                                          rewriter.getIndexAttr(config.mmaN)};
+  SmallVector<OpFoldResult> writeStrides = {rewriter.getIndexAttr(1),
+                                            rewriter.getIndexAttr(1)};
+  PCF::WriteSliceOp::create(rewriter, loc, kLoopResult, destRef, writeOffsets,
+                            writeSizes, writeStrides);
 
   // Terminate lane body with pcf.return.
   PCF::ReturnOp::create(rewriter, loc);

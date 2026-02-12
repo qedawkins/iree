@@ -51,6 +51,9 @@ func.func @matmul_f16_f32(%lhs: tensor<256x128xf16>,
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
 //       CHECK:         scf.yield
 //       CHECK:       }
+//  Result writeback: write final accumulator to output sref.
+//       CHECK:       pcf.write_slice %{{.+}} into %[[DEST_REF]]
+//  CHECK-SAME:         : vector<16x16xf32> into !pcf.sref<256x256xf32, #iree_gpu.subgroup_scope>
 //       CHECK:       pcf.return
 //       CHECK:     pcf.return
 //   CHECK-NOT:   linalg.matmul
@@ -91,6 +94,9 @@ func.func @matmul_single_k_tile(%lhs: tensor<128x64xf16>,
 //       CHECK:         pcf.barrier
 //       CHECK:         scf.yield
 //       CHECK:       }
+//       CHECK:       pcf.write_slice
+//  CHECK-SAME:         : vector<16x16xf32> into !pcf.sref<128x128xf32, #iree_gpu.subgroup_scope>
+//       CHECK:       pcf.return
 
 // -----
 
@@ -128,3 +134,5 @@ func.func @generic_contraction(%lhs: tensor<64x128xf16>,
 //       CHECK:       arith.constant dense<0.000000e+00> : vector<16x16xf32>
 //       CHECK:       scf.for {{.*}} iter_args
 //  CHECK-COUNT-4:      vector.contract {{.*}} vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf32>
+//       CHECK:       pcf.write_slice
+//  CHECK-SAME:         : vector<16x16xf32> into !pcf.sref<64x64xf32, #iree_gpu.subgroup_scope>
