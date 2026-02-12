@@ -1,4 +1,4 @@
-// RUN: iree-opt --split-input-file \
+// RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx1150 \
 // RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-llvmgpu-stream-k-tile)))))" %s | FileCheck %s
 
 // NOTE: This file tests the stream-K tiling transformation triggered by the

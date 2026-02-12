@@ -49,10 +49,11 @@ namespace mlir::iree_compiler {
 
 namespace {
 
-/// Find a TilingInterface op with `streamed_reduction` in its lowering config.
-static TilingInterface findStreamKTarget(Operation *funcOp) {
-  TilingInterface target;
-  funcOp->walk([&](TilingInterface op) {
+/// Find a linalg op with `streamed_reduction` in its lowering config.
+/// Stream-K tiling currently only supports linalg ops (for DPS init access).
+static linalg::LinalgOp findStreamKTarget(Operation *funcOp) {
+  linalg::LinalgOp target;
+  funcOp->walk([&](linalg::LinalgOp op) {
     if (target) {
       return WalkResult::interrupt();
     }
@@ -125,10 +126,16 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
   MLIRContext *ctx = &getContext();
   Location loc = funcOp.getLoc();
 
-  // === Step 1: Find the target op. ===
-  TilingInterface target = findStreamKTarget(funcOp);
+  // === Step 1: Find the target linalg op. ===
+  linalg::LinalgOp target = findStreamKTarget(funcOp);
   if (!target) {
     return; // No Stream-K op in this function.
+  }
+
+  // Validate: target must have exactly one result feeding a store.
+  if (target->getNumResults() != 1) {
+    target.emitOpError("Stream-K tiling requires exactly one result");
+    return signalPassFailure();
   }
 
   IREE::Codegen::LoweringConfigAttrInterface configIface =
@@ -145,8 +152,9 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
       configIface.getStaticTilingLevelSizes(streamLevel, target);
 
   // === Step 3: Classify dims and build merged tile sizes. ===
-  auto [parallelDims, reductionDims] = classifyDims(target);
-  unsigned numDims = target.getLoopIteratorTypes().size();
+  TilingInterface tilingTarget = cast<TilingInterface>(target.getOperation());
+  auto [parallelDims, reductionDims] = classifyDims(tilingTarget);
+  unsigned numDims = tilingTarget.getLoopIteratorTypes().size();
   SmallVector<int64_t> tileSizes(numDims, 0);
   for (unsigned d : parallelDims) {
     if (d < wgTileSizes.size()) {
@@ -162,7 +170,7 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
   // === Step 4: Get iteration domain and require static shapes. ===
   OpBuilder builder(ctx);
   builder.setInsertionPoint(target);
-  SmallVector<Range> iterDomain = target.getIterationDomain(builder);
+  SmallVector<Range> iterDomain = tilingTarget.getIterationDomain(builder);
 
   SmallVector<int64_t> dimSizes;
   for (Range &range : iterDomain) {
@@ -214,8 +222,8 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
     return signalPassFailure();
   }
 
-  // Find the fill op (optional) feeding into the target.
-  Value outInit = cast<linalg::LinalgOp>(target.getOperation()).getDpsInits()[0];
+  // Find the fill op (optional) feeding into the target's DPS output init.
+  Value outInit = target.getDpsInits()[0];
   auto fillOp = outInit.getDefiningOp<linalg::FillOp>();
   Value outTensor;
   if (fillOp) {
@@ -369,9 +377,9 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
   }
 
   FailureOr<TilingResult> tilingResult =
-      target.getTiledImplementation(builder, tileOffsets, tileSizesOFR);
+      tilingTarget.getTiledImplementation(builder, tileOffsets, tileSizesOFR);
   if (failed(tilingResult)) {
-    target.emitOpError("failed to tile with Stream-K parameters");
+    tilingTarget.emitOpError("failed to tile with Stream-K parameters");
     return signalPassFailure();
   }
 

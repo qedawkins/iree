@@ -61,9 +61,11 @@ static Value createPointwiseCombine(OpBuilder &builder, Location loc,
 
   Block &combinerBlock = combinerRegion.front();
 
-  auto genericOp = builder.create<linalg::GenericOp>(
-      loc, tileType, /*inputs=*/ValueRange{lhs, rhs},
-      /*outputs=*/ValueRange{lhs}, indexingMaps, iteratorTypes,
+  Value init = tensor::EmptyOp::create(builder, loc, tileType.getShape(),
+                                        tileType.getElementType());
+  auto genericOp = linalg::GenericOp::create(
+      builder, loc, tileType, /*inputs=*/ValueRange{lhs, rhs},
+      /*outputs=*/ValueRange{init}, indexingMaps, iteratorTypes,
       [&](OpBuilder &bodyBuilder, Location bodyLoc, ValueRange bodyArgs) {
         // bodyArgs: [lhs_elem, rhs_elem, out_elem].
         IRMapping mapping;
@@ -75,7 +77,7 @@ static Value createPointwiseCombine(OpBuilder &builder, Location loc,
         // Replace pcf.yield with linalg.yield.
         auto yieldOp = cast<YieldOp>(combinerBlock.getTerminator());
         Value yielded = mapping.lookupOrDefault(yieldOp.getOperand(0));
-        bodyBuilder.create<linalg::YieldOp>(bodyLoc, yielded);
+        linalg::YieldOp::create(bodyBuilder, bodyLoc, yielded);
       });
 
   return genericOp.getResult(0);
@@ -123,9 +125,9 @@ struct LowerStreamKRecombineOp final
     // --- General case: atomic + branching + scratch + writeback ---
 
     // Constants.
-    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value c1Int = rewriter.create<arith::ConstantOp>(
-        loc, counterElemType,
+    Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value c1Int = arith::ConstantOp::create(
+        rewriter, loc, counterElemType,
         rewriter.getIntegerAttr(counterElemType, 1));
 
     // Step 1: Get memref from counter sref for atomic operation.
@@ -135,34 +137,34 @@ struct LowerStreamKRecombineOp final
         rewriter.getContext(), ShapedType::kDynamic, /*strides=*/{});
     MemRefType counterMemRefType =
         MemRefType::get({}, counterElemType, stridedLayout);
-    Value counterMemRef = rewriter.create<GetMemrefOp>(
-        loc, counterMemRefType, counter,
+    Value counterMemRef = GetMemrefOp::create(
+        rewriter, loc, counterMemRefType, counter,
         /*offsets=*/ArrayRef<OpFoldResult>{},
         /*sizes=*/ArrayRef<OpFoldResult>{},
         /*strides=*/ArrayRef<OpFoldResult>{});
 
     // Step 2: Atomic increment counter, get old value.
-    Value oldInt = rewriter.create<memref::AtomicRMWOp>(
-        loc, counterElemType, arith::AtomicRMWKind::addi, c1Int,
+    Value oldInt = memref::AtomicRMWOp::create(
+        rewriter, loc, counterElemType, arith::AtomicRMWKind::addi, c1Int,
         counterMemRef, ValueRange{});
 
     // Convert old count to index for comparisons.
-    Value old = rewriter.create<arith::IndexCastOp>(
-        loc, rewriter.getIndexType(), oldInt);
+    Value old = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), oldInt);
 
     // Step 3: Compute branch conditions.
-    Value isOnly = rewriter.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::eq, numInGroup, c1);
-    Value numMinus1 = rewriter.create<arith::SubIOp>(loc, numInGroup, c1);
-    Value isLast = rewriter.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::eq, old, numMinus1);
+    Value isOnly = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, numInGroup, c1);
+    Value numMinus1 = arith::SubIOp::create(rewriter, loc, numInGroup, c1);
+    Value isLast = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, old, numMinus1);
 
     // notOnly = !isOnly.
-    Value trueVal = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
-    Value notOnly = rewriter.create<arith::XOrIOp>(loc, isOnly, trueVal);
+    Value trueVal = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+    Value notOnly = arith::XOrIOp::create(rewriter, loc, isOnly, trueVal);
 
     // Step 4: Non-sole contributor path.
-    rewriter.create<scf::IfOp>(
+    scf::IfOp::create(rewriter,
         loc, notOnly,
         [&](OpBuilder &thenBuilder, Location thenLoc) {
           // Compute scratch slot offset for this contributor.
@@ -177,27 +179,27 @@ struct LowerStreamKRecombineOp final
               Value dim0Size;
               if (tileType.isDynamicDim(0)) {
                 Value c0Idx =
-                    thenBuilder.create<arith::ConstantIndexOp>(thenLoc, 0);
-                dim0Size = thenBuilder.create<tensor::DimOp>(
-                    thenLoc, partial, c0Idx);
+                    arith::ConstantIndexOp::create(thenBuilder, thenLoc, 0);
+                dim0Size = tensor::DimOp::create(
+                    thenBuilder, thenLoc, partial, c0Idx);
               } else {
-                dim0Size = thenBuilder.create<arith::ConstantIndexOp>(
-                    thenLoc, tileType.getDimSize(0));
+                dim0Size = arith::ConstantIndexOp::create(
+                    thenBuilder, thenLoc, tileType.getDimSize(0));
               }
               Value slotOffset =
-                  thenBuilder.create<arith::MulIOp>(thenLoc, old, dim0Size);
+                  arith::MulIOp::create(thenBuilder, thenLoc, old, dim0Size);
               writeOffsets.push_back(slotOffset);
             } else {
               writeOffsets.push_back(
-                  thenBuilder.create<arith::ConstantIndexOp>(thenLoc, 0)
+                  arith::ConstantIndexOp::create(thenBuilder, thenLoc, 0)
                       .getResult());
             }
             if (tileType.isDynamicDim(d)) {
               // Use tensor.dim for dynamic dimensions.
               writeSizes.push_back(
-                  thenBuilder
-                      .create<tensor::DimOp>(thenLoc, partial,
-                                             thenBuilder.create<arith::ConstantIndexOp>(thenLoc, d).getResult())
+                  tensor::DimOp::create(
+                      thenBuilder, thenLoc, partial,
+                      arith::ConstantIndexOp::create(thenBuilder, thenLoc, d).getResult())
                       .getResult());
             } else {
               writeSizes.push_back(
@@ -207,25 +209,25 @@ struct LowerStreamKRecombineOp final
           }
 
           // Write partial tile to scratch at computed slot.
-          thenBuilder.create<WriteSliceOp>(
-              thenLoc, partial, scratch, writeOffsets, writeSizes,
+          WriteSliceOp::create(
+              thenBuilder, thenLoc, partial, scratch, writeOffsets, writeSizes,
               writeStrides);
 
           // Release fence: make our scratch write visible to other
           // workgroups.
-          thenBuilder.create<FenceOp>(thenLoc,
-                                      /*is_release=*/true,
-                                      ValueRange{scratch});
+          FenceOp::create(thenBuilder, thenLoc,
+                          /*is_release=*/true,
+                          ValueRange{scratch});
 
           // Last contributor: accumulate and writeback.
-          thenBuilder.create<scf::IfOp>(
+          scf::IfOp::create(thenBuilder,
               thenLoc, isLast,
               [&](OpBuilder &lastBuilder, Location lastLoc) {
                 // Acquire fence: see all other workgroups' scratch
                 // writes.
-                lastBuilder.create<FenceOp>(lastLoc,
-                                            /*is_release=*/false,
-                                            ValueRange{scratch});
+                FenceOp::create(lastBuilder, lastLoc,
+                                /*is_release=*/false,
+                                ValueRange{scratch});
 
                 // Accumulate scratch slots.
                 // Start with slot 0.
@@ -234,16 +236,15 @@ struct LowerStreamKRecombineOp final
                 SmallVector<OpFoldResult> readStrides;
                 for (int64_t d = 0; d < tileRank; ++d) {
                   readOffsets.push_back(
-                      lastBuilder.create<arith::ConstantIndexOp>(lastLoc, 0)
+                      arith::ConstantIndexOp::create(lastBuilder, lastLoc, 0)
                           .getResult());
                   if (tileType.isDynamicDim(d)) {
                     readSizes.push_back(
-                        lastBuilder
-                            .create<tensor::DimOp>(
-                                lastLoc, partial,
-                                lastBuilder
-                                    .create<arith::ConstantIndexOp>(lastLoc, d)
-                                    .getResult())
+                        tensor::DimOp::create(
+                            lastBuilder, lastLoc, partial,
+                            arith::ConstantIndexOp::create(
+                                lastBuilder, lastLoc, d)
+                                .getResult())
                             .getResult());
                   } else {
                     readSizes.push_back(
@@ -253,15 +254,14 @@ struct LowerStreamKRecombineOp final
                       lastBuilder.getI64IntegerAttr(1));
                 }
 
-                Value acc = lastBuilder.create<ReadSliceOp>(
-                    lastLoc, tileType, scratch, readOffsets, readSizes,
-                    readStrides);
+                Value acc = ReadSliceOp::create(
+                    lastBuilder, lastLoc, tileType, scratch, readOffsets,
+                    readSizes, readStrides);
 
                 // Loop over remaining slots [1, old).
                 // If old == 1, this loop doesn't execute.
                 Value accResult =
-                    lastBuilder
-                        .create<scf::ForOp>(
+                    scf::ForOp::create(lastBuilder,
                             lastLoc, c1, old, c1,
                             ValueRange{acc},
                             [&](OpBuilder &loopBuilder, Location loopLoc,
@@ -270,22 +270,20 @@ struct LowerStreamKRecombineOp final
                               Value dim0Size;
                               if (tileType.isDynamicDim(0)) {
                                 Value c0Idx =
-                                    loopBuilder
-                                        .create<arith::ConstantIndexOp>(
-                                            loopLoc, 0);
+                                    arith::ConstantIndexOp::create(
+                                        loopBuilder, loopLoc, 0);
                                 dim0Size =
-                                    loopBuilder.create<tensor::DimOp>(
-                                        loopLoc, partial, c0Idx);
+                                    tensor::DimOp::create(
+                                        loopBuilder, loopLoc, partial, c0Idx);
                               } else {
                                 dim0Size =
-                                    loopBuilder
-                                        .create<arith::ConstantIndexOp>(
-                                            loopLoc,
-                                            tileType.getDimSize(0));
+                                    arith::ConstantIndexOp::create(
+                                        loopBuilder, loopLoc,
+                                        tileType.getDimSize(0));
                               }
                               Value slotOff =
-                                  loopBuilder.create<arith::MulIOp>(
-                                      loopLoc, iv, dim0Size);
+                                  arith::MulIOp::create(
+                                      loopBuilder, loopLoc, iv, dim0Size);
 
                               SmallVector<OpFoldResult> loopReadOffsets;
                               SmallVector<OpFoldResult> loopReadSizes(
@@ -297,16 +295,15 @@ struct LowerStreamKRecombineOp final
                                   loopReadOffsets.push_back(slotOff);
                                 } else {
                                   loopReadOffsets.push_back(
-                                      loopBuilder
-                                          .create<arith::ConstantIndexOp>(
-                                              loopLoc, 0)
+                                      arith::ConstantIndexOp::create(
+                                          loopBuilder, loopLoc, 0)
                                           .getResult());
                                 }
                               }
 
                               Value slotTile =
-                                  loopBuilder.create<ReadSliceOp>(
-                                      loopLoc, tileType, scratch,
+                                  ReadSliceOp::create(
+                                      loopBuilder, loopLoc, tileType, scratch,
                                       loopReadOffsets, loopReadSizes,
                                       loopReadStrides);
 
@@ -317,8 +314,8 @@ struct LowerStreamKRecombineOp final
                                   op.getCombiner(), iterArgs[0],
                                   slotTile);
 
-                              loopBuilder.create<scf::YieldOp>(
-                                  loopLoc, combined);
+                              scf::YieldOp::create(
+                                  loopBuilder, loopLoc, combined);
                             })
                         .getResult(0);
 
@@ -331,19 +328,19 @@ struct LowerStreamKRecombineOp final
                 inlineWritebackRegion(lastBuilder, lastLoc,
                                       op.getWriteback(), finalTile);
 
-                lastBuilder.create<scf::YieldOp>(lastLoc);
+                scf::YieldOp::create(lastBuilder, lastLoc);
               });
 
-          thenBuilder.create<scf::YieldOp>(thenLoc);
+          scf::YieldOp::create(thenBuilder, thenLoc);
         });
 
     // Step 5: Sole contributor writeback.
-    rewriter.create<scf::IfOp>(
+    scf::IfOp::create(rewriter,
         loc, isOnly,
         [&](OpBuilder &soleBuilder, Location soleLoc) {
           inlineWritebackRegion(soleBuilder, soleLoc, op.getWriteback(),
                                 partial);
-          soleBuilder.create<scf::YieldOp>(soleLoc);
+          scf::YieldOp::create(soleBuilder, soleLoc);
         });
 
     rewriter.eraseOp(op);
