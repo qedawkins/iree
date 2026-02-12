@@ -68,21 +68,11 @@ struct HardcodedConfig {
 
 /// Generate a single WMMA compute phase using vector.contract.
 ///
-/// Creates a matmul contraction: acc = A * B + acc, where A and B are
-/// placeholder zero vectors (will be replaced with LDS read results).
+/// Creates a matmul contraction: acc = A * B + acc.
+/// The A and B operands are provided by the caller (typically from LDS reads).
 /// The accumulator is updated in-place and returned.
-static Value generateComputePhase(OpBuilder &builder, Location loc,
-                                  Value acc, const HardcodedConfig &config,
-                                  Type inputElementType, Type accElementType) {
-  auto aType = VectorType::get({config.mmaM, config.mmaK}, inputElementType);
-  auto bType = VectorType::get({config.mmaK, config.mmaN}, inputElementType);
-
-  // Placeholder zero operands (will be replaced with LDS reads).
-  Value zeroInput = arith::ConstantOp::create(
-      builder, loc, DenseElementsAttr::get(aType, builder.getZeroAttr(inputElementType)));
-  Value zeroB = arith::ConstantOp::create(
-      builder, loc, DenseElementsAttr::get(bType, builder.getZeroAttr(inputElementType)));
-
+static Value generateComputePhase(OpBuilder &builder, Location loc, Value lhs,
+                                  Value rhs, Value acc) {
   // Contraction maps: C[m,n] += A[m,k] * B[k,n].
   AffineMap mapA = AffineMap::get(
       3, 0, {builder.getAffineDimExpr(0), builder.getAffineDimExpr(2)},
@@ -104,12 +94,46 @@ static Value generateComputePhase(OpBuilder &builder, Location loc,
   };
 
   return vector::ContractionOp::create(
-      builder, loc, zeroInput, zeroB, acc,
+      builder, loc, lhs, rhs, acc,
       builder.getAffineMapArrayAttr({mapA, mapB, mapC}),
       builder.getArrayAttr(iteratorTypes));
 }
 
-/// Generate the 8-phase K-loop body with barriers and compute ops.
+/// Read a quarter-K tile from LDS shared memory.
+///
+/// For LHS: reads [0, quarterIdx*quarterK] with size [mmaM, quarterK].
+/// For RHS: reads [quarterIdx*quarterK, 0] with size [quarterK, mmaN].
+/// Returns a vector value suitable for vector.contract.
+static Value readQuarterFromLDS(OpBuilder &builder, Location loc,
+                                Value ldsSref, bool isLHS,
+                                int64_t quarterIdx,
+                                const HardcodedConfig &config,
+                                Type inputElementType) {
+  int64_t quarterK = config.quarterK();
+  int64_t kOffset = quarterIdx * quarterK;
+
+  SmallVector<OpFoldResult> offsets, sizes, strides;
+  VectorType resultType;
+  if (isLHS) {
+    // LHS: [0, kOffset] size [mmaM, quarterK].
+    offsets = {builder.getIndexAttr(0), builder.getIndexAttr(kOffset)};
+    sizes = {builder.getIndexAttr(config.mmaM),
+             builder.getIndexAttr(quarterK)};
+    resultType = VectorType::get({config.mmaM, quarterK}, inputElementType);
+  } else {
+    // RHS: [kOffset, 0] size [quarterK, mmaN].
+    offsets = {builder.getIndexAttr(kOffset), builder.getIndexAttr(0)};
+    sizes = {builder.getIndexAttr(quarterK),
+             builder.getIndexAttr(config.mmaN)};
+    resultType = VectorType::get({quarterK, config.mmaN}, inputElementType);
+  }
+  strides = {builder.getIndexAttr(1), builder.getIndexAttr(1)};
+
+  return PCF::ReadSliceOp::create(builder, loc, resultType, ldsSref, offsets,
+                                  sizes, strides);
+}
+
+/// Generate the 8-phase K-loop body with barriers, LDS reads, and compute ops.
 ///
 /// For each K iteration, the early-write schedule generates 8 phases:
 ///   P1: Memory  - Global load LHS(k+1) + LDS read q0
@@ -121,40 +145,61 @@ static Value generateComputePhase(OpBuilder &builder, Location loc,
 ///   P7: Compute - WMMA q3
 ///   P8: Sync    - Barrier for loop iteration boundary
 ///
-/// Each phase ends with a pcf.barrier. Memory phase bodies are empty
-/// placeholders for now. Compute phases contain vector.contract ops
-/// with zero placeholder operands.
+/// Each phase ends with a pcf.barrier. Memory phases read quarter-K tiles
+/// from LDS using pcf.read_slice. Compute phases use the read data in
+/// vector.contract ops. Global loads/LDS writes are placeholders for now.
 static Value generatePhaseBody(OpBuilder &builder, Location loc,
                                PCF::ScopeAttrInterface barrierScope,
-                               Value acc, const HardcodedConfig &config,
-                               Type inputElementType, Type accElementType) {
-  // P1: Memory phase (placeholder).
+                               Value acc, Value ldsLhs, Value ldsRhs,
+                               const HardcodedConfig &config,
+                               Type inputElementType) {
+  // P1: Read q0 from LDS (+ global load placeholder).
+  Value lhsQ0 =
+      readQuarterFromLDS(builder, loc, ldsLhs, /*isLHS=*/true,
+                         /*quarterIdx=*/0, config, inputElementType);
+  Value rhsQ0 =
+      readQuarterFromLDS(builder, loc, ldsRhs, /*isLHS=*/false,
+                         /*quarterIdx=*/0, config, inputElementType);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
   // P2: Compute WMMA q0.
-  acc = generateComputePhase(builder, loc, acc, config, inputElementType,
-                             accElementType);
+  acc = generateComputePhase(builder, loc, lhsQ0, rhsQ0, acc);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
-  // P3: Memory phase (placeholder).
+  // P3: Read q1 from LDS (+ global load placeholder).
+  Value lhsQ1 =
+      readQuarterFromLDS(builder, loc, ldsLhs, /*isLHS=*/true,
+                         /*quarterIdx=*/1, config, inputElementType);
+  Value rhsQ1 =
+      readQuarterFromLDS(builder, loc, ldsRhs, /*isLHS=*/false,
+                         /*quarterIdx=*/1, config, inputElementType);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
   // P4: Compute WMMA q1.
-  acc = generateComputePhase(builder, loc, acc, config, inputElementType,
-                             accElementType);
+  acc = generateComputePhase(builder, loc, lhsQ1, rhsQ1, acc);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
-  // P5: Memory phase (placeholder).
+  // P5: Read q2 from LDS (+ LDS write placeholder).
+  Value lhsQ2 =
+      readQuarterFromLDS(builder, loc, ldsLhs, /*isLHS=*/true,
+                         /*quarterIdx=*/2, config, inputElementType);
+  Value rhsQ2 =
+      readQuarterFromLDS(builder, loc, ldsRhs, /*isLHS=*/false,
+                         /*quarterIdx=*/2, config, inputElementType);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
-  // P6: Mixed — compute WMMA q2 (+ memory placeholder).
-  acc = generateComputePhase(builder, loc, acc, config, inputElementType,
-                             accElementType);
+  // P6: Compute WMMA q2 + read q3 from LDS (+ LDS write placeholder).
+  acc = generateComputePhase(builder, loc, lhsQ2, rhsQ2, acc);
+  Value lhsQ3 =
+      readQuarterFromLDS(builder, loc, ldsLhs, /*isLHS=*/true,
+                         /*quarterIdx=*/3, config, inputElementType);
+  Value rhsQ3 =
+      readQuarterFromLDS(builder, loc, ldsRhs, /*isLHS=*/false,
+                         /*quarterIdx=*/3, config, inputElementType);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
   // P7: Compute WMMA q3.
-  acc = generateComputePhase(builder, loc, acc, config, inputElementType,
-                             accElementType);
+  acc = generateComputePhase(builder, loc, lhsQ3, rhsQ3, acc);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
   // P8: Sync barrier (loop iteration boundary).
@@ -234,8 +279,8 @@ generateScheduleForContraction(IRRewriter &rewriter,
       ctx, {workgroupM, config.kTile}, inputElementType, sgScope);
   PCF::ShapedRefType ldsRhsType = PCF::ShapedRefType::get(
       ctx, {config.kTile, workgroupN}, inputElementType, sgScope);
-  PCF::AllocOp::create(rewriter, loc, ldsLhsType);
-  PCF::AllocOp::create(rewriter, loc, ldsRhsType);
+  Value ldsLhs = PCF::AllocOp::create(rewriter, loc, ldsLhsType);
+  Value ldsRhs = PCF::AllocOp::create(rewriter, loc, ldsRhsType);
 
   // Create inner pcf.generic at lane scope (no tied results).
   PCF::GenericOp laneGeneric = PCF::GenericOp::create(
@@ -264,13 +309,14 @@ generateScheduleForContraction(IRRewriter &rewriter,
   Value kBound = arith::ConstantIndexOp::create(rewriter, loc, kDim);
 
   // Create scf.for K loop carrying the accumulator.
+  // LDS srefs (ldsLhs, ldsRhs) are captured from enclosing subgroup scope.
   scf::ForOp kLoop = scf::ForOp::create(
       rewriter, loc, c0, kBound, kStep, /*initArgs=*/ValueRange{accInit},
       [&](OpBuilder &bodyBuilder, Location bodyLoc, Value /*iv*/,
           ValueRange iterArgs) {
         Value acc = iterArgs[0];
-        acc = generatePhaseBody(bodyBuilder, bodyLoc, sgScope, acc, config,
-                                inputElementType, accElementType);
+        acc = generatePhaseBody(bodyBuilder, bodyLoc, sgScope, acc, ldsLhs,
+                                ldsRhs, config, inputElementType);
         scf::YieldOp::create(bodyBuilder, bodyLoc, ValueRange{acc});
       });
 
