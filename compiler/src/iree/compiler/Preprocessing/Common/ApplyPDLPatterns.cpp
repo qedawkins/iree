@@ -298,7 +298,7 @@ createStreamExecutableOp(PatternRewriter &rewriter, Operation *rootOp,
   // TODO(MaheshRavishankar): This represents the number of workgroups to use.
   // Ideally this is somehow exposed to the rewrite mechanism to get the
   // workload and the number of workgroups.
-  Region &exportOpRegion = exportOp.getRegion();
+  Region &exportOpRegion = exportOp.getRegion(0);
   Block *exportOpBody =
       rewriter.createBlock(&exportOpRegion, exportOpRegion.begin());
   rewriter.setInsertionPointToStart(exportOpBody);
