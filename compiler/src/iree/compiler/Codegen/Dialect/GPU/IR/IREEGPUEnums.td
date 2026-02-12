@@ -424,11 +424,14 @@ def Serial : I32EnumAttrCase<"Serial", 3>;
 def Thread : I32EnumAttrCase<"Thread", 4>;
 def Subgroup : I32EnumAttrCase<"Subgroup", 5>;
 def Lane : I32EnumAttrCase<"Lane", 6>;
+def StreamedReduction : I32EnumAttrCase<"StreamedReduction", 7>;
 
 /// Enum descriptor for the set of tiling levels for GPU pass pipelines.
 /// Note that `Thread` tiling is mutually exclusive with `Subgroup` and
 /// `Lane` tiling, and `Lane` tiling is only legal if the same operation
 /// is also tiled or fused to subgroups.
+/// `StreamedReduction` is used by the Stream-K tiling path: it specifies
+/// reduction tile sizes for linearized work distribution across workgroups.
 def IREEGPU_TilingLevel : IREEGPU_I32EnumAttr<"TilingLevel",
     "Descriptor for tiling levels for GPU lowering configs", [
       Workgroup,
@@ -437,7 +440,8 @@ def IREEGPU_TilingLevel : IREEGPU_I32EnumAttr<"TilingLevel",
       Serial,
       Thread,
       Subgroup,
-      Lane
+      Lane,
+      StreamedReduction
     ]>;
 
 //===----------------------------------------------------------------------===//

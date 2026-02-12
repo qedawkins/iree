@@ -2044,6 +2044,7 @@ constexpr StringLiteral kSerialLevelName = "serial";
 constexpr StringLiteral kThreadLevelName = "thread";
 constexpr StringLiteral kSubgroupLevelName = "subgroup";
 constexpr StringLiteral kLaneLevelName = "lane";
+constexpr StringLiteral kStreamedReductionLevelName = "streamed_reduction";
 
 StringRef getTilingLevelName(GPU::TilingLevel level) {
   switch (level) {
@@ -2061,6 +2062,8 @@ StringRef getTilingLevelName(GPU::TilingLevel level) {
     return kSubgroupLevelName;
   case GPU::TilingLevel::Lane:
     return kLaneLevelName;
+  case GPU::TilingLevel::StreamedReduction:
+    return kStreamedReductionLevelName;
   }
   assert(false && "Unknown tiling level");
   return StringRef();
@@ -2087,7 +2090,7 @@ SmallVector<int64_t> LoweringConfigAttr::getWorkgroupTileSizes() const {
 SmallVector<int64_t>
 LoweringConfigAttr::getStaticTilingLevelSizes(unsigned level,
                                               Operation *op) const {
-  if (level > llvm::to_underlying(GPU::TilingLevel::Lane)) {
+  if (level > llvm::to_underlying(GPU::TilingLevel::StreamedReduction)) {
     return {};
   }
   return getTileSizes(getAttributes(), static_cast<GPU::TilingLevel>(level));
@@ -2096,7 +2099,7 @@ LoweringConfigAttr::getStaticTilingLevelSizes(unsigned level,
 SmallVector<OpFoldResult>
 LoweringConfigAttr::getTilingLevelSizes(OpBuilder &b, unsigned level,
                                         Operation *op) const {
-  if (level > llvm::to_underlying(GPU::TilingLevel::Lane)) {
+  if (level > llvm::to_underlying(GPU::TilingLevel::StreamedReduction)) {
     return {};
   }
   SmallVector<int64_t> sizes =
@@ -2106,7 +2109,7 @@ LoweringConfigAttr::getTilingLevelSizes(OpBuilder &b, unsigned level,
 }
 
 bool LoweringConfigAttr::hasTilingLevel(unsigned level) const {
-  if (level > llvm::to_underlying(GPU::TilingLevel::Lane)) {
+  if (level > llvm::to_underlying(GPU::TilingLevel::StreamedReduction)) {
     return false;
   }
   return !getTileSizes(getAttributes(), static_cast<GPU::TilingLevel>(level))
