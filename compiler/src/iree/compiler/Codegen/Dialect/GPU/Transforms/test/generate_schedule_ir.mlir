@@ -25,21 +25,35 @@ func.func @matmul_f16_f32(%lhs: tensor<256x128xf16>,
 //       CHECK:     pcf.generic
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
 //       CHECK:       execute[%[[LANE_ID:.+]]: index, %[[LANE_COUNT:.+]]: index]
-//       CHECK:       %[[C0:.+]] = arith.constant 0 : index
-//       CHECK:       %[[KSTEP:.+]] = arith.constant 64 : index
-//       CHECK:       %[[KBOUND:.+]] = arith.constant 128 : index
-//       CHECK:       scf.for %[[K:.+]] = %[[C0]] to %[[KBOUND]] step %[[KSTEP]]
+//       CHECK:       %[[ACC_INIT:.+]] = arith.constant dense<0.000000e+00> : vector<16x16xf32>
+//       CHECK:       scf.for %[[K:.+]] = %{{.+}} to %{{.+}} step %{{.+}} iter_args(%[[ACC:.+]] = %[[ACC_INIT]])
+//
+//  P1: memory phase (placeholder) + barrier.
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
+//  P2: compute WMMA q0.
+//       CHECK:         vector.contract
+//  CHECK-SAME:           vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf32>
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
+//  P3: memory phase (placeholder) + barrier.
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
+//  P4: compute WMMA q1.
+//       CHECK:         vector.contract
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
+//  P5: memory phase (placeholder) + barrier.
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
+//  P6: compute WMMA q2 (+ memory placeholder).
+//       CHECK:         vector.contract
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
+//  P7: compute WMMA q3.
+//       CHECK:         vector.contract
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
+//  P8: sync barrier.
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
+//       CHECK:         scf.yield
 //       CHECK:       }
 //       CHECK:       pcf.return
 //       CHECK:     pcf.return
+//   CHECK-NOT:   linalg.matmul
 //       CHECK:   return %[[RESULT]]
 
 // -----
@@ -61,11 +75,21 @@ func.func @matmul_single_k_tile(%lhs: tensor<128x64xf16>,
 //       CHECK:     pcf.alloc() : !pcf.sref<64x128xf16, #iree_gpu.subgroup_scope>
 //       CHECK:     pcf.generic
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
-//       CHECK:       %[[C0:.+]] = arith.constant 0 : index
-//       CHECK:       %[[KSTEP:.+]] = arith.constant 64 : index
-//       CHECK:       %[[KBOUND:.+]] = arith.constant 64 : index
-//       CHECK:       scf.for %{{.+}} = %[[C0]] to %[[KBOUND]] step %[[KSTEP]]
-//  CHECK-COUNT-8:      pcf.barrier(#iree_gpu.subgroup_scope)
+//       CHECK:       %[[ACC_INIT:.+]] = arith.constant dense<0.000000e+00> : vector<16x16xf32>
+//       CHECK:       scf.for {{.*}} iter_args({{.*}} = %[[ACC_INIT]])
+//       CHECK:         pcf.barrier
+//       CHECK:         vector.contract
+//       CHECK:         pcf.barrier
+//       CHECK:         pcf.barrier
+//       CHECK:         vector.contract
+//       CHECK:         pcf.barrier
+//       CHECK:         pcf.barrier
+//       CHECK:         vector.contract
+//       CHECK:         pcf.barrier
+//       CHECK:         vector.contract
+//       CHECK:         pcf.barrier
+//       CHECK:         pcf.barrier
+//       CHECK:         scf.yield
 //       CHECK:       }
 
 // -----
@@ -101,6 +125,6 @@ func.func @generic_contraction(%lhs: tensor<64x128xf16>,
 //       CHECK:     pcf.alloc() : !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>
 //       CHECK:     pcf.generic
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
-//       CHECK:       arith.constant 128 : index
-//       CHECK:       scf.for
-//  CHECK-COUNT-8:      pcf.barrier(#iree_gpu.subgroup_scope)
+//       CHECK:       arith.constant dense<0.000000e+00> : vector<16x16xf32>
+//       CHECK:       scf.for {{.*}} iter_args
+//  CHECK-COUNT-4:      vector.contract {{.*}} vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf32>
