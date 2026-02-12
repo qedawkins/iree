@@ -26,31 +26,43 @@ func.func @matmul_f16_f32(%lhs: tensor<256x128xf16>,
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
 //       CHECK:       execute[%[[LANE_ID:.+]]: index, %[[LANE_COUNT:.+]]: index]
 //       CHECK:       %[[ACC_INIT:.+]] = arith.constant dense<0.000000e+00> : vector<16x16xf32>
+//
+//  Prologue: load first K tile into LDS.
+//       CHECK:       tensor.extract_slice %[[LHS]]
+//  CHECK-SAME:         tensor<256x128xf16> to tensor<256x64xf16>
+//       CHECK:       tensor.extract_slice %[[RHS]]
+//  CHECK-SAME:         tensor<128x256xf16> to tensor<64x256xf16>
+//       CHECK:       pcf.write_slice {{.*}} into %[[LDS_LHS]]
+//       CHECK:       pcf.write_slice {{.*}} into %[[LDS_RHS]]
+//       CHECK:       pcf.barrier(#iree_gpu.subgroup_scope)
+//
 //       CHECK:       scf.for %[[K:.+]] = %{{.+}} to %{{.+}} step %{{.+}} iter_args(%[[ACC:.+]] = %[[ACC_INIT]])
 //
-//  P1: LDS read q0 (offsets [0,0]) + barrier.
+//  P1: global load LHS(k+1) + LDS read q0.
+//       CHECK:         tensor.extract_slice %[[LHS]]
 //       CHECK:         pcf.read_slice %[[LDS_LHS]][0, 0]
-//  CHECK-SAME:           !pcf.sref<256x64xf16, #iree_gpu.subgroup_scope> to vector<16x16xf16>
 //       CHECK:         pcf.read_slice %[[LDS_RHS]][0, 0]
-//  CHECK-SAME:           !pcf.sref<64x256xf16, #iree_gpu.subgroup_scope> to vector<16x16xf16>
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
 //  P2: compute WMMA q0.
 //       CHECK:         vector.contract
 //  CHECK-SAME:           vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf32>
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
-//  P3: LDS read q1 (offsets [0,16] / [16,0]) + barrier.
+//  P3: global load RHS(k+1) + LDS read q1.
+//       CHECK:         tensor.extract_slice %[[RHS]]
 //       CHECK:         pcf.read_slice %[[LDS_LHS]][0, 16]
 //       CHECK:         pcf.read_slice %[[LDS_RHS]][16, 0]
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
 //  P4: compute WMMA q1.
 //       CHECK:         vector.contract
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
-//  P5: LDS read q2 (offsets [0,32] / [32,0]) + barrier.
+//  P5: LDS write staged LHS + LDS read q2.
+//       CHECK:         pcf.write_slice {{.*}} into %[[LDS_LHS]]
 //       CHECK:         pcf.read_slice %[[LDS_LHS]][0, 32]
 //       CHECK:         pcf.read_slice %[[LDS_RHS]][32, 0]
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
-//  P6: compute WMMA q2 + LDS read q3 (offsets [0,48] / [48,0]).
+//  P6: compute WMMA q2 + LDS write staged RHS + LDS read q3.
 //       CHECK:         vector.contract
+//       CHECK:         pcf.write_slice {{.*}} into %[[LDS_RHS]]
 //       CHECK:         pcf.read_slice %[[LDS_LHS]][0, 48]
 //       CHECK:         pcf.read_slice %[[LDS_RHS]][48, 0]
 //       CHECK:         pcf.barrier(#iree_gpu.subgroup_scope)
@@ -82,34 +94,32 @@ func.func @matmul_single_k_tile(%lhs: tensor<128x64xf16>,
 }
 
 // CHECK-LABEL: func.func @matmul_single_k_tile
+//  CHECK-SAME:   %[[LHS2:.+]]: tensor<128x64xf16>
+//  CHECK-SAME:   %[[RHS2:.+]]: tensor<64x128xf16>
 //       CHECK:   pcf.generic
 //  CHECK-SAME:     scope(#iree_gpu.subgroup_scope)
 //       CHECK:     %[[LDS_LHS2:.+]] = pcf.alloc() : !pcf.sref<128x64xf16, #iree_gpu.subgroup_scope>
 //       CHECK:     %[[LDS_RHS2:.+]] = pcf.alloc() : !pcf.sref<64x128xf16, #iree_gpu.subgroup_scope>
 //       CHECK:     pcf.generic
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
-//       CHECK:       %[[ACC_INIT2:.+]] = arith.constant dense<0.000000e+00> : vector<16x16xf32>
-//       CHECK:       scf.for {{.*}} iter_args({{.*}} = %[[ACC_INIT2]])
+//  Prologue: initial LDS fill.
+//       CHECK:       tensor.extract_slice %[[LHS2]]
+//       CHECK:       tensor.extract_slice %[[RHS2]]
+//       CHECK:       pcf.write_slice {{.*}} into %[[LDS_LHS2]]
+//       CHECK:       pcf.write_slice {{.*}} into %[[LDS_RHS2]]
+//       CHECK:       pcf.barrier
+//       CHECK:       scf.for {{.*}} iter_args
+//  Verify global loads, LDS reads/writes, and compute all present.
+//       CHECK:         tensor.extract_slice %[[LHS2]]
 //       CHECK:         pcf.read_slice %[[LDS_LHS2]]
-//       CHECK:         pcf.read_slice %[[LDS_RHS2]]
-//       CHECK:         pcf.barrier
 //       CHECK:         vector.contract
-//       CHECK:         pcf.barrier
+//       CHECK:         tensor.extract_slice %[[RHS2]]
 //       CHECK:         pcf.read_slice %[[LDS_LHS2]]
-//       CHECK:         pcf.read_slice %[[LDS_RHS2]]
-//       CHECK:         pcf.barrier
 //       CHECK:         vector.contract
-//       CHECK:         pcf.barrier
-//       CHECK:         pcf.read_slice %[[LDS_LHS2]]
-//       CHECK:         pcf.read_slice %[[LDS_RHS2]]
-//       CHECK:         pcf.barrier
+//       CHECK:         pcf.write_slice {{.*}} into %[[LDS_LHS2]]
 //       CHECK:         vector.contract
-//       CHECK:         pcf.read_slice %[[LDS_LHS2]]
-//       CHECK:         pcf.read_slice %[[LDS_RHS2]]
-//       CHECK:         pcf.barrier
+//       CHECK:         pcf.write_slice {{.*}} into %[[LDS_RHS2]]
 //       CHECK:         vector.contract
-//       CHECK:         pcf.barrier
-//       CHECK:         pcf.barrier
 //       CHECK:         scf.yield
 //       CHECK:       }
 //       CHECK:       pcf.write_slice
@@ -143,15 +153,19 @@ func.func @generic_contraction(%lhs: tensor<64x128xf16>,
 }
 
 // CHECK-LABEL: func.func @generic_contraction
+//  CHECK-SAME:   %[[LHS3:.+]]: tensor<64x128xf16>
+//  CHECK-SAME:   %[[RHS3:.+]]: tensor<128x64xf16>
 //       CHECK:   pcf.generic
 //  CHECK-SAME:     scope(#iree_gpu.subgroup_scope)
 //       CHECK:     %[[LDS_LHS3:.+]] = pcf.alloc() : !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>
 //       CHECK:     %[[LDS_RHS3:.+]] = pcf.alloc() : !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>
 //       CHECK:     pcf.generic
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
-//       CHECK:       arith.constant dense<0.000000e+00> : vector<16x16xf32>
+//  Prologue + K-loop with full pipeline.
+//       CHECK:       tensor.extract_slice %[[LHS3]]
+//       CHECK:       pcf.write_slice {{.*}} into %[[LDS_LHS3]]
+//       CHECK:       pcf.barrier
 //       CHECK:       scf.for {{.*}} iter_args
-//  Verify 4 quarter reads (LHS+RHS each) feed into 4 vector.contract ops.
 //  CHECK-COUNT-4:      vector.contract {{.*}} vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf32>
 //       CHECK:       pcf.write_slice
 //  CHECK-SAME:         : vector<16x16xf32> into !pcf.sref<64x64xf32, #iree_gpu.subgroup_scope>

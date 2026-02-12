@@ -133,7 +133,56 @@ static Value readQuarterFromLDS(OpBuilder &builder, Location loc,
                                   sizes, strides);
 }
 
-/// Generate the 8-phase K-loop body with barriers, LDS reads, and compute ops.
+/// Load a full workgroup tile from a global tensor using tensor.extract_slice.
+///
+/// For LHS: extracts [0, kOffset] with size [workgroupM, kTile].
+/// For RHS: extracts [kOffset, 0] with size [kTile, workgroupN].
+static Value loadGlobalTile(OpBuilder &builder, Location loc, Value globalTensor,
+                            Value kOffset, bool isLHS,
+                            int64_t workgroupM, int64_t workgroupN,
+                            const HardcodedConfig &config) {
+  auto tensorType = cast<RankedTensorType>(globalTensor.getType());
+  Type elementType = tensorType.getElementType();
+
+  SmallVector<OpFoldResult> offsets, sizes, strides;
+  RankedTensorType resultType;
+  if (isLHS) {
+    // LHS: [0, kOffset] size [workgroupM, kTile].
+    offsets = {builder.getIndexAttr(0), kOffset};
+    sizes = {builder.getIndexAttr(workgroupM),
+             builder.getIndexAttr(config.kTile)};
+    strides = {builder.getIndexAttr(1), builder.getIndexAttr(1)};
+    resultType = RankedTensorType::get({workgroupM, config.kTile}, elementType);
+  } else {
+    // RHS: [kOffset, 0] size [kTile, workgroupN].
+    offsets = {kOffset, builder.getIndexAttr(0)};
+    sizes = {builder.getIndexAttr(config.kTile),
+             builder.getIndexAttr(workgroupN)};
+    strides = {builder.getIndexAttr(1), builder.getIndexAttr(1)};
+    resultType = RankedTensorType::get({config.kTile, workgroupN}, elementType);
+  }
+
+  return tensor::ExtractSliceOp::create(builder, loc, resultType, globalTensor,
+                                        offsets, sizes, strides);
+}
+
+/// Write a staged tile into LDS shared memory using pcf.write_slice.
+static void writeToLDS(OpBuilder &builder, Location loc, Value source,
+                       Value ldsSref) {
+  auto sourceType = cast<ShapedType>(source.getType());
+  int64_t rank = sourceType.getRank();
+  SmallVector<OpFoldResult> offsets(rank, builder.getIndexAttr(0));
+  SmallVector<OpFoldResult> sizes;
+  for (int64_t i = 0; i < rank; ++i) {
+    sizes.push_back(builder.getIndexAttr(sourceType.getDimSize(i)));
+  }
+  SmallVector<OpFoldResult> strides(rank, builder.getIndexAttr(1));
+
+  PCF::WriteSliceOp::create(builder, loc, source, ldsSref, offsets, sizes,
+                            strides);
+}
+
+/// Generate the 8-phase K-loop body with all memory and compute operations.
 ///
 /// For each K iteration, the early-write schedule generates 8 phases:
 ///   P1: Memory  - Global load LHS(k+1) + LDS read q0
@@ -146,14 +195,23 @@ static Value readQuarterFromLDS(OpBuilder &builder, Location loc,
 ///   P8: Sync    - Barrier for loop iteration boundary
 ///
 /// Each phase ends with a pcf.barrier. Memory phases read quarter-K tiles
-/// from LDS using pcf.read_slice. Compute phases use the read data in
-/// vector.contract ops. Global loads/LDS writes are placeholders for now.
+/// from LDS and stage global loads for the next iteration. Compute phases
+/// use the LDS-read data in vector.contract ops.
 static Value generatePhaseBody(OpBuilder &builder, Location loc,
                                PCF::ScopeAttrInterface barrierScope,
                                Value acc, Value ldsLhs, Value ldsRhs,
+                               Value globalLhs, Value globalRhs, Value kIV,
+                               int64_t workgroupM, int64_t workgroupN,
                                const HardcodedConfig &config,
                                Type inputElementType) {
-  // P1: Read q0 from LDS (+ global load placeholder).
+  // Compute next iteration's K offset for prefetching.
+  Value kStep = arith::ConstantIndexOp::create(builder, loc, config.kTile);
+  Value kNext = arith::AddIOp::create(builder, loc, kIV, kStep);
+
+  // P1: Global load LHS(k+1) + LDS read q0.
+  Value lhsStage = loadGlobalTile(builder, loc, globalLhs, kNext,
+                                  /*isLHS=*/true, workgroupM, workgroupN,
+                                  config);
   Value lhsQ0 =
       readQuarterFromLDS(builder, loc, ldsLhs, /*isLHS=*/true,
                          /*quarterIdx=*/0, config, inputElementType);
@@ -166,7 +224,10 @@ static Value generatePhaseBody(OpBuilder &builder, Location loc,
   acc = generateComputePhase(builder, loc, lhsQ0, rhsQ0, acc);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
-  // P3: Read q1 from LDS (+ global load placeholder).
+  // P3: Global load RHS(k+1) + LDS read q1.
+  Value rhsStage = loadGlobalTile(builder, loc, globalRhs, kNext,
+                                  /*isLHS=*/false, workgroupM, workgroupN,
+                                  config);
   Value lhsQ1 =
       readQuarterFromLDS(builder, loc, ldsLhs, /*isLHS=*/true,
                          /*quarterIdx=*/1, config, inputElementType);
@@ -179,7 +240,8 @@ static Value generatePhaseBody(OpBuilder &builder, Location loc,
   acc = generateComputePhase(builder, loc, lhsQ1, rhsQ1, acc);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
-  // P5: Read q2 from LDS (+ LDS write placeholder).
+  // P5: LDS write staged LHS + LDS read q2.
+  writeToLDS(builder, loc, lhsStage, ldsLhs);
   Value lhsQ2 =
       readQuarterFromLDS(builder, loc, ldsLhs, /*isLHS=*/true,
                          /*quarterIdx=*/2, config, inputElementType);
@@ -188,8 +250,9 @@ static Value generatePhaseBody(OpBuilder &builder, Location loc,
                          /*quarterIdx=*/2, config, inputElementType);
   PCF::BarrierOp::create(builder, loc, barrierScope);
 
-  // P6: Compute WMMA q2 + read q3 from LDS (+ LDS write placeholder).
+  // P6: Compute WMMA q2 + LDS write staged RHS + LDS read q3.
   acc = generateComputePhase(builder, loc, lhsQ2, rhsQ2, acc);
+  writeToLDS(builder, loc, rhsStage, ldsRhs);
   Value lhsQ3 =
       readQuarterFromLDS(builder, loc, ldsLhs, /*isLHS=*/true,
                          /*quarterIdx=*/3, config, inputElementType);
@@ -233,6 +296,7 @@ generateScheduleForContraction(IRRewriter &rewriter,
 
   // Get operands.
   Value lhs = contractionOp.getDpsInputs()[0];
+  Value rhs = contractionOp.getDpsInputs()[1];
   Value out = contractionOp.getDpsInits()[0];
 
   // Extract tensor types and dimensions.
@@ -303,20 +367,31 @@ generateScheduleForContraction(IRRewriter &rewriter,
       rewriter, loc,
       DenseElementsAttr::get(accVecType, rewriter.getZeroAttr(accElementType)));
 
-  // Create K loop constants.
+  // Prologue: load the first K tile (k=0) into LDS.
+  // Global tensors (lhs, rhs) are captured from enclosing func scope.
   Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value lhsInit = loadGlobalTile(rewriter, loc, lhs, c0, /*isLHS=*/true,
+                                 workgroupM, workgroupN, config);
+  Value rhsInit = loadGlobalTile(rewriter, loc, rhs, c0, /*isLHS=*/false,
+                                 workgroupM, workgroupN, config);
+  writeToLDS(rewriter, loc, lhsInit, ldsLhs);
+  writeToLDS(rewriter, loc, rhsInit, ldsRhs);
+  PCF::BarrierOp::create(rewriter, loc, sgScope);
+
+  // Create K loop constants.
   Value kStep = arith::ConstantIndexOp::create(rewriter, loc, config.kTile);
   Value kBound = arith::ConstantIndexOp::create(rewriter, loc, kDim);
 
   // Create scf.for K loop carrying the accumulator.
-  // LDS srefs (ldsLhs, ldsRhs) are captured from enclosing subgroup scope.
+  // LDS srefs and global tensors are captured from enclosing scopes.
   scf::ForOp kLoop = scf::ForOp::create(
       rewriter, loc, c0, kBound, kStep, /*initArgs=*/ValueRange{accInit},
-      [&](OpBuilder &bodyBuilder, Location bodyLoc, Value /*iv*/,
+      [&](OpBuilder &bodyBuilder, Location bodyLoc, Value iv,
           ValueRange iterArgs) {
         Value acc = iterArgs[0];
         acc = generatePhaseBody(bodyBuilder, bodyLoc, sgScope, acc, ldsLhs,
-                                ldsRhs, config, inputElementType);
+                                ldsRhs, lhs, rhs, iv, workgroupM, workgroupN,
+                                config, inputElementType);
         scf::YieldOp::create(bodyBuilder, bodyLoc, ValueRange{acc});
       });
 
