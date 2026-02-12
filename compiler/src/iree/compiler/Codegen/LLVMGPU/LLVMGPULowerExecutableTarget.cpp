@@ -109,6 +109,9 @@ void LLVMGPULowerExecutableTargetPass::runOnOperation() {
   case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse:
     addGPUTileAndFusePassPipeline(pipeline, pipelineOptions, forROCDL);
     break;
+  case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUGenerateScheduleIR:
+    addGPUGenerateScheduleIRPassPipeline(pipeline);
+    break;
   // no pipeline specified, nothing to do.
   case IREE::Codegen::DispatchLoweringPassPipeline::None:
     return;

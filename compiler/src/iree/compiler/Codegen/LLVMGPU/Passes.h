@@ -60,6 +60,10 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
 void addGPUDefaultPassPipeline(OpPassManager &funcPassManager,
                                const GPUPipelineOptions &options);
 
+/// Pipeline using GenerateScheduleIR for analytical schedule-driven codegen.
+void addGPUGenerateScheduleIRPassPipeline(OpPassManager &funcPassManager);
+
+
 /// Pass pipeline to lower IREE HAL executables without tiling and distribution.
 void addGPUBaseLoweringPassPipeline(OpPassManager &pm);
 

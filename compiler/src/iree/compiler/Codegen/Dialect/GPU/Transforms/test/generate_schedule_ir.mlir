@@ -20,10 +20,15 @@ func.func @matmul_f16_f32(%lhs: tensor<256x128xf16>,
 //  CHECK-SAME:   %[[OUT:.+]]: tensor<256x256xf32>
 //       CHECK:   %[[RESULT:.+]] = pcf.generic
 //  CHECK-SAME:     scope(#iree_gpu.subgroup_scope)
+//  Initialize region: allocate LDS shared memory.
+//       CHECK:     initialize {
+//       CHECK:       pcf.alloc() : !pcf.sref<256x64xf16, #iree_gpu.subgroup_scope>
+//       CHECK:       pcf.alloc() : !pcf.sref<64x256xf16, #iree_gpu.subgroup_scope>
+//       CHECK:       pcf.yield
+//       CHECK:     } -> (%[[LDS_LHS:.+]]: !pcf.sref<256x64xf16, #iree_gpu.subgroup_scope>,
+//  CHECK-SAME:          %[[LDS_RHS:.+]]: !pcf.sref<64x256xf16, #iree_gpu.subgroup_scope>)
 //       CHECK:     execute(%[[DEST_REF:.+]] = %[[OUT]])
 //  CHECK-SAME:       [%[[SG_ID:.+]]: index, %[[SG_COUNT:.+]]: index]
-//       CHECK:     %[[LDS_LHS:.+]] = pcf.alloc() : !pcf.sref<256x64xf16, #iree_gpu.subgroup_scope>
-//       CHECK:     %[[LDS_RHS:.+]] = pcf.alloc() : !pcf.sref<64x256xf16, #iree_gpu.subgroup_scope>
 //       CHECK:     pcf.generic
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
 //       CHECK:       execute[%[[LANE_ID:.+]]: index, %[[LANE_COUNT:.+]]: index]
@@ -134,8 +139,12 @@ func.func @matmul_single_k_tile(%lhs: tensor<128x64xf16>,
 //  CHECK-SAME:   %[[RHS2:.+]]: tensor<64x128xf16>
 //       CHECK:   pcf.generic
 //  CHECK-SAME:     scope(#iree_gpu.subgroup_scope)
-//       CHECK:     %[[LDS_LHS2:.+]] = pcf.alloc() : !pcf.sref<128x64xf16, #iree_gpu.subgroup_scope>
-//       CHECK:     %[[LDS_RHS2:.+]] = pcf.alloc() : !pcf.sref<64x128xf16, #iree_gpu.subgroup_scope>
+//       CHECK:     initialize {
+//       CHECK:       pcf.alloc() : !pcf.sref<128x64xf16, #iree_gpu.subgroup_scope>
+//       CHECK:       pcf.alloc() : !pcf.sref<64x128xf16, #iree_gpu.subgroup_scope>
+//       CHECK:       pcf.yield
+//       CHECK:     } -> (%[[LDS_LHS2:.+]]: !pcf.sref<128x64xf16, #iree_gpu.subgroup_scope>,
+//  CHECK-SAME:          %[[LDS_RHS2:.+]]: !pcf.sref<64x128xf16, #iree_gpu.subgroup_scope>)
 //       CHECK:     pcf.generic
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
 //  Prologue: initial LDS fill.
@@ -205,8 +214,12 @@ func.func @generic_contraction(%lhs: tensor<64x128xf16>,
 //  CHECK-SAME:   %[[RHS3:.+]]: tensor<128x64xf16>
 //       CHECK:   pcf.generic
 //  CHECK-SAME:     scope(#iree_gpu.subgroup_scope)
-//       CHECK:     %[[LDS_LHS3:.+]] = pcf.alloc() : !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>
-//       CHECK:     %[[LDS_RHS3:.+]] = pcf.alloc() : !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>
+//       CHECK:     initialize {
+//       CHECK:       pcf.alloc() : !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>
+//       CHECK:       pcf.alloc() : !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>
+//       CHECK:       pcf.yield
+//       CHECK:     } -> (%[[LDS_LHS3:.+]]: !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>,
+//  CHECK-SAME:          %[[LDS_RHS3:.+]]: !pcf.sref<64x64xf16, #iree_gpu.subgroup_scope>)
 //       CHECK:     pcf.generic
 //  CHECK-SAME:       scope(#iree_gpu.lane_scope)
 //  Prologue + K-loop with full pipeline.

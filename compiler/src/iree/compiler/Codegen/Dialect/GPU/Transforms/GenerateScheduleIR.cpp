@@ -323,6 +323,13 @@ generateScheduleForContraction(IRRewriter &rewriter,
   // Create outer pcf.generic at subgroup scope.
   // The output tensor is passed as a tied init.
   rewriter.setInsertionPoint(contractionOp);
+
+  // LDS allocation types.
+  PCF::ShapedRefType ldsLhsType = PCF::ShapedRefType::get(
+      ctx, {workgroupM, config.kTile}, inputElementType, sgScope);
+  PCF::ShapedRefType ldsRhsType = PCF::ShapedRefType::get(
+      ctx, {config.kTile, workgroupN}, inputElementType, sgScope);
+
   PCF::GenericOp sgGeneric = PCF::GenericOp::create(
       rewriter, loc,
       /*resultTypes=*/contractionOp->getResultTypes(),
@@ -333,18 +340,29 @@ generateScheduleForContraction(IRRewriter &rewriter,
       /*numIterators=*/1,
       /*syncOnReturn=*/false);
 
-  // Get subgroup execute body. Block args: [dest_ref, sg_id, sg_count].
-  Block *sgBody = &sgGeneric.getRegion().front();
-  rewriter.setInsertionPointToStart(sgBody);
+  // Populate the initializer region with LDS allocations.
+  // Allocations must be in the initialize region, not the execute body,
+  // so that ConvertSRefToMemRef can properly lower them to memref.alloc.
+  {
+    Region &initRegion = sgGeneric.getInitializer();
+    Block *initBlock = rewriter.createBlock(&initRegion);
+    rewriter.setInsertionPointToStart(initBlock);
+    Value ldsLhsAlloc = PCF::AllocOp::create(rewriter, loc, ldsLhsType);
+    Value ldsRhsAlloc = PCF::AllocOp::create(rewriter, loc, ldsRhsType);
+    PCF::YieldOp::create(rewriter, loc,
+                         ValueRange{ldsLhsAlloc, ldsRhsAlloc});
+  }
 
-  // Allocate LDS for LHS (workgroupM x kTile) and RHS (kTile x workgroupN).
-  // These are shared across all lanes within a subgroup.
-  PCF::ShapedRefType ldsLhsType = PCF::ShapedRefType::get(
-      ctx, {workgroupM, config.kTile}, inputElementType, sgScope);
-  PCF::ShapedRefType ldsRhsType = PCF::ShapedRefType::get(
-      ctx, {config.kTile, workgroupN}, inputElementType, sgScope);
-  Value ldsLhs = PCF::AllocOp::create(rewriter, loc, ldsLhsType);
-  Value ldsRhs = PCF::AllocOp::create(rewriter, loc, ldsRhsType);
+  // Add leading block args in the execute region for the initialized allocs.
+  // Execute block arg layout: [leading_args, ref_args, id_args, count_args].
+  // Before: [dest_ref, sg_id, sg_count].
+  // After:  [lds_lhs, lds_rhs, dest_ref, sg_id, sg_count].
+  Block *sgBody = &sgGeneric.getRegion().front();
+  Value ldsLhs = sgBody->insertArgument(0u, ldsLhsType, loc);
+  Value ldsRhs = sgBody->insertArgument(1u, ldsRhsType, loc);
+  sgGeneric.setNumLeadingArgs(2);
+
+  rewriter.setInsertionPointToStart(sgBody);
 
   // Create inner pcf.generic at lane scope (no tied results).
   PCF::GenericOp laneGeneric = PCF::GenericOp::create(
@@ -396,8 +414,8 @@ generateScheduleForContraction(IRRewriter &rewriter,
       });
 
   // Write the final accumulator back to the output sref.
-  // destRef is the subgroup body's first block arg (tied init → sref).
-  Value destRef = sgBody->getArgument(0);
+  // destRef is after the 2 leading args: [ldsLhs, ldsRhs, destRef, ...].
+  Value destRef = sgBody->getArgument(2);
   Value kLoopResult = kLoop.getResult(0);
   SmallVector<OpFoldResult> writeOffsets = {rewriter.getIndexAttr(0),
                                             rewriter.getIndexAttr(0)};

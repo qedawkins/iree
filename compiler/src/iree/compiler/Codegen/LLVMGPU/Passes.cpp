@@ -412,6 +412,15 @@ LogicalResult isAtBoundary(Operation *op) {
   return failure();
 }
 
+void addGPUGenerateScheduleIRPassPipeline(OpPassManager &funcPassManager) {
+  // Step 1: Replace linalg contractions with analytical schedule IR (PCF ops).
+  funcPassManager.addPass(IREE::GPU::createGenerateScheduleIRPass());
+
+  // Step 2: Bufferize tensors to memrefs. The PCF bufferization external
+  // models handle pcf.generic and pcf.write_slice with tensor sources.
+  addGPUBufferizePasses(funcPassManager);
+}
+
 void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
                                    const GPUPipelineOptions &pipelineOptions,
                                    bool forROCDL) {
@@ -1157,6 +1166,10 @@ void buildLLVMGPUCodegenPassPipeline(OpPassManager &variantPassManager,
     if (clPatchFuncOps) {
       modulePassManager.addPass(createPatchFuncOpsPass());
     }
+    // Lower PCF ops produced by GenerateScheduleIR. These are no-ops when
+    // there are no PCF ops in the module.
+    modulePassManager.addPass(IREE::PCF::createConvertSRefToMemRefPass());
+    modulePassManager.addPass(IREE::PCF::createLowerStructuralPCFPass());
   }
   {
     ReconcileTranslationInfoPassOptions options;
