@@ -52,6 +52,11 @@
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 namespace mlir::iree_compiler {
 
+llvm::cl::opt<bool> clGPUUseGenerateScheduleIR(
+    "iree-codegen-llvmgpu-use-generate-schedule-ir",
+    llvm::cl::desc("use the GenerateScheduleIR pipeline for matmul"),
+    llvm::cl::init(false));
+
 llvm::cl::opt<bool> clGPUUseTileAndFuseMatmul(
     "iree-codegen-llvmgpu-use-tile-and-fuse-matmul",
     llvm::cl::desc("test the the tile and fuse pipeline for matmul"),
@@ -2276,6 +2281,20 @@ static LogicalResult setRootConfig(IREE::GPU::TargetAttr target,
           target, entryPointFn, computeOp, ukernelConfig))) {
     LDBG() << "Tile and fuse data tiled MMA inner_tiled config";
     return success();
+  }
+  if (clGPUUseGenerateScheduleIR) {
+    if (auto linalgOp = dyn_cast<linalg::LinalgOp>(computeOp)) {
+      if (linalg::isaContractionOpInterface(linalgOp)) {
+        LDBG() << "GenerateScheduleIR matmul config";
+        int64_t subgroupSize = target.getPreferredSubgroupSize();
+        return setOpConfigAndEntryPointFnTranslation(
+            entryPointFn, computeOp,
+            IREE::Codegen::LoweringConfigAttr(),
+            IREE::Codegen::DispatchLoweringPassPipeline::
+                LLVMGPUGenerateScheduleIR,
+            {subgroupSize, 1, 1}, subgroupSize);
+      }
+    }
   }
   if (clGPUUseTileAndFuseMatmul) {
     if (succeeded(IREE::GPU::setMatmulLoweringConfig(
