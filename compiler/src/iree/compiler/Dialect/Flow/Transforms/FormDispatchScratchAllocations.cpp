@@ -6,14 +6,12 @@
 
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
-#include "iree/compiler/Dialect/TensorExt/IR/TensorExtTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 
 namespace mlir::iree_compiler::IREE::Flow {
@@ -25,7 +23,7 @@ namespace {
 
 /// Returns true if the function body contains a matmul-like operation.
 /// A matmul-like operation is a contraction with at least 2 parallel loops.
-static bool containsMatmulLikeOp(Region &region) {
+bool containsMatmulLikeOp(Region &region) {
   bool found = false;
   region.walk([&](linalg::LinalgOp linalgOp) {
     if (found) {
@@ -44,8 +42,8 @@ static bool containsMatmulLikeOp(Region &region) {
 /// Populates the scratch_size region of an export op with a placeholder
 /// computation. The region takes workload arguments and returns a constant
 /// scratch size.
-static void populateScratchSizeRegion(ExecutableExportOp exportOp,
-                                      unsigned numWorkloadArgs) {
+void populateScratchSizeRegion(ExecutableExportOp exportOp,
+                               unsigned numWorkloadArgs) {
   Region &scratchRegion = exportOp.getScratchSize();
   assert(scratchRegion.empty() && "scratch_size region already populated");
 
@@ -69,14 +67,14 @@ static void populateScratchSizeRegion(ExecutableExportOp exportOp,
 
 /// Collects the number of workload arguments from the workgroup_count region
 /// or from the dispatch's workload operands.
-static unsigned getNumWorkloadArgs(ExecutableExportOp exportOp) {
+unsigned getNumWorkloadArgs(ExecutableExportOp exportOp) {
   if (!exportOp.getWorkgroupCount().empty()) {
     return exportOp.getWorkgroupCount().front().getNumArguments();
   }
   return 0;
 }
 
-struct FormDispatchScratchAllocationsPass
+struct FormDispatchScratchAllocationsPass final
     : public IREE::Flow::impl::FormDispatchScratchAllocationsPassBase<
           FormDispatchScratchAllocationsPass> {
   void runOnOperation() override {
@@ -87,7 +85,7 @@ struct FormDispatchScratchAllocationsPass
     DenseSet<StringAttr> scratchExecutables;
     for (auto executableOp :
          moduleOp.getBody()->getOps<IREE::Flow::ExecutableOp>()) {
-      auto innerModuleOp = executableOp.getInnerModule();
+      mlir::ModuleOp innerModuleOp = executableOp.getInnerModule();
       if (!innerModuleOp) {
         continue;
       }
@@ -98,8 +96,9 @@ struct FormDispatchScratchAllocationsPass
           continue;
         }
 
-        auto funcOp = innerModuleOp.lookupSymbol<mlir::FunctionOpInterface>(
-            exportOp.getFunctionRef());
+        mlir::FunctionOpInterface funcOp =
+            innerModuleOp.lookupSymbol<mlir::FunctionOpInterface>(
+                exportOp.getFunctionRef());
         if (!funcOp) {
           continue;
         }
@@ -122,23 +121,20 @@ struct FormDispatchScratchAllocationsPass
       return;
     }
 
-    // Step 2: Walk all dispatch ops and add scratch buffer arguments for
-    // matching executables.
+    // Step 2: Collect dispatch ops that need scratch buffers.
+    SmallVector<IREE::Flow::DispatchOp> dispatchOpsToModify;
     moduleOp.walk([&](IREE::Flow::DispatchOp dispatchOp) {
-      // Check if any entry point references a scratch executable.
-      bool needsScratch = false;
       for (SymbolRefAttr entryRef : dispatchOp.getEntryPointRefs()) {
-        auto rootRef = entryRef.getRootReference();
+        StringAttr rootRef = entryRef.getRootReference();
         if (scratchExecutables.contains(rootRef)) {
-          needsScratch = true;
-          break;
+          dispatchOpsToModify.push_back(dispatchOp);
+          return;
         }
       }
-      if (!needsScratch) {
-        return;
-      }
+    });
 
-      // Insert scratch size calculation before the dispatch.
+    // Step 3: Add scratch buffer arguments to collected dispatch ops.
+    for (IREE::Flow::DispatchOp dispatchOp : dispatchOpsToModify) {
       OpBuilder builder(dispatchOp);
       Location loc = dispatchOp.getLoc();
 
@@ -150,7 +146,7 @@ struct FormDispatchScratchAllocationsPass
                               .getResult();
 
       // Create a dynamic scratch tensor.
-      auto scratchTensorType =
+      RankedTensorType scratchTensorType =
           RankedTensorType::get({ShapedType::kDynamic}, builder.getI8Type());
       Value scratchTensor =
           tensor::EmptyOp::create(builder, loc, scratchTensorType,
@@ -169,7 +165,7 @@ struct FormDispatchScratchAllocationsPass
       // The scratch tensor has one dynamic dim (the size).
       newArgumentDims.push_back(scratchSize);
 
-      auto newDispatchOp = IREE::Flow::DispatchOp::create(
+      IREE::Flow::DispatchOp newDispatchOp = IREE::Flow::DispatchOp::create(
           builder, loc, dispatchOp.getResultTypes(), dispatchOp.getWorkload(),
           dispatchOp.getEntryPointsAttr(), newArguments, newArgumentDims,
           dispatchOp.getResultDims(), dispatchOp.getTiedOperandsAttr());
@@ -178,7 +174,7 @@ struct FormDispatchScratchAllocationsPass
       // Replace the old dispatch with the new one.
       dispatchOp.replaceAllUsesWith(newDispatchOp.getResults());
       dispatchOp.erase();
-    });
+    }
   }
 };
 
