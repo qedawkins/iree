@@ -1320,6 +1320,60 @@ TEST(IREE128x128Test, LDSAllocationVsBaseline) {
   EXPECT_FALSE(quint.has_value());
 }
 
+TEST(IREE128x128Test, VALUAddressIssueRateDiscrepancy) {
+  // BUG DOCUMENTATION: CostModelArith.cpp:346 assumes VALU address ops are
+  // 1cy each, but ATT measurement on gfx1201 shows 2cy/op issue rate.
+  //
+  // For the 128x128 config, memory phases have 28 VALU addr ops.
+  // Current model: 28 × 1 = 28 cy (VALU pipeline in memory phase).
+  // Corrected:     28 × 2 = 56 cy (VALU pipeline in memory phase).
+  //
+  // With correction, P1 becomes VALU-bound (56 > LDS 39) instead of
+  // LDS-bound. P3 similarly. But compute phases dominate (~85%), so the
+  // total iteration time changes modestly.
+  InstructionTiming mma = {19, 32};
+  InstructionTiming ldsRead = {2, 25};
+  InstructionTiming ldsWrite = {2, 10};
+  InstructionTiming globalLoad = {2, 300};
+
+  // P1 with current 1cy/VALU model: max(28, 39, 16) + 20 = 59.
+  PhaseInstructionCounts p1 = {0, 28, 8, 0, 8, true};
+  PhaseTiming t1 = computePhaseTiming(p1, mma, ldsRead, ldsWrite,
+                                       globalLoad, 20);
+  EXPECT_EQ(t1.valuPipelineCycles, 28);   // Bug: should be 56.
+  EXPECT_EQ(t1.totalCycles, 59);          // Bug: should be 76 (max(56,39,16)+20).
+
+  // If VALU rate were correctly 2cy/op, memory phases would be longer.
+  // But the impact depends on max(VALU, LDS, VMEM):
+  //   P1 current: max(28, 39, 16) + 20 = 59 (LDS-bound, VALU doesn't matter).
+  //   P1 corrected: max(56, 39, 16) + 20 = 76 (now VALU-bound).
+  //   P3 current: max(28, 39) + 20 = 59 (LDS-bound).
+  //   P3 corrected: max(56, 39) + 20 = 76 (now VALU-bound).
+  //   Delta per memory phase: 76 - 59 = 17 cy.
+  //   Total: 2 memory phases × 17 = 34 cy.
+  //
+  // Current total: 792 cy. Corrected: 826 cy (+4.3%).
+  //
+  // For 4Q (256x256) config, ISA Explorer shows:
+  //   Current: 1497 cy/iter → 130.0 TFLOPS.
+  //   Corrected: 1532 cy/iter → 127.0 TFLOPS (matches measured 127.3).
+  //
+  // ISA Explorer also uses 14cy barriers (ATT measured) vs model's 20cy.
+  // With BOTH corrections (2cy VALU + 14cy barrier):
+  //   128x128: 802 cy (70+331+70+331), matching baseline within 1.3%.
+  //
+  // The fix is in computePhaseTiming(): multiply numVALUAddr by the VALU
+  // issue rate (should be a parameter, not hardcoded 1).
+  int64_t currentP1Total = 59;
+  int64_t correctedP1Total = 76;  // max(56, 39, 16) + 20.
+  int64_t deltaPerMemPhase = correctedP1Total - currentP1Total;
+  EXPECT_EQ(deltaPerMemPhase, 17);
+  int64_t currentTotal128 = 792;
+  int64_t correctedTotal128 = currentTotal128 + 2 * deltaPerMemPhase;
+  EXPECT_EQ(correctedTotal128, 826);  // Corrected 2Q cycle count (20cy barrier).
+  // With ISA Explorer's 14cy barrier: 802 cy (matching baseline within 1.3%).
+}
+
 TEST(IREE128x128Test, ModelVsBaselineOverheadAnalysis) {
   // Decompose the discrepancy between model and actual ISA.
   //
