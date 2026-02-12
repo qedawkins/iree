@@ -439,6 +439,11 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   // TODO (nirvedhmeshram) : Can remove this pass after
   // https://github.com/iree-org/iree/issues/19546 is fixed.
   funcPassManager.addPass(createConvertAccGEMMToGEMMPass());
+
+  // Stream-K tiling: tile reduction dimensions using Stream-K distribution.
+  // This is a no-op when no streamed_reduction config is present.
+  funcPassManager.addPass(createLLVMGPUStreamKTilePass());
+
   tileAndDistributeToWorkgroup(funcPassManager, /*useForall=*/true,
                                /*convertToDpsOptions=*/std::nullopt);
 
@@ -1003,8 +1008,13 @@ static void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager,
   // Lower PCF ops to SCF.
   FunctionLikeNest(modulePassManager)
       .addPass(IREE::PCF::createResolveTokensPass)
+      .addPass(IREE::PCF::createLowerStreamKRecombinePass)
       .addPass(IREE::PCF::createConvertSRefToMemRefPass)
       .addPass(IREE::PCF::createLowerStructuralPCFPass);
+
+  // Aggregate scratch allocations into a single scratch buffer binding.
+  // This runs at module level because it accesses the parent export op.
+  modulePassManager.addPass(createLLVMGPUAggregateScratchAllocationsPass());
 
   FunctionLikeNest(modulePassManager)
       // LinalgExt -> SCF
