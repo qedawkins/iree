@@ -23,6 +23,7 @@ iree_lit_test_suite(
             "convert_forall_to_generic_nest_gpu.mlir",
             "distribute_inner_tiled_to_lanes.mlir",
             "expand_undistributed_inner_tiles.mlir",
+            "generate_schedule_ir.mlir",
         ],
         include = ["*.mlir"],
     ),

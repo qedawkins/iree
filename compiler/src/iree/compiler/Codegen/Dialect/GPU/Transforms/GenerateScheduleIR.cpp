@@ -94,7 +94,7 @@ static void generatePhaseBarriers(OpBuilder &builder, Location loc,
 ///       }
 ///       pcf.return
 ///     }
-///     pcf.return %dest_ref
+///     pcf.return
 ///   }
 static LogicalResult
 generateScheduleForContraction(IRRewriter &rewriter,
@@ -111,12 +111,16 @@ generateScheduleForContraction(IRRewriter &rewriter,
   Value lhs = contractionOp.getDpsInputs()[0];
   Value out = contractionOp.getDpsInits()[0];
 
-  // Get K dimension from LHS shape (M*K).
+  // Extract tensor types and dimensions.
   auto lhsType = cast<RankedTensorType>(lhs.getType());
+  auto outType = cast<RankedTensorType>(out.getType());
   int64_t kDim = lhsType.getDimSize(lhsType.getRank() - 1);
   if (kDim == ShapedType::kDynamic) {
     return contractionOp.emitError("dynamic K dimension not yet supported");
   }
+  int64_t workgroupM = outType.getDimSize(0);
+  int64_t workgroupN = outType.getDimSize(1);
+  Type inputElementType = lhsType.getElementType();
 
   // Schedule configuration.
   HardcodedConfig config;
@@ -142,8 +146,16 @@ generateScheduleForContraction(IRRewriter &rewriter,
 
   // Get subgroup execute body. Block args: [dest_ref, sg_id, sg_count].
   Block *sgBody = &sgGeneric.getRegion().front();
-  Value destRef = sgBody->getArgument(0);
   rewriter.setInsertionPointToStart(sgBody);
+
+  // Allocate LDS for LHS (workgroupM x kTile) and RHS (kTile x workgroupN).
+  // These are shared across all lanes within a subgroup.
+  PCF::ShapedRefType ldsLhsType = PCF::ShapedRefType::get(
+      ctx, {workgroupM, config.kTile}, inputElementType, sgScope);
+  PCF::ShapedRefType ldsRhsType = PCF::ShapedRefType::get(
+      ctx, {config.kTile, workgroupN}, inputElementType, sgScope);
+  PCF::AllocOp::create(rewriter, loc, ldsLhsType);
+  PCF::AllocOp::create(rewriter, loc, ldsRhsType);
 
   // Create inner pcf.generic at lane scope (no tied results).
   PCF::GenericOp laneGeneric = PCF::GenericOp::create(
@@ -178,9 +190,10 @@ generateScheduleForContraction(IRRewriter &rewriter,
   // Terminate lane body with pcf.return.
   PCF::ReturnOp::create(rewriter, loc);
 
-  // Terminate subgroup body with pcf.return returning dest_ref.
+  // Terminate subgroup body with pcf.return.
+  // Results are produced by snapshotting tied srefs, not by returning values.
   rewriter.setInsertionPointToEnd(sgBody);
-  PCF::ReturnOp::create(rewriter, loc, ValueRange{destRef});
+  PCF::ReturnOp::create(rewriter, loc);
 
   // Replace contraction op results with generic results.
   rewriter.replaceOp(contractionOp, sgGeneric.getResults());
