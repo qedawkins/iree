@@ -1,4 +1,6 @@
 // RUN: iree-opt %s --pass-pipeline="builtin.module(func.func(iree-gpu-generate-schedule-ir))" --split-input-file | FileCheck %s
+// RUN: iree-opt %s --pass-pipeline="builtin.module(func.func(iree-gpu-generate-schedule-ir),one-shot-bufferize{bufferize-function-boundaries},iree-pcf-convert-sref-to-memref,iree-pcf-lower-structural-pcf,inline)" \
+// RUN:   --split-input-file | FileCheck %s --check-prefix=PIPELINE
 
 // Test that the GenerateScheduleIR pass replaces a matmul contraction with
 // the structured schedule: nested pcf.generic (subgroup + lane) + scf.for K loop
@@ -81,6 +83,40 @@ func.func @matmul_f16_f32(%lhs: tensor<256x128xf16>,
 //   CHECK-NOT:   linalg.matmul
 //       CHECK:   return %[[RESULT]]
 
+// PIPELINE test: verify full lowering from PCF to standard MLIR.
+// After bufferize + convert-sref-to-memref + lower-structural-pcf + inline:
+//   - No PCF ops remain.
+//   - Function signature is bufferized (memref args).
+//   - LDS is workgroup-addressed memref.alloc.
+//   - Reads from LDS are vector.transfer_read.
+//   - Writes to LDS are memref.copy.
+//   - Compute phases are vector.contract.
+//   - Barriers are gpu.barrier.
+//   - Result writeback is vector.transfer_write.
+//
+// PIPELINE-LABEL: func.func @matmul_f16_f32
+//  PIPELINE-SAME:   %[[A:.+]]: memref<256x128xf16
+//  PIPELINE-SAME:   %[[B:.+]]: memref<128x256xf16
+//  PIPELINE-SAME:   %[[C:.+]]: memref<256x256xf32
+//       PIPELINE:   memref.alloc(){{.*}}: memref<256x64xf16, #gpu.address_space<workgroup>>
+//       PIPELINE:   memref.alloc(){{.*}}: memref<64x256xf16, #gpu.address_space<workgroup>>
+// Prologue: copy first K tile to LDS.
+//       PIPELINE:   memref.subview %[[A]]
+//       PIPELINE:   memref.copy
+//       PIPELINE:   memref.copy
+//       PIPELINE:   gpu.barrier
+// K-loop with 4 compute phases.
+//       PIPELINE:   scf.for {{.*}} iter_args
+//  PIPELINE-COUNT-4: vector.contract {{.*}} vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf32>
+//       PIPELINE:   scf.yield
+//       PIPELINE:   }
+// Result writeback.
+//       PIPELINE:   vector.transfer_write
+//  PIPELINE-SAME:     vector<16x16xf32>, memref<16x16xf32
+// No PCF ops remain.
+//   PIPELINE-NOT:   pcf.
+//       PIPELINE:   return %[[C]]
+
 // -----
 
 // Test with different K dimension size (K=64, one iteration with kTile=64).
@@ -126,6 +162,18 @@ func.func @matmul_single_k_tile(%lhs: tensor<128x64xf16>,
 //  CHECK-SAME:         : vector<16x16xf32> into !pcf.sref<128x128xf32, #iree_gpu.subgroup_scope>
 //       CHECK:       pcf.return
 
+// PIPELINE-LABEL: func.func @matmul_single_k_tile
+//  PIPELINE-SAME:   memref<128x64xf16
+//  PIPELINE-SAME:   memref<64x128xf16
+//  PIPELINE-SAME:   memref<128x128xf32
+//       PIPELINE:   memref.alloc(){{.*}}: memref<128x64xf16, #gpu.address_space<workgroup>>
+//       PIPELINE:   memref.alloc(){{.*}}: memref<64x128xf16, #gpu.address_space<workgroup>>
+//       PIPELINE:   gpu.barrier
+// K-loop has only 1 iteration (K=64, step=64), so it may be unrolled.
+//  PIPELINE-COUNT-4: vector.contract
+//       PIPELINE:   vector.transfer_write
+//   PIPELINE-NOT:   pcf.
+
 // -----
 
 // Test with linalg.generic that has matmul semantics (contraction interface).
@@ -169,3 +217,15 @@ func.func @generic_contraction(%lhs: tensor<64x128xf16>,
 //  CHECK-COUNT-4:      vector.contract {{.*}} vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf32>
 //       CHECK:       pcf.write_slice
 //  CHECK-SAME:         : vector<16x16xf32> into !pcf.sref<64x64xf32, #iree_gpu.subgroup_scope>
+
+// PIPELINE-LABEL: func.func @generic_contraction
+//  PIPELINE-SAME:   memref<64x128xf16
+//  PIPELINE-SAME:   memref<128x64xf16
+//  PIPELINE-SAME:   memref<64x64xf32
+//       PIPELINE:   memref.alloc(){{.*}}: memref<64x64xf16, #gpu.address_space<workgroup>>
+//       PIPELINE:   gpu.barrier
+//       PIPELINE:   scf.for {{.*}} iter_args
+//  PIPELINE-COUNT-4: vector.contract
+//       PIPELINE:   scf.yield
+//       PIPELINE:   vector.transfer_write
+//   PIPELINE-NOT:   pcf.
