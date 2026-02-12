@@ -123,6 +123,28 @@ struct ConvertExecutableCalculateWorkgroupsOp
   }
 };
 
+struct ConvertExecutableCalculateScratchSizeOp final
+    : public OpConversionPattern<IREE::HAL::ExecutableCalculateScratchSizeOp> {
+  using Base::Base;
+  LogicalResult
+  matchAndRewrite(IREE::HAL::ExecutableCalculateScratchSizeOp calculateOp,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    IREE::HAL::ExecutableExportOp exportOp =
+        SymbolTable::lookupNearestSymbolFrom<IREE::HAL::ExecutableExportOp>(
+            calculateOp, calculateOp.getEntryPoint());
+    if (!exportOp) {
+      return rewriter.notifyMatchFailure(calculateOp,
+                                         "target entry point not found");
+    }
+    Value scratchSize =
+        exportOp.calculateScratchSize(calculateOp.getLoc(), adaptor.getDevice(),
+                                      adaptor.getWorkload(), rewriter);
+    rewriter.replaceOp(calculateOp, scratchSize);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateHALToHALPatterns(MLIRContext *context,
@@ -136,6 +158,10 @@ void populateHALToHALPatterns(MLIRContext *context,
   conversionTarget.addIllegalOp<IREE::HAL::ExecutableCalculateWorkgroupsOp>();
   patterns.insert<ConvertExecutableCalculateWorkgroupsOp>(typeConverter,
                                                           context);
+
+  conversionTarget.addIllegalOp<IREE::HAL::ExecutableCalculateScratchSizeOp>();
+  patterns.insert<ConvertExecutableCalculateScratchSizeOp>(typeConverter,
+                                                           context);
 }
 
 } // namespace mlir::iree_compiler
