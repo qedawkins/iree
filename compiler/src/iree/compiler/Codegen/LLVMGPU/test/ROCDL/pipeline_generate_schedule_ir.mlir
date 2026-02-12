@@ -54,14 +54,14 @@ hal.executable public @main {
 // LDS allocations with workgroup address space.
 //   CHECK-DAG:   memref.alloc(){{.*}}: memref<256x64xf16, #gpu.address_space<workgroup>>
 //   CHECK-DAG:   memref.alloc(){{.*}}: memref<64x256xf16, #gpu.address_space<workgroup>>
-// Prologue: copy first K tile to LDS.
-//       CHECK:   memref.copy
-//       CHECK:   memref.copy
-//       CHECK:   gpu.barrier
-// K-loop with 4 quarter-K compute phases.
+// K-loop: copy to LDS, barrier, 4 quarter-K contracts, barrier.
 //       CHECK:   scf.for {{.*}} iter_args
+//       CHECK:     memref.copy
+//       CHECK:     memref.copy
+//       CHECK:     gpu.barrier
 //  CHECK-COUNT-4: vector.contract {{.*}} vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf32>
-//       CHECK:   scf.yield
+//       CHECK:     gpu.barrier
+//       CHECK:     scf.yield
 // Result writeback.
 //       CHECK:   vector.transfer_write
 // No PCF ops remain after lowering.

@@ -2287,12 +2287,25 @@ static LogicalResult setRootConfig(IREE::GPU::TargetAttr target,
       if (linalg::isaContractionOpInterface(linalgOp)) {
         LDBG() << "GenerateScheduleIR matmul config";
         int64_t subgroupSize = target.getPreferredSubgroupSize();
+
+        // Compute workgroup size from output dimensions and per-thread tile
+        // sizes. The schedule assigns one 16x16 output tile per thread.
+        constexpr int64_t mmaM = 16;
+        constexpr int64_t mmaN = 16;
+        auto outType =
+            cast<RankedTensorType>(linalgOp.getDpsInits()[0].getType());
+        int64_t m = outType.getDimSize(0);
+        int64_t n = outType.getDimSize(1);
+        int64_t numTiles = (m / mmaM) * (n / mmaN);
+        int64_t workgroupSize =
+            llvm::alignTo(numTiles, subgroupSize);
+
         return setOpConfigAndEntryPointFnTranslation(
             entryPointFn, computeOp,
             IREE::Codegen::LoweringConfigAttr(),
             IREE::Codegen::DispatchLoweringPassPipeline::
                 LLVMGPUGenerateScheduleIR,
-            {subgroupSize, 1, 1}, subgroupSize);
+            {workgroupSize, 1, 1}, subgroupSize);
       }
     }
   }
