@@ -499,7 +499,6 @@ def FenceOp : PCF_Op<"fence", []> {
 def StreamKRecombineOp : PCF_Op<"stream_k_recombine", [
        AttrSizedOperandSegments,
        RecursiveMemoryEffects,
-       SingleBlock,
   ]> {
   let summary = [{Recombines partial tiles from stream-K workgroups.}];
   let description = [{

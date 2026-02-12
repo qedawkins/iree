@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
@@ -175,10 +176,10 @@ struct LowerStreamKRecombineOp final
               // Leading dimension: offset = old * dim0_size.
               Value dim0Size;
               if (tileType.isDynamicDim(0)) {
-                dim0Size = thenBuilder.create<arith::ConstantIndexOp>(
-                    thenLoc, 1);
-                // For dynamic dims, use tensor.dim. But tile type is
-                // known statically in most cases.
+                Value c0Idx =
+                    thenBuilder.create<arith::ConstantIndexOp>(thenLoc, 0);
+                dim0Size = thenBuilder.create<tensor::DimOp>(
+                    thenLoc, partial, c0Idx);
               } else {
                 dim0Size = thenBuilder.create<arith::ConstantIndexOp>(
                     thenLoc, tileType.getDimSize(0));
@@ -268,10 +269,13 @@ struct LowerStreamKRecombineOp final
                               // Compute slot offset.
                               Value dim0Size;
                               if (tileType.isDynamicDim(0)) {
-                                dim0Size =
+                                Value c0Idx =
                                     loopBuilder
                                         .create<arith::ConstantIndexOp>(
-                                            loopLoc, 1);
+                                            loopLoc, 0);
+                                dim0Size =
+                                    loopBuilder.create<tensor::DimOp>(
+                                        loopLoc, partial, c0Idx);
                               } else {
                                 dim0Size =
                                     loopBuilder
