@@ -616,6 +616,52 @@ def IREECodegen_IndexHintOp : Op<IREECodegen_Dialect, "index_hint", [Pure]> {
 }
 
 //===----------------------------------------------------------------------===//
+// AllocScratchOp
+//===----------------------------------------------------------------------===//
+
+def IREECodegen_AllocScratchOp :
+    Op<IREECodegen_Dialect, "alloc_scratch", [
+      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = [{Allocates cross-workgroup scratch memory.}];
+  let description = [{
+    Represents an unresolved scratch memory allocation in cross-workgroup
+    scope. These ops are collected by an aggregation pass that:
+
+    1. Sums the byte sizes of all `alloc_scratch` ops in the dispatch.
+    2. Populates the export's `scratch_size` region with the total.
+    3. Replaces each `alloc_scratch` with a `memref.subview` of the scratch
+       binding at the appropriate offset.
+
+    Dynamic dimensions in the result memref type must have corresponding
+    dynamic size operands.
+
+    Example:
+    ```mlir
+      %scratch = iree_codegen.alloc_scratch() : memref<128x64xf16>
+      %counter = iree_codegen.alloc_scratch(%n) : memref<?xi32>
+    ```
+  }];
+
+  let arguments = (ins Variadic<Index>:$dynamic_sizes);
+  let results = (outs AnyMemRef:$result);
+
+  let assemblyFormat = [{
+    `(` $dynamic_sizes `)` attr-dict `:` type($result)
+  }];
+
+  let extraClassDeclaration = [{
+    MemRefType getResultType() {
+      return cast<MemRefType>(getResult().getType());
+    }
+
+    /// Returns mixed static/dynamic sizes for all dimensions.
+    SmallVector<OpFoldResult> getMixedSizes();
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // FenceOp
 //===----------------------------------------------------------------------===//
 

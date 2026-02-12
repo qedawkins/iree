@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -451,6 +452,34 @@ void WorkgroupCountHintOp::build(OpBuilder &builder, OperationState &state,
   dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
   build(builder, state, dynamicSizes,
         builder.getDenseI64ArrayAttr(staticSizes));
+}
+
+//===----------------------------------------------------------------------===//
+// AllocScratchOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult AllocScratchOp::verify() {
+  MemRefType resultType = getResultType();
+  if (getDynamicSizes().size() != resultType.getNumDynamicDims()) {
+    return emitOpError("dynamic size operand count (")
+           << getDynamicSizes().size()
+           << ") does not match the number of dynamic dimensions in result type "
+           << resultType << " (" << resultType.getNumDynamicDims() << ")";
+  }
+  return success();
+}
+
+SmallVector<OpFoldResult> AllocScratchOp::getMixedSizes() {
+  Builder b(getContext());
+  return getMixedValues(getResultType().getShape(), getDynamicSizes(), b);
+}
+
+void AllocScratchOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       cast<OpResult>(getResult()),
+                       SideEffects::DefaultResource::get());
 }
 
 //===----------------------------------------------------------------------===//

@@ -42,3 +42,11 @@ func.func @store_to_buffer_invalid_element_type(%arg0: tensor<4xf16>, %arg1: mem
   iree_codegen.store_to_buffer %arg0, %arg1 : tensor<4xf16> into memref<4xf32>
   return
 }
+
+// -----
+
+func.func @alloc_scratch_dynamic_size_mismatch(%n: index) {
+  // expected-error @+1 {{dynamic size operand count (1) does not match the number of dynamic dimensions in result type 'memref<128x64xf16>' (0)}}
+  %scratch = iree_codegen.alloc_scratch(%n) : memref<128x64xf16>
+  return
+}

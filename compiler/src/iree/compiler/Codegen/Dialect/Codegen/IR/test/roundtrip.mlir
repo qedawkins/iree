@@ -122,3 +122,31 @@ func.func @fence_release_acquire() {
 // CHECK-LABEL: func.func @fence_release_acquire
 //       CHECK:   iree_codegen.fence release #gpu.address_space<workgroup>
 //       CHECK:   iree_codegen.fence acquire #gpu.address_space<workgroup>
+
+// -----
+
+func.func @alloc_scratch_static() {
+  %scratch = iree_codegen.alloc_scratch() : memref<128x64xf16>
+  return
+}
+// CHECK-LABEL: func.func @alloc_scratch_static
+//       CHECK:   iree_codegen.alloc_scratch() : memref<128x64xf16>
+
+// -----
+
+func.func @alloc_scratch_dynamic(%n: index) {
+  %scratch = iree_codegen.alloc_scratch(%n) : memref<?xi32>
+  return
+}
+// CHECK-LABEL: func.func @alloc_scratch_dynamic
+//  CHECK-SAME:   %[[N:.+]]: index
+//       CHECK:   iree_codegen.alloc_scratch(%[[N]]) : memref<?xi32>
+
+// -----
+
+func.func @alloc_scratch_scalar() {
+  %counter = iree_codegen.alloc_scratch() : memref<i32>
+  return
+}
+// CHECK-LABEL: func.func @alloc_scratch_scalar
+//       CHECK:   iree_codegen.alloc_scratch() : memref<i32>
