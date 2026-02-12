@@ -370,9 +370,8 @@ static void printScratchSizeRegion(OpAsmPrinter &p, Operation *op,
     return;
   }
   p << "scratch_size(";
-  llvm::interleaveComma(body.getArguments(), p, [&](BlockArgument arg) {
-    p.printRegionArgument(arg);
-  });
+  llvm::interleaveComma(body.getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
   p << ")";
   Type indexType = IndexType::get(body.getContext());
   p.printArrowTypeList(TypeRange{indexType});
@@ -1331,8 +1330,8 @@ LogicalResult ExecutableScratchSizeOp::verify() {
   return success();
 }
 
-LogicalResult ExecutableScratchSizeOp::verifySymbolUses(
-    SymbolTableCollection &symbolTable) {
+LogicalResult
+ExecutableScratchSizeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   Operation *entryPointOp =
       symbolTable.lookupNearestSymbolFrom(*this, getEntryPointAttr());
   if (!entryPointOp) {

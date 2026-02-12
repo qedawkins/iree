@@ -1794,9 +1794,8 @@ static void printScratchSizeRegion(OpAsmPrinter &p, Operation *op,
     return;
   }
   p << "scratch_size(";
-  llvm::interleaveComma(body.getArguments(), p, [&](BlockArgument arg) {
-    p.printRegionArgument(arg);
-  });
+  llvm::interleaveComma(body.getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
   p << ")";
   Type indexType = IndexType::get(body.getContext());
   p.printArrowTypeList(TypeRange{indexType});
@@ -5196,12 +5195,10 @@ LogicalResult ExecutableExportOp::verify() {
 // stream.executable.scratch_size
 //===----------------------------------------------------------------------===//
 
-LogicalResult ExecutableScratchSizeOp::verify() {
-  return success();
-}
+LogicalResult ExecutableScratchSizeOp::verify() { return success(); }
 
-LogicalResult ExecutableScratchSizeOp::verifySymbolUses(
-    SymbolTableCollection &symbolTable) {
+LogicalResult
+ExecutableScratchSizeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   Operation *entryPointOp =
       symbolTable.lookupNearestSymbolFrom(*this, getEntryPointAttr());
   if (!entryPointOp) {
@@ -5209,9 +5206,8 @@ LogicalResult ExecutableScratchSizeOp::verifySymbolUses(
   }
   auto exportOp = dyn_cast<IREE::Stream::ExecutableExportOp>(entryPointOp);
   if (!exportOp) {
-    return emitOpError()
-           << "entry point is not a stream.executable.export: "
-           << getEntryPoint();
+    return emitOpError() << "entry point is not a stream.executable.export: "
+                         << getEntryPoint();
   }
   if (!exportOp.getScratchSizeBody()) {
     return emitOpError() << "entry point does not have a scratch_size region: "

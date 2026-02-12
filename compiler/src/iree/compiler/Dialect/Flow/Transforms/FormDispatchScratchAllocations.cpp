@@ -158,8 +158,8 @@ struct FormDispatchScratchAllocationsPass
               .getResult();
 
       // Rebuild the dispatch op with the scratch tensor as an additional
-      // argument. We need to reconstruct the op because AttrSizedOperandSegments
-      // requires careful handling.
+      // argument. We need to reconstruct the op because
+      // AttrSizedOperandSegments requires careful handling.
       SmallVector<Value> newArguments =
           llvm::to_vector(dispatchOp.getArguments());
       newArguments.push_back(scratchTensor);
@@ -170,10 +170,9 @@ struct FormDispatchScratchAllocationsPass
       newArgumentDims.push_back(scratchSize);
 
       auto newDispatchOp = IREE::Flow::DispatchOp::create(
-          builder, loc, dispatchOp.getResultTypes(),
-          dispatchOp.getWorkload(), dispatchOp.getEntryPointsAttr(),
-          newArguments, newArgumentDims, dispatchOp.getResultDims(),
-          dispatchOp.getTiedOperandsAttr());
+          builder, loc, dispatchOp.getResultTypes(), dispatchOp.getWorkload(),
+          dispatchOp.getEntryPointsAttr(), newArguments, newArgumentDims,
+          dispatchOp.getResultDims(), dispatchOp.getTiedOperandsAttr());
       newDispatchOp->setDialectAttrs(dispatchOp->getDialectAttrs());
 
       // Replace the old dispatch with the new one.
