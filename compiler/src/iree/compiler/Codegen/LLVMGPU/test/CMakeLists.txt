@@ -55,6 +55,7 @@ iree_lit_test_suite(
     "rocdl_load_to_transpose_load.mlir"
     "rocdl_pipeline_test.mlir"
     "sort_pipeline_test.mlir"
+    "stream_k_tiling.mlir"
     "tensorcore_vectorization.mlir"
     "transform_dialect_bufferize.mlir"
     "transform_dialect_eliminate_gpu_barriers.mlir"

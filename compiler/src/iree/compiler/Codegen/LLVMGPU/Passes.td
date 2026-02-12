@@ -116,6 +116,11 @@ def LLVMGPUSelectLoweringStrategyPass :
   ];
 }
 
+def LLVMGPUStreamKTilePass :
+    InterfacePass<"iree-llvmgpu-stream-k-tile", "mlir::FunctionOpInterface"> {
+  let summary = "Tile reduction dimensions using Stream-K distribution with PCF dialect.";
+}
+
 def LLVMGPUTensorCoreVectorizationPass :
     InterfacePass<"iree-llvmgpu-tensorcore-vectorization", "mlir::FunctionOpInterface"> {
   let summary = "Pass to convert linalg into Vector and transform it to a form that can be lowered to GPU MMA ops";
