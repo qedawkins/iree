@@ -146,6 +146,17 @@ def LLVMGPUVectorToGPUPass :
   let summary = "Pass to convert vector to gpu.";
 }
 
+def LLVMGPUAggregateScratchAllocationsPass :
+    Pass<"iree-llvmgpu-aggregate-scratch-allocations", "ModuleOp"> {
+  let summary = "Aggregate iree_codegen.alloc_scratch ops into a single scratch binding.";
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::HAL::HALDialect",
+    "::mlir::iree_compiler::IREE::Codegen::IREECodegenDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::memref::MemRefDialect",
+  ];
+}
+
 //------------------------------------------------------------------------------
 // Test Passes
 //------------------------------------------------------------------------------
