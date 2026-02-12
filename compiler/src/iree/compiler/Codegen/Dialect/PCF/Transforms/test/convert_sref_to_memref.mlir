@@ -291,12 +291,16 @@ func.func @convert_alloc(%d0: index) -> !pcf.sref<?x5xi32, #pcf.sequential> {
 
 // -----
 
-// expected-error@+1 {{failed to legalize operation}}
-func.func @invalid_workgroup_alloc(%d0: index) -> !pcf.sref<?x5xi32, #iree_codegen.workgroup_scope> {
-// expected-error@+1 {{failed to get memory space for allocation}}
+// Workgroup-scope alloc lowers to alloc_scratch.
+func.func @workgroup_alloc_to_scratch(%d0: index) -> !pcf.sref<?x5xi32, #iree_codegen.workgroup_scope> {
   %0 = pcf.alloc(%d0) : !pcf.sref<?x5xi32, #iree_codegen.workgroup_scope>
   return %0 : !pcf.sref<?x5xi32, #iree_codegen.workgroup_scope>
 }
+
+// CHECK-LABEL: @workgroup_alloc_to_scratch
+//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
+//       CHECK:   %[[SCRATCH:.+]] = iree_codegen.alloc_scratch(%[[D0]]) : memref<?x5xi32>
+//       CHECK:   return %[[SCRATCH]] : memref<?x5xi32>
 
 // -----
 

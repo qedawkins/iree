@@ -270,6 +270,15 @@ ChangeStatus StridedLayoutValueElement::updateOpResult(
   llvm::TypeSwitch<Operation *, void>(result.getOwner())
       .Case([&](PCF::AllocOp allocOp) {
         PCF::ShapedRefType resultType = allocOp.getResultType();
+        // Workgroup-scope allocs become alloc_scratch with no memory space.
+        // They bypass the normal getAllocMemSpace path which returns failure
+        // for workgroup scope.
+        if (isa<Codegen::WorkgroupScopeAttr>(resultType.getScope())) {
+          newState.setAssumed(MemRefType::get(resultType.getShape(),
+                                              resultType.getElementType()));
+          newState.indicateOptimisticFixpoint();
+          return;
+        }
         FailureOr<Attribute> memSpace =
             resultType.getScope().getAllocMemSpace(allocOp.getContext());
         if (failed(memSpace)) {
@@ -885,10 +894,10 @@ struct ConvertGetMemrefOp final : OpConversionPattern<PCF::GetMemrefOp> {
   }
 };
 
-/// Converts `pcf.alloc` to a `memref.alloc` with the requested memref type.
-/// The memory space was determined during the analysis using the scope and
-/// the alignment is set based on the preferred allocation alignment, also per
-/// the scope.
+/// Converts `pcf.alloc` to a `memref.alloc` or `iree_codegen.alloc_scratch`.
+/// For workgroup-scope allocs, produces `alloc_scratch` which is later resolved
+/// by the scratch aggregation pass. For other scopes, produces `memref.alloc`
+/// with the memory space and alignment determined by the scope.
 struct ConvertAllocOp final : OpConversionPattern<PCF::AllocOp> {
   using Base::Base;
 
@@ -900,6 +909,16 @@ struct ConvertAllocOp final : OpConversionPattern<PCF::AllocOp> {
     if (!allocType) {
       return rewriter.notifyMatchFailure(allocOp,
                                          "failed to convert alloc type");
+    }
+
+    // Workgroup-scope allocs become alloc_scratch. The aggregation pass
+    // collects these, computes total scratch size, and replaces them with
+    // subviews of the scratch binding.
+    if (isa<Codegen::WorkgroupScopeAttr>(
+            allocOp.getResultType().getScope())) {
+      rewriter.replaceOpWithNewOp<Codegen::AllocScratchOp>(
+          allocOp, allocType, adaptor.getDynamicSizes());
+      return success();
     }
 
     // TODO(qedawkins): This pattern is a hack. We should be directly allocating
