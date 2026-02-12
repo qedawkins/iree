@@ -68,6 +68,22 @@ def DeduplicateExecutablesPass :
   let summary = "Deduplicates executables that are identical.";
 }
 
+def FormDispatchScratchAllocationsPass :
+    Pass<"iree-flow-form-dispatch-scratch-allocations", "mlir::ModuleOp"> {
+  let summary = "Adds scratch buffer allocations to matmul-like dispatches.";
+  let description = [{
+    Identifies matmul-like dispatches and adds scratch_size regions to their
+    exports, inserts scratch size calculation ops before dispatches, and adds
+    scratch buffer tensor arguments to dispatches.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::tensor::TensorDialect",
+    "IREE::Flow::FlowDialect",
+  ];
+}
+
 def DumpDispatchGraphPass : Pass<"iree-flow-dump-dispatch-graph-pass"> {
   let summary = "Dump visualization of dispatches within the program.";
   let options = [

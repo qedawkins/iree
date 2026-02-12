@@ -21,6 +21,7 @@ iree_lit_test_suite(
     "cleanup_tensor_shapes.mlir"
     "deduplicate_executables.mlir"
     "export_benchmark_funcs.mlir"
+    "form_dispatch_scratch_allocations.mlir"
     "initialize_empty_tensors.mlir"
     "inject_dispatch_tracing.mlir"
     "inject_tensor_tracing.mlir"

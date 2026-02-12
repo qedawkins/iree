@@ -29,6 +29,7 @@ iree_lit_test_suite(
     "file_ops.mlir"
     "resource_folding.mlir"
     "resource_ops.mlir"
+    "scratch_size_ops.mlir"
     "tensor_folding.mlir"
     "tensor_ops.mlir"
     "tensor_parameter_ops.mlir"

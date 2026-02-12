@@ -1168,6 +1168,11 @@ struct ConvertExecutableOp
                                                mapper);
         convertReturnOps(newOp.getWorkgroupCount());
       }
+      if (!exportOp.getScratchSize().empty()) {
+        mlir::IRMapping mapper;
+        exportOp.getScratchSize().cloneInto(&newOp.getScratchSize(), mapper);
+        convertReturnOps(newOp.getScratchSize());
+      }
     }
 
     // Move the original nested module body into the new executable directly.
@@ -1260,6 +1265,19 @@ struct ConvertReturnOp : public OpConversionPattern<IREE::Flow::ReturnOp> {
   }
 };
 
+struct ConvertExecutableScratchSizeOp
+    : public OpConversionPattern<IREE::Flow::ExecutableScratchSizeOp> {
+  using Base::Base;
+  LogicalResult
+  matchAndRewrite(IREE::Flow::ExecutableScratchSizeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<IREE::Stream::ExecutableScratchSizeOp>(
+        op, rewriter.getIndexType(), op.getEntryPointAttr(),
+        adaptor.getWorkload());
+    return success();
+  }
+};
+
 } // namespace
 
 void populateFlowToStreamConversionPatterns(
@@ -1297,6 +1315,7 @@ void populateFlowToStreamConversionPatterns(
                                      IREE::Stream::DispatchWorkgroupSizeOp>>(
       typeConverter, context);
   patterns.insert<ConvertReturnOp>(typeConverter, context);
+  patterns.insert<ConvertExecutableScratchSizeOp>(typeConverter, context);
 }
 
 void populateFlowToStreamConversionPatterns(

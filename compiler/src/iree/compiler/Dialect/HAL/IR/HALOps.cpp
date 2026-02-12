@@ -573,6 +573,48 @@ static void printExportConditionRegion(OpAsmPrinter &p, Operation *op,
 }
 
 //===----------------------------------------------------------------------===//
+// custom<ScratchSizeRegion>($body)
+//===----------------------------------------------------------------------===//
+
+static ParseResult parseScratchSizeRegion(OpAsmParser &parser, Region &body) {
+  SmallVector<OpAsmParser::Argument> args;
+  if (failed(parser.parseArgumentList(args, AsmParser::Delimiter::Paren,
+                                      /*allowType=*/true,
+                                      /*allowAttrs=*/true))) {
+    return failure();
+  }
+
+  // Parse the declared return types. Validation is deferred to the verifier.
+  SmallVector<Type> returnTypes;
+  if (failed(parser.parseArrowTypeList(returnTypes))) {
+    return failure();
+  }
+
+  // Parse region contents.
+  if (failed(parser.parseRegion(body, args, /*enableNameShadowing=*/false))) {
+    return failure();
+  }
+
+  return success();
+}
+
+static void printScratchSizeRegion(OpAsmPrinter &p, Operation *op,
+                                   Region &body) {
+  if (body.empty()) {
+    return;
+  }
+  p << "(";
+  llvm::interleaveComma(body.getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
+  p << ")";
+  Type indexType = IndexType::get(body.getContext());
+  p.printArrowTypeList(TypeRange{indexType});
+  p << " ";
+  p.printRegion(body, /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+}
+
+//===----------------------------------------------------------------------===//
 // hal.ex.*
 //===----------------------------------------------------------------------===//
 
@@ -1731,6 +1773,49 @@ static LogicalResult verifyExportConditionRegion(Operation *op,
   return success();
 }
 
+// Verifies that the scratch_size region matches the expected signature.
+// Returns success if the region is empty.
+static LogicalResult verifyScratchSizeRegion(Operation *op, Region &region) {
+  if (region.empty()) {
+    return success();
+  }
+
+  // Verify one of the supported signatures.
+  bool validArguments = true;
+  if (region.getNumArguments() == 0) {
+    // Need at least a !hal.device.
+    validArguments = false;
+  } else if (!isa<IREE::HAL::DeviceType>(region.getArgument(0).getType())) {
+    // !hal.device must come first.
+    validArguments = false;
+  } else {
+    // All remaining arguments need to be of type index (today).
+    for (BlockArgument &blockArg : region.getArguments().drop_front(1)) {
+      if (!isa<IndexType>(blockArg.getType())) {
+        validArguments = false;
+        break;
+      }
+    }
+  }
+  if (!validArguments) {
+    return op->emitOpError(
+        "expected scratch_size to take (%device: !hal.device, "
+        "%workload_0: index, %workload_1: index, ...");
+  }
+
+  // Verify the return type is a single index value (byte count).
+  for (auto returnOp : region.getOps<IREE::HAL::ReturnOp>()) {
+    auto returnTypes = returnOp.getOperandTypes();
+    if (returnTypes.size() != 1 ||
+        !llvm::all_of(returnTypes, [](Type type) { return type.isIndex(); })) {
+      return op->emitOpError(
+          "scratch_size region must return exactly one index value");
+    }
+  }
+
+  return success();
+}
+
 LogicalResult ExecutableExportOp::verify() {
   ExecutableExportOp op = *this;
 
@@ -1754,6 +1839,15 @@ LogicalResult ExecutableExportOp::verify() {
       return op.emitOpError()
              << "expected a single region block for the workgroup count";
     } else if (failed(verifyWorkgroupCountRegion(op, getWorkgroupCount()))) {
+      return failure();
+    }
+  }
+
+  if (getScratchSizeBody()) {
+    if (!llvm::hasSingleElement(getScratchSize())) {
+      return op.emitOpError()
+             << "expected a single region block for the scratch_size";
+    } else if (failed(verifyScratchSizeRegion(op, getScratchSize()))) {
       return failure();
     }
   }
@@ -1803,6 +1897,13 @@ ExecutableExportOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       if (!compareArgumentTypes(getWorkgroupCountBody(),
                                 fallbackOp.getWorkgroupCountBody())) {
         return emitOpError() << "fallback workgroup count argument mismatch; "
+                                "fallback args must match exactly";
+      }
+    }
+    if (getScratchSizeBody() && fallbackOp.getScratchSizeBody()) {
+      if (!compareArgumentTypes(getScratchSizeBody(),
+                                fallbackOp.getScratchSizeBody())) {
+        return emitOpError() << "fallback scratch_size argument mismatch; "
                                 "fallback args must match exactly";
       }
     }
@@ -1942,6 +2043,35 @@ std::array<Value, 3> ExecutableExportOp::calculateWorkgroupSize(
       builder.createOrFold<arith::ConstantIndexOp>(loc, 1),
       builder.createOrFold<arith::ConstantIndexOp>(loc, 1),
   };
+}
+
+static Value calculateScratchSizeFromRegion(Location loc, Block *body,
+                                            Value device, ValueRange workload,
+                                            OpBuilder &builder) {
+  IRMapping bvm;
+  bvm.map(body->getArgument(0), device);
+  unsigned numArgs =
+      std::min<unsigned>(body->getNumArguments() - 1, workload.size());
+  for (unsigned argNum : llvm::seq<unsigned>(0, numArgs)) {
+    bvm.map(body->getArgument(/*device*/ 1 + argNum), workload[argNum]);
+  }
+  for (Operation &op : body->without_terminator()) {
+    builder.clone(op, bvm);
+  }
+  auto returnOp = cast<IREE::HAL::ReturnOp>(body->getTerminator());
+  assert(returnOp.getNumOperands() == 1 && "must return index");
+  return bvm.lookup(returnOp.getOperands()[0]);
+}
+
+Value ExecutableExportOp::calculateScratchSize(Location loc, Value device,
+                                               ValueRange workload,
+                                               OpBuilder &builder) {
+  Block *body = getScratchSizeBody();
+  if (body) {
+    return calculateScratchSizeFromRegion(loc, body, device, workload, builder);
+  }
+  // No scratch memory needed by default.
+  return builder.createOrFold<arith::ConstantIndexOp>(loc, 0);
 }
 
 //===----------------------------------------------------------------------===//

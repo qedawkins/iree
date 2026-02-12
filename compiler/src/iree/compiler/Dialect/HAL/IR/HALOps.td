@@ -2777,7 +2777,8 @@ def HAL_ExecutableExportOp : HAL_Op<"executable.export", [
 
   let regions = (region
     AnyRegion:$workgroup_count,
-    AnyRegion:$condition
+    AnyRegion:$condition,
+    AnyRegion:$scratch_size
   );
 
   let assemblyFormat = [{
@@ -2788,6 +2789,7 @@ def HAL_ExecutableExportOp : HAL_Op<"executable.export", [
     (`condition` `` custom<ExportConditionRegion>($condition)^)?
     (`fallback` `(` $condition_fallback^ `)`)?
     (`count` `` custom<WorkgroupCountRegion>($workgroup_count)^)?
+    (`scratch` `` custom<ScratchSizeRegion>($scratch_size)^)?
     attr-dict-with-keyword
   }];
 
@@ -2837,6 +2839,16 @@ def HAL_ExecutableExportOp : HAL_Op<"executable.export", [
 
     // Calculates an XYZ workgroup size based on the given |workload|.
     std::array<Value, 3> calculateWorkgroupSize(
+        Location loc, Value device, ValueRange workload, OpBuilder &builder);
+
+    Block *getScratchSizeBody() {
+      if (getScratchSize().empty()) return nullptr;
+      return &getScratchSize().front();
+    }
+
+    // Calculates the scratch memory size in bytes for the given workload.
+    // Returns zero if no scratch_size region is defined.
+    Value calculateScratchSize(
         Location loc, Value device, ValueRange workload, OpBuilder &builder);
 
     // Helper function to return the subgroup size.
@@ -3268,6 +3280,31 @@ def HAL_ExecutableCalculateWorkgroupsOp : HAL_PureOp<"executable.calculate_workg
     `target` `(` $entry_point `)`
     (`workload` `(` `[` $workload^ `]` `)`)?
     `:` type($workgroup_x) `,` type($workgroup_y) `,` type($workgroup_z)
+    attr-dict-with-keyword
+  }];
+}
+
+def HAL_ExecutableCalculateScratchSizeOp : HAL_PureOp<"executable.calculate_scratch_size"> {
+  let summary = [{Calculates scratch memory size for an exported function.}];
+  let description = [{
+    Calculates the required scratch memory size in bytes using the scratch_size
+    region of the target `hal.executable.export` op.
+  }];
+
+  let arguments = (ins
+    HAL_Device:$device,
+    SymbolRefAttr:$entry_point,
+    Variadic<Index>:$workload
+  );
+  let results = (outs
+    Index:$result
+  );
+
+  let assemblyFormat = [{
+    `device` `(` $device `:` type($device) `)`
+    `target` `(` $entry_point `)`
+    (`workload` `(` `[` $workload^ `]` `)`)?
+    `:` type($result)
     attr-dict-with-keyword
   }];
 }

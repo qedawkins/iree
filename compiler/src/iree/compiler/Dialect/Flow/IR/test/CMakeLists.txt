@@ -20,6 +20,8 @@ iree_lit_test_suite(
     "executable_ops.mlir"
     "parameter_ops.mlir"
     "resolve_dim_ops.mlir"
+    "scratch_size_invalid.mlir"
+    "scratch_size_ops.mlir"
     "tensor_folding.mlir"
     "tensor_ops.mlir"
     "types.mlir"

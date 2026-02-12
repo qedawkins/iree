@@ -1748,6 +1748,64 @@ static void printWorkgroupCountRegion(OpAsmPrinter &p, Operation *op,
 }
 
 //===----------------------------------------------------------------------===//
+// custom<ScratchSizeRegion>($body)
+//===----------------------------------------------------------------------===//
+
+static ParseResult parseScratchSizeRegion(OpAsmParser &parser, Region &body) {
+  if (failed(parser.parseOptionalKeyword("scratch_size"))) {
+    return success(); // Omitted.
+  }
+
+  SmallVector<OpAsmParser::Argument> args;
+  if (failed(parser.parseArgumentList(args, AsmParser::Delimiter::Paren,
+                                      /*allowType=*/true,
+                                      /*allowAttrs=*/true))) {
+    return failure();
+  }
+
+  // Parse the declared return types. Validation is deferred to the verifier.
+  SmallVector<Type> returnTypes;
+  if (failed(parser.parseArrowTypeList(returnTypes))) {
+    return failure();
+  }
+
+  // Parse region contents.
+  if (failed(parser.parseRegion(body, args, /*enableNameShadowing=*/false))) {
+    return failure();
+  }
+
+  // Verify the return types match the declared types.
+  for (auto returnOp : body.getOps<IREE::Stream::ReturnOp>()) {
+    for (auto [returnType, operandType] :
+         llvm::zip_equal(returnTypes, returnOp.getOperandTypes())) {
+      if (returnType != operandType) {
+        return returnOp.emitOpError()
+               << "operands do not match expected region return types";
+      }
+    }
+  }
+
+  return success();
+}
+
+static void printScratchSizeRegion(OpAsmPrinter &p, Operation *op,
+                                   Region &body) {
+  if (body.empty()) {
+    return;
+  }
+  p << "scratch_size(";
+  llvm::interleaveComma(body.getArguments(), p, [&](BlockArgument arg) {
+    p.printRegionArgument(arg);
+  });
+  p << ")";
+  Type indexType = IndexType::get(body.getContext());
+  p.printArrowTypeList(TypeRange{indexType});
+  p << " ";
+  p.printRegion(body, /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+}
+
+//===----------------------------------------------------------------------===//
 // stream.resource.alloc
 //===----------------------------------------------------------------------===//
 
@@ -5119,6 +5177,45 @@ LogicalResult ExecutableExportOp::verify() {
                << "workgroup count region must return the XYZ dimension counts";
       }
     }
+  }
+  // Scratch size region is optional.
+  if (!getScratchSize().empty()) {
+    // Verify the return ops all provide a single index value (byte count).
+    for (auto returnOp : getScratchSize().getOps<IREE::Stream::ReturnOp>()) {
+      if (returnOp.getNumOperands() != 1 ||
+          !returnOp.getOperandTypes()[0].isIndex()) {
+        return emitOpError()
+               << "scratch_size region must return exactly one index value";
+      }
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// stream.executable.scratch_size
+//===----------------------------------------------------------------------===//
+
+LogicalResult ExecutableScratchSizeOp::verify() {
+  return success();
+}
+
+LogicalResult ExecutableScratchSizeOp::verifySymbolUses(
+    SymbolTableCollection &symbolTable) {
+  Operation *entryPointOp =
+      symbolTable.lookupNearestSymbolFrom(*this, getEntryPointAttr());
+  if (!entryPointOp) {
+    return emitOpError() << "undefined entry point: " << getEntryPoint();
+  }
+  auto exportOp = dyn_cast<IREE::Stream::ExecutableExportOp>(entryPointOp);
+  if (!exportOp) {
+    return emitOpError()
+           << "entry point is not a stream.executable.export: "
+           << getEntryPoint();
+  }
+  if (!exportOp.getScratchSizeBody()) {
+    return emitOpError() << "entry point does not have a scratch_size region: "
+                         << getEntryPoint();
   }
   return success();
 }

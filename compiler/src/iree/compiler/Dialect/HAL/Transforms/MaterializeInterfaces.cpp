@@ -451,6 +451,20 @@ declareEntryPointOps(IREE::Stream::ExecutableOp sourceExecutableOp,
         }
       }
 
+      // Clone the scratch size calculation function.
+      if (!exportOp.getScratchSize().empty()) {
+        mlir::IRMapping mapper;
+        exportOp.getScratchSize().cloneInto(&newExportOp.getScratchSize(),
+                                            mapper);
+        // Insert the !hal.device argument if it doesn't already exist.
+        Type deviceType = targetBuilder.getType<IREE::HAL::DeviceType>();
+        if (!llvm::is_contained(exportOp.getScratchSize().getArgumentTypes(),
+                                deviceType)) {
+          newExportOp.getScratchSize().insertArgument(0u, deviceType,
+                                                      newExportOp.getLoc());
+        }
+      }
+
       // Clone the source function and update it to use the new interface.
       if (sourceFuncOp) {
         auto variantFuncOp = cloneFuncWithInterface(sourceFuncOp, resourceMap,

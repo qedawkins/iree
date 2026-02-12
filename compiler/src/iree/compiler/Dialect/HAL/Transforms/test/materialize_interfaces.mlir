@@ -248,3 +248,42 @@ module {
     util.return %0 : !stream.timepoint
   }
 }
+
+// -----
+
+// Tests that scratch_size regions are lowered through MaterializeInterfaces.
+
+util.global private @scratch_device = #hal.device.target<"cpu", [
+  #hal.executable.target<"llvm-cpu", "x86_64">
+]> : !hal.device
+
+// CHECK: hal.executable private @scratch_ex
+// CHECK:   hal.executable.variant public @x86_64
+// CHECK:     hal.executable.export public @entry ordinal(0)
+// CHECK-SAME: scratch(%[[DEV:.+]]: !hal.device, %[[ARG0:.+]]: index) -> index {
+// CHECK-NEXT:   %[[C4096:.+]] = arith.constant 4096
+// CHECK-NEXT:   hal.return %[[C4096]]
+
+stream.executable private @scratch_ex {
+  stream.executable.export public @entry
+      scratch_size(%arg0: index) -> index {
+        %c4096 = arith.constant 4096 : index
+        stream.return %c4096 : index
+      }
+  builtin.module {
+    func.func @entry(%arg0: !stream.binding) {
+      return
+    }
+  }
+}
+util.func public @scratch_main(%arg0: !stream.resource<transient>, %arg1: index) -> !stream.timepoint attributes {
+  stream.affinity = #hal.device.affinity<@scratch_device>
+} {
+  %c0 = arith.constant 0 : index
+  %0 = stream.cmd.execute with(%arg0 as %arg2: !stream.resource<transient>{%arg1}) {
+    stream.cmd.dispatch @scratch_ex::@entry {
+      rw %arg2[%c0 for %arg1] : !stream.resource<transient>{%arg1}
+    }
+  } => !stream.timepoint
+  util.return %0 : !stream.timepoint
+}

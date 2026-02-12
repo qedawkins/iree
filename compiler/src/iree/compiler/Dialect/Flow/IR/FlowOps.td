@@ -498,12 +498,16 @@ def FLOW_ExecutableExportOp : FLOW_Op<"executable.export", [
     FlatSymbolRefAttr:$function_ref
   );
 
-  let regions = (region AnyRegion:$workgroup_count);
+  let regions = (region
+    AnyRegion:$workgroup_count,
+    AnyRegion:$scratch_size
+  );
 
   let assemblyFormat = [{
     custom<SymbolVisibility>($sym_visibility)
     custom<SymbolAlias>($sym_name, $function_ref)
     custom<WorkgroupCountRegion>($workgroup_count)
+    custom<ScratchSizeRegion>($scratch_size)
     attr-dict-with-keyword
   }];
 
@@ -513,7 +517,41 @@ def FLOW_ExecutableExportOp : FLOW_Op<"executable.export", [
       "FlatSymbolRefAttr":$function_ref)>,
   ];
 
+  let extraClassDeclaration = [{
+    /// Returns the scratch_size region body block, or nullptr if empty.
+    Block *getScratchSizeBody() {
+      if (getScratchSize().empty()) return nullptr;
+      return &getScratchSize().front();
+    }
+  }];
+
   let hasRegionVerifier = 1;
+}
+
+def FLOW_ExecutableScratchSizeOp : FLOW_PureOp<"executable.scratch_size", [
+  DeclareOpInterfaceMethods<SymbolUserOpInterface>,
+]> {
+  let summary = [{Calculates scratch memory size for an exported function.}];
+  let description = [{
+    Invokes the scratch_size region of the target `flow.executable.export` op
+    to compute the required scratch memory size in bytes. Returns a single
+    index value.
+  }];
+
+  let arguments = (ins
+    SymbolRefAttr:$entry_point,
+    Variadic<FLOW_Dim>:$workload
+  );
+  let results = (outs
+    Index:$result
+  );
+
+  let assemblyFormat = [{
+    $entry_point (`[` $workload^ `]`)? `:` type($result)
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
 }
 
 } // OpGroupExecutableOps

@@ -38,6 +38,7 @@ iree_lit_test_suite(
             "interface_folding.mlir",
             "interface_ops.mlir",
             "invalid.mlir",
+            "scratch_size_ops.mlir",
             "tensor_folding.mlir",
             "tensor_ops.mlir",
         ],

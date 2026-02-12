@@ -150,3 +150,69 @@ flow.executable private @nested_bindings {
     }
   }
 }
+
+// -----
+
+// CHECK-LABEL: @scratch_size_region
+flow.executable private @scratch_size_region {
+  // CHECK-NEXT: stream.executable.export public @dispatch
+  flow.executable.export public @dispatch
+      // CHECK-SAME: scratch_size(%[[ARG0:.+]]: index) -> index {
+      scratch_size(%arg0: index) -> index {
+        // CHECK-NEXT: %[[C:.+]] = arith.constant 4096
+        %c4096 = arith.constant 4096 : index
+        // CHECK-NEXT: stream.return %[[C]]
+        flow.return %c4096 : index
+      }
+  builtin.module {
+    util.func public @dispatch() {
+      util.return
+    }
+  }
+}
+
+// -----
+
+// CHECK-LABEL: @scratch_size_and_workgroups
+flow.executable private @scratch_size_and_workgroups {
+  flow.executable.export public @dispatch
+      // CHECK: workgroups
+      workgroups(%arg0: index) -> (index, index, index) {
+        flow.return %arg0, %arg0, %arg0 : index, index, index
+      }
+      // CHECK: scratch_size
+      scratch_size(%arg0: index) -> index {
+        %c8192 = arith.constant 8192 : index
+        flow.return %c8192 : index
+      }
+  builtin.module {
+    util.func public @dispatch() {
+      util.return
+    }
+  }
+}
+
+// -----
+
+// Tests that flow.executable.scratch_size calling op converts to
+// stream.executable.scratch_size.
+
+// CHECK-LABEL: @scratch_size_calling_op
+flow.executable private @scratch_size_calling_op {
+  flow.executable.export public @dispatch
+      scratch_size(%arg0: index) -> index {
+        %c16384 = arith.constant 16384 : index
+        flow.return %c16384 : index
+      }
+  builtin.module {
+    util.func public @dispatch() {
+      util.return
+    }
+  }
+}
+// CHECK: util.func public @scratch_size_caller
+util.func public @scratch_size_caller(%workload: index) -> index {
+  // CHECK: %[[SIZE:.+]] = stream.executable.scratch_size @scratch_size_calling_op::@dispatch[%{{.+}}] : index
+  %size = flow.executable.scratch_size @scratch_size_calling_op::@dispatch[%workload] : index
+  util.return %size : index
+}
