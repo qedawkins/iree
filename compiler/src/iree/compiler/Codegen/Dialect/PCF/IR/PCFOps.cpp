@@ -801,6 +801,298 @@ void FenceOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
+// StreamKRecombineOp
+//===----------------------------------------------------------------------===//
+
+void StreamKRecombineOp::build(OpBuilder &b, OperationState &result,
+                               Value partialTile, Value dest,
+                               ArrayRef<OpFoldResult> offsets,
+                               ArrayRef<OpFoldResult> sizes,
+                               ArrayRef<OpFoldResult> strides, Value scratch,
+                               Value counter, Value numInGroup) {
+  SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
+  SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
+  dispatchIndexOpFoldResults(offsets, dynamicOffsets, staticOffsets);
+  dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+  dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides);
+
+  result.addOperands(partialTile);
+  result.addOperands(dest);
+  result.addOperands(dynamicOffsets);
+  result.addOperands(dynamicSizes);
+  result.addOperands(dynamicStrides);
+  result.addOperands(scratch);
+  result.addOperands(counter);
+  result.addOperands(numInGroup);
+
+  result.addAttribute("static_offsets",
+                       b.getDenseI64ArrayAttr(staticOffsets));
+  result.addAttribute("static_sizes", b.getDenseI64ArrayAttr(staticSizes));
+  result.addAttribute("static_strides",
+                       b.getDenseI64ArrayAttr(staticStrides));
+
+  Properties &props = result.getOrAddProperties<Properties>();
+  props.setOperandSegmentSizes(
+      {1, 1, static_cast<int32_t>(dynamicOffsets.size()),
+       static_cast<int32_t>(dynamicSizes.size()),
+       static_cast<int32_t>(dynamicStrides.size()), 1, 1, 1});
+
+  // Create the combiner region with two scalar block arguments.
+  auto tileType = cast<RankedTensorType>(partialTile.getType());
+  Type elemType = tileType.getElementType();
+  Region *combiner = result.addRegion();
+  {
+    OpBuilder::InsertionGuard g(b);
+    Block *block = b.createBlock(combiner);
+    block->addArgument(elemType, result.location);
+    block->addArgument(elemType, result.location);
+  }
+
+  // Create the writeback region with one tensor block argument.
+  Region *writeback = result.addRegion();
+  {
+    OpBuilder::InsertionGuard g(b);
+    Block *block = b.createBlock(writeback);
+    block->addArgument(tileType, result.location);
+  }
+}
+
+LogicalResult StreamKRecombineOp::verify() {
+  RankedTensorType tileType = getPartialTileType();
+  Type elemType = tileType.getElementType();
+  unsigned destRank = getDestType().getRank();
+
+  // Verify offset/size/stride counts match dest rank.
+  if (getStaticOffsets().size() != destRank) {
+    return emitOpError("expected number of offsets to match output sref rank");
+  }
+  if (getStaticSizes().size() != destRank ||
+      getStaticStrides().size() != destRank) {
+    return emitOpError("expected number of sizes/strides to match output sref "
+                        "rank");
+  }
+
+  // Verify dest rank is >= partial tile rank.
+  if (destRank < tileType.getRank()) {
+    return emitOpError("output sref rank must be >= partial tile rank");
+  }
+
+  // Verify element types match between partial_tile and dest.
+  if (elemType != getDestType().getElementType()) {
+    return emitOpError(
+        "output sref element type must match partial tile element type");
+  }
+
+  // Verify scratch element type matches.
+  if (elemType != getScratchType().getElementType()) {
+    return emitOpError(
+        "scratch sref element type must match partial tile element type");
+  }
+
+  // Verify combiner region: exactly 2 scalar args of element type.
+  Block &combinerBlock = getCombiner().front();
+  if (combinerBlock.getNumArguments() != 2) {
+    return emitOpError("combiner region must take exactly 2 arguments");
+  }
+  for (int64_t i = 0; i < 2; ++i) {
+    if (combinerBlock.getArgument(i).getType() != elemType) {
+      return emitOpError(
+          "combiner argument type must match partial tile element type");
+    }
+  }
+
+  // Verify combiner terminator yields exactly 1 value of element type.
+  auto combinerYield = dyn_cast<YieldOp>(combinerBlock.getTerminator());
+  if (!combinerYield) {
+    return emitOpError("combiner region must be terminated by pcf.yield");
+  }
+  if (combinerYield.getNumOperands() != 1 ||
+      combinerYield.getOperand(0).getType() != elemType) {
+    return emitOpError(
+        "combiner must yield a single value matching the element type");
+  }
+
+  // Verify counter sref is scalar (rank-0) for atomic increment.
+  ShapedRefType counterType = getCounterType();
+  if (counterType.getRank() != 0) {
+    return emitOpError(
+        "counter sref must be scalar (rank-0) for atomic increment");
+  }
+
+  // Verify counter element type is integer.
+  if (!counterType.getElementType().isInteger()) {
+    return emitOpError(
+        "counter sref element type must be integer (i32 or i64)");
+  }
+
+  // Verify writeback region: exactly 1 tensor arg matching partial_tile type.
+  Block &writebackBlock = getWriteback().front();
+  if (writebackBlock.getNumArguments() != 1) {
+    return emitOpError("writeback region must take exactly 1 argument");
+  }
+  if (writebackBlock.getArgument(0).getType() != tileType) {
+    return emitOpError(
+        "writeback argument type must match partial tile type");
+  }
+
+  // Verify writeback terminator yields nothing.
+  auto writebackYield = dyn_cast<YieldOp>(writebackBlock.getTerminator());
+  if (!writebackYield) {
+    return emitOpError("writeback region must be terminated by pcf.yield");
+  }
+  if (writebackYield.getNumOperands() != 0) {
+    return emitOpError("writeback yield must have no operands");
+  }
+
+  return success();
+}
+
+// Assembly format:
+//   pcf.stream_k_recombine %partial
+//       into %dest [offsets] [sizes] [strides]
+//       scratch %scratch counter %counter
+//       group(%num_in_group)
+//       combiner { ... } writeback { ... }
+//       : tensor<...> into !pcf.sref<...>
+//       scratch_type !pcf.sref<...> counter_type !pcf.sref<...>
+ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
+                                      OperationState &result) {
+  OpAsmParser::UnresolvedOperand partialTile, dest, scratch, counter,
+      numInGroup;
+
+  // Parse: %partial
+  if (failed(parser.parseOperand(partialTile))) {
+    return failure();
+  }
+
+  // Parse: into %dest [offsets] [sizes] [strides]
+  if (failed(parser.parseKeyword("into")) ||
+      failed(parser.parseOperand(dest))) {
+    return failure();
+  }
+
+  SmallVector<OpAsmParser::UnresolvedOperand> offsets, sizes, strides;
+  DenseI64ArrayAttr staticOffsets, staticSizes, staticStrides;
+
+  if (parseDynamicIndexList(parser, offsets, staticOffsets) ||
+      parseDynamicIndexList(parser, sizes, staticSizes) ||
+      parseDynamicIndexList(parser, strides, staticStrides)) {
+    return failure();
+  }
+
+  result.addAttribute("static_offsets", staticOffsets);
+  result.addAttribute("static_sizes", staticSizes);
+  result.addAttribute("static_strides", staticStrides);
+
+  // Parse: scratch %scratch counter %counter
+  if (failed(parser.parseKeyword("scratch")) ||
+      failed(parser.parseOperand(scratch)) ||
+      failed(parser.parseKeyword("counter")) ||
+      failed(parser.parseOperand(counter))) {
+    return failure();
+  }
+
+  // Parse: group(%num_in_group)
+  if (failed(parser.parseKeyword("group")) ||
+      failed(parser.parseLParen()) ||
+      failed(parser.parseOperand(numInGroup)) ||
+      failed(parser.parseRParen())) {
+    return failure();
+  }
+
+  // Parse: combiner { ^bb0(...): ... }
+  Region *combiner = result.addRegion();
+  if (failed(parser.parseKeyword("combiner")) ||
+      failed(parser.parseRegion(*combiner, /*arguments=*/{}))) {
+    return failure();
+  }
+
+  // Parse: writeback { ^bb0(...): ... }
+  Region *writeback = result.addRegion();
+  if (failed(parser.parseKeyword("writeback")) ||
+      failed(parser.parseRegion(*writeback, /*arguments=*/{}))) {
+    return failure();
+  }
+
+  // Parse optional attr-dict.
+  if (failed(parser.parseOptionalAttrDict(result.attributes))) {
+    return failure();
+  }
+
+  // Parse: : tensor<...> into !pcf.sref<...>
+  Type tileType, destType;
+  if (failed(parser.parseColon()) || failed(parser.parseType(tileType)) ||
+      failed(parser.parseKeyword("into")) ||
+      failed(parser.parseType(destType))) {
+    return failure();
+  }
+
+  // Parse: scratch_type !pcf.sref<...> counter_type !pcf.sref<...>
+  Type scratchType, counterType;
+  if (failed(parser.parseKeyword("scratch_type")) ||
+      failed(parser.parseType(scratchType)) ||
+      failed(parser.parseKeyword("counter_type")) ||
+      failed(parser.parseType(counterType))) {
+    return failure();
+  }
+
+  // Resolve operands.
+  IndexType indexType = parser.getBuilder().getIndexType();
+  if (failed(parser.resolveOperand(partialTile, tileType, result.operands)) ||
+      failed(parser.resolveOperand(dest, destType, result.operands)) ||
+      failed(parser.resolveOperands(offsets, indexType, result.operands)) ||
+      failed(parser.resolveOperands(sizes, indexType, result.operands)) ||
+      failed(parser.resolveOperands(strides, indexType, result.operands)) ||
+      failed(parser.resolveOperand(scratch, scratchType, result.operands)) ||
+      failed(parser.resolveOperand(counter, counterType, result.operands)) ||
+      failed(parser.resolveOperand(numInGroup, indexType, result.operands))) {
+    return failure();
+  }
+
+  // Set operand segment sizes.
+  Properties &props = result.getOrAddProperties<Properties>();
+  props.setOperandSegmentSizes(
+      {1, 1, static_cast<int32_t>(offsets.size()),
+       static_cast<int32_t>(sizes.size()),
+       static_cast<int32_t>(strides.size()), 1, 1, 1});
+
+  return success();
+}
+
+void StreamKRecombineOp::print(OpAsmPrinter &p) {
+  p << " " << getPartialTile();
+  p.printNewline();
+  p << "    into " << getDest();
+  p << " ";
+  printDynamicIndexList(p, *this, getOffsets(), getStaticOffsets());
+  p << " ";
+  printDynamicIndexList(p, *this, getSizes(), getStaticSizes());
+  p << " ";
+  printDynamicIndexList(p, *this, getStrides(), getStaticStrides());
+  p.printNewline();
+  p << "    scratch " << getScratch() << " counter " << getCounter();
+  p.printNewline();
+  p << "    group(" << getNumInGroup() << ")";
+  p.printNewline();
+  p << "    combiner ";
+  p.printRegion(getCombiner(), /*printEntryBlockArgs=*/true,
+                /*printBlockTerminators=*/true);
+  p << " writeback ";
+  p.printRegion(getWriteback(), /*printEntryBlockArgs=*/true,
+                /*printBlockTerminators=*/true);
+  SmallVector<StringRef> elidedAttrs = {"static_offsets", "static_sizes",
+                                        "static_strides",
+                                        "operandSegmentSizes"};
+  p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+  p.printNewline();
+  p << "    : " << getPartialTile().getType() << " into "
+    << getDest().getType();
+  p.printNewline();
+  p << "    scratch_type " << getScratch().getType()
+    << " counter_type " << getCounter().getType();
+}
+
+//===----------------------------------------------------------------------===//
 // WriteOps
 //===----------------------------------------------------------------------===//
 

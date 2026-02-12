@@ -17,6 +17,8 @@ iree_lit_test_suite(
     "control_flow_ops.mlir"
     "folders.mlir"
     "invalid.mlir"
+    "stream_k_invalid.mlir"
+    "stream_k_ops.mlir"
     "types.mlir"
     "write_ops.mlir"
   TOOLS

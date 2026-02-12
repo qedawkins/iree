@@ -492,6 +492,141 @@ def FenceOp : PCF_Op<"fence", []> {
   let hasCustomAssemblyFormat = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// StreamKRecombineOp
+//===----------------------------------------------------------------------===//
+
+def StreamKRecombineOp : PCF_Op<"stream_k_recombine", [
+       AttrSizedOperandSegments,
+       RecursiveMemoryEffects,
+       SingleBlock,
+  ]> {
+  let summary = [{Recombines partial tiles from stream-K workgroups.}];
+  let description = [{
+    Handles partial tile recombination in stream-K distribution. This op is
+    non-terminating, side-effecting, and returns nothing. It performs one of
+    three runtime actions based on the number of workgroups contributing to
+    the same output tile:
+
+    1. **Sole contributor** (`num_in_group == 1`): Passes `partial_tile`
+       directly to the writeback region. No scratch memory used.
+    2. **Non-last contributor** (atomic increment < `num_in_group`): Writes
+       `partial_tile` to the scratch slot. Does NOT execute writeback.
+    3. **Last contributor** (atomic increment == `num_in_group`): Accumulates
+       all scratch tiles using the combiner region, then passes the result
+       to the writeback region.
+
+    The combiner region takes two scalar elements (matching the tile element
+    type) and yields one. This defines the accumulation semantics (e.g.,
+    addition for matmul).
+
+    The writeback region takes the finished tile as a single block argument.
+    It performs the actual output write and any fused epilogue operations
+    (bias add, activation, etc.). This is the fusion surface for consumer
+    operations.
+
+    The output sref is addressed with offsets, sizes, and strides (like
+    `pcf.write_slice`). Scratch and counter srefs are pre-sliced by the
+    tiling transformation.
+
+    Example:
+    ```mlir
+    pcf.stream_k_recombine %partial
+        into %out_ref [0, 0] [64, 64] [1, 1]
+        scratch(%scratch_slot) counter(%ctr)
+        group(%num)
+        combiner {
+        ^bb0(%lhs: f32, %rhs: f32):
+          %sum = arith.addf %lhs, %rhs : f32
+          pcf.yield %sum : f32
+        } writeback {
+        ^bb0(%final: tensor<64x64xf32>):
+          pcf.yield
+        } : tensor<64x64xf32> into !pcf.sref<256x256xf32, #wg>
+    ```
+  }];
+
+  let arguments = (ins
+    AnyRankedTensor:$partial_tile,
+    PCF_AnyShapedRef:$dest,
+    Variadic<Index>:$offsets,
+    Variadic<Index>:$sizes,
+    Variadic<Index>:$strides,
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides,
+    PCF_AnyShapedRef:$scratch,
+    PCF_AnyShapedRef:$counter,
+    Index:$num_in_group
+  );
+
+  let results = (outs);
+  let regions = (region SizedRegion<1>:$combiner, SizedRegion<1>:$writeback);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+
+  let builders = [
+    OpBuilder<(ins "Value":$partial_tile, "Value":$dest,
+      "ArrayRef<OpFoldResult>":$offsets, "ArrayRef<OpFoldResult>":$sizes,
+      "ArrayRef<OpFoldResult>":$strides,
+      "Value":$scratch, "Value":$counter, "Value":$num_in_group)>,
+  ];
+
+  let extraClassDeclaration = [{
+    RankedTensorType getPartialTileType() {
+      return cast<RankedTensorType>(getPartialTile().getType());
+    }
+
+    PCF::ShapedRefType getDestType() {
+      return cast<PCF::ShapedRefType>(getDest().getType());
+    }
+
+    PCF::ShapedRefType getScratchType() {
+      return cast<PCF::ShapedRefType>(getScratch().getType());
+    }
+
+    PCF::ShapedRefType getCounterType() {
+      return cast<PCF::ShapedRefType>(getCounter().getType());
+    }
+
+    /// Return the expected rank of each of the `static_offsets`, `static_sizes`
+    /// and `static_strides` attributes.
+    std::array<unsigned, 3> getArrayAttrMaxRanks() {
+      unsigned rank = getDestType().getRank();
+      return {rank, rank, rank};
+    }
+
+    /// Return the number of leading operands before `offsets`, `sizes` and
+    /// `strides` operands.
+    static unsigned getOffsetSizeAndStrideStartOperandIndex() { return 2; }
+
+    /// Returns mixed static/dynamic offsets for the dest sref.
+    SmallVector<OpFoldResult> getMixedOffsets() {
+      OpBuilder builder(getContext());
+      return ::mlir::getMixedValues(getStaticOffsets(), getOffsets(), builder);
+    }
+
+    /// Returns mixed static/dynamic sizes for the dest sref.
+    SmallVector<OpFoldResult> getMixedSizes() {
+      OpBuilder builder(getContext());
+      return ::mlir::getMixedValues(getStaticSizes(), getSizes(), builder);
+    }
+
+    /// Returns mixed static/dynamic strides for the dest sref.
+    SmallVector<OpFoldResult> getMixedStrides() {
+      OpBuilder builder(getContext());
+      return ::mlir::getMixedValues(getStaticStrides(), getStrides(), builder);
+    }
+
+    /// Returns the scalar element type from the partial tile.
+    Type getElementType() {
+      return getPartialTileType().getElementType();
+    }
+  }];
+}
+
 } // OpGroupControlFlowOps
 
 //===----------------------------------------------------------------------===//
@@ -787,8 +922,9 @@ def PCF_GetMemrefOp : PCF_Op<"get_memref", [
 // Misc
 //===----------------------------------------------------------------------===//
 
-def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp"]>, Pure,
-                                   ReturnLike, Terminator,
+def PCF_YieldOp : PCF_Op<"yield", [
+  ParentOneOf<["IREE::PCF::GenericOp", "IREE::PCF::StreamKRecombineOp"]>,
+  Pure, ReturnLike, Terminator,
 ]> {
   let summary = [{Yields results from a region.}];
   let description = [{
@@ -801,7 +937,7 @@ def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp"]>, Pure,
 
   let assemblyFormat = [{
     attr-dict
-    $operands `:` type($operands)
+    ($operands^ `:` type($operands))?
   }];
 }
 
