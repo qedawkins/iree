@@ -33,6 +33,7 @@ iree_cc_library(
     "FuseConsumers.cpp"
     "FuseProducers.cpp"
     "FusePCFWrites.cpp"
+    "LowerStreamKRecombine.cpp"
     "LowerStructuralPCF.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"
@@ -52,6 +53,7 @@ iree_cc_library(
     MLIRFunctionInterfaces
     MLIRIR
     MLIRInferTypeOpInterface
+    MLIRLinalgDialect
     MLIRMemRefDialect
     MLIRPass
     MLIRSCFDialect

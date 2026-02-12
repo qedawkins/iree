@@ -231,4 +231,36 @@ def TestConvertForallToGenericNestPass :
   ];
 }
 
+def LowerStreamKRecombinePass :
+    Pass<"iree-pcf-lower-stream-k-recombine", ""> {
+  let summary = "Lowers pcf.stream_k_recombine to atomics, branching, and "
+                "inlined regions";
+  let description = [{
+    Lowers `pcf.stream_k_recombine` operations to concrete control flow:
+
+    1. Atomic RMW increment on the counter (via pcf.get_memref + memref.atomic_rmw).
+    2. Sole contributor check: if `num_in_group == 1`, skip all scratch ops.
+    3. Last contributor check: if `old_count == num_in_group - 1`.
+    4. Scratch write path: non-sole contributors write partial to scratch slot.
+    5. Last contributor: acquire fence, accumulate all scratch slots via
+       linalg.generic (inlined combiner), then writeback.
+    6. Sole contributor: direct writeback.
+
+    The combiner region is inlined as a pointwise linalg.generic.
+    The writeback region is inlined at the appropriate branch points.
+
+    This pass runs BEFORE `iree-pcf-convert-sref-to-memref`. The lowered IR
+    contains pcf.write_slice, pcf.read_slice, pcf.fence, and pcf.get_memref
+    ops that are converted to memref ops by the subsequent pass.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::memref::MemRefDialect",
+    "::mlir::linalg::LinalgDialect",
+    "::mlir::tensor::TensorDialect"
+  ];
+}
+
 #endif // IREE_CODEGEN_DIALECT_PCF_TRANSFORMS_PASSES
