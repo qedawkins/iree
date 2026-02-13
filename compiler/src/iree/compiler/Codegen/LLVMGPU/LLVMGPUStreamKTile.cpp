@@ -22,6 +22,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUEnums.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
@@ -208,11 +209,14 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
   }
 
   // === Step 6: Find output chain. ===
-  // Look for: target -> dispatch.tensor.store.
+  // Look for: target -> store_to_buffer (or dispatch.tensor.store).
+  // At this point in the pipeline, dispatch tensors have been converted to
+  // hal.interface.binding.subspan + iree_codegen.store_to_buffer.
   Operation *storeOp = nullptr;
   Value targetResult = target->getResult(0);
   for (Operation *user : targetResult.getUsers()) {
-    if (isa<IREE::TensorExt::DispatchTensorStoreOp>(user)) {
+    if (isa<IREE::Codegen::StoreToBufferOp>(user) ||
+        isa<IREE::TensorExt::DispatchTensorStoreOp>(user)) {
       storeOp = user;
       break;
     }

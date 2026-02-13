@@ -858,7 +858,7 @@ void StreamKRecombineOp::build(OpBuilder &b, OperationState &result,
 }
 
 LogicalResult StreamKRecombineOp::verify() {
-  RankedTensorType tileType = getPartialTileType();
+  ShapedType tileType = getPartialTileType();
   Type elemType = tileType.getElementType();
   unsigned destRank = getDestType().getRank();
 

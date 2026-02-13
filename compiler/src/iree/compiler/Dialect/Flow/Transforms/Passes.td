@@ -79,8 +79,8 @@ def FormDispatchScratchAllocationsPass :
   let dependentDialects = [
     "mlir::arith::ArithDialect",
     "mlir::linalg::LinalgDialect",
-    "mlir::tensor::TensorDialect",
     "IREE::Flow::FlowDialect",
+    "IREE::TensorExt::IREETensorExtDialect",
   ];
 }
 

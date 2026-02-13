@@ -546,7 +546,7 @@ def StreamKRecombineOp : PCF_Op<"stream_k_recombine", [
   }];
 
   let arguments = (ins
-    AnyRankedTensor:$partial_tile,
+    AnyTypeOf<[AnyRankedTensor, AnyMemRef]>:$partial_tile,
     PCF_AnyShapedRef:$dest,
     Variadic<Index>:$offsets,
     Variadic<Index>:$sizes,
@@ -574,8 +574,8 @@ def StreamKRecombineOp : PCF_Op<"stream_k_recombine", [
   ];
 
   let extraClassDeclaration = [{
-    RankedTensorType getPartialTileType() {
-      return cast<RankedTensorType>(getPartialTile().getType());
+    ShapedType getPartialTileType() {
+      return cast<ShapedType>(getPartialTile().getType());
     }
 
     PCF::ShapedRefType getDestType() {

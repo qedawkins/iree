@@ -14,6 +14,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/IR/BuiltinAttributeInterfaces.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -259,6 +260,69 @@ struct LoopOpInterface
   }
 };
 
+struct StreamKRecombineOpInterface
+    : BufferizableOpInterface::ExternalModel<StreamKRecombineOpInterface,
+                                             PCF::StreamKRecombineOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
+                              const AnalysisState &state) const {
+    // The partial_tile tensor is read during recombination.
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                               const AnalysisState &state) const {
+    // The partial_tile tensor is only read, not written.
+    return false;
+  }
+
+  AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
+                                      const AnalysisState &state) const {
+    // No tensor results, so no aliasing.
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options,
+                          BufferizationState &state) const {
+    auto recombineOp = cast<PCF::StreamKRecombineOp>(op);
+
+    // Bufferize the partial_tile tensor operand.
+    Value partialTile = recombineOp.getPartialTile();
+    FailureOr<Value> newPartial =
+        getBuffer(rewriter, partialTile, options, state);
+    if (failed(newPartial)) {
+      return failure();
+    }
+    recombineOp.getPartialTileMutable().assign(*newPartial);
+
+    // Update the writeback region's block argument from tensor to memref.
+    // The writeback region takes the finished tile as a tensor argument.
+    // After bufferization, it should take a memref instead.
+    Region &writeback = recombineOp.getWriteback();
+    if (!writeback.empty()) {
+      Block &wbBlock = writeback.front();
+      if (!wbBlock.getArguments().empty()) {
+        BlockArgument wbArg = wbBlock.getArgument(0);
+        if (auto tensorType = dyn_cast<RankedTensorType>(wbArg.getType())) {
+          auto memrefType = MemRefType::get(
+              tensorType.getShape(), tensorType.getElementType());
+          wbArg.setType(memrefType);
+
+          // If the first op is bufferization.to_buffer, replace its uses
+          // with the block argument directly and erase it.
+          if (!wbBlock.empty()) {
+            if (auto toBufferOp =
+                    dyn_cast<bufferization::ToBufferOp>(&wbBlock.front())) {
+              rewriter.replaceOp(toBufferOp, wbArg);
+            }
+          }
+        }
+      }
+    }
+    return success();
+  }
+};
+
 struct WriteSliceOpInterface
     : BufferizableOpInterface::ExternalModel<WriteSliceOpInterface,
                                              PCF::WriteSliceOp> {
@@ -354,6 +418,7 @@ void registerBufferizationExternalModels(DialectRegistry &registry) {
     GenericOp::attachInterface<GenericOpInterface>(*ctx);
     LoopOp::attachInterface<LoopOpInterface>(*ctx);
     ReadSliceOp::attachInterface<ReadSliceOpInterface>(*ctx);
+    StreamKRecombineOp::attachInterface<StreamKRecombineOpInterface>(*ctx);
     WriteSliceOp::attachInterface<WriteSliceOpInterface>(*ctx);
   });
 }

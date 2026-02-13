@@ -6,10 +6,11 @@
 
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtDialect.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
@@ -81,8 +82,9 @@ struct FormDispatchScratchAllocationsPass final
     mlir::ModuleOp moduleOp = getOperation();
 
     // Step 1: Identify matmul-like executables and populate scratch_size
-    // regions.
+    // regions. Also track the inner functions for binding updates.
     DenseSet<StringAttr> scratchExecutables;
+    DenseMap<StringAttr, mlir::FunctionOpInterface> executableFuncs;
     for (auto executableOp :
          moduleOp.getBody()->getOps<IREE::Flow::ExecutableOp>()) {
       mlir::ModuleOp innerModuleOp = executableOp.getInnerModule();
@@ -114,6 +116,7 @@ struct FormDispatchScratchAllocationsPass final
 
         // Track this executable for dispatch modification.
         scratchExecutables.insert(executableOp.getNameAttr());
+        executableFuncs[executableOp.getNameAttr()] = funcOp;
       }
     }
 
@@ -133,7 +136,9 @@ struct FormDispatchScratchAllocationsPass final
       }
     });
 
-    // Step 3: Add scratch buffer arguments to collected dispatch ops.
+    // Step 3: Add scratch buffer arguments to collected dispatch ops and
+    // their corresponding inner workgroup functions.
+    DenseSet<StringAttr> updatedFuncs;
     for (IREE::Flow::DispatchOp dispatchOp : dispatchOpsToModify) {
       OpBuilder builder(dispatchOp);
       Location loc = dispatchOp.getLoc();
@@ -145,13 +150,18 @@ struct FormDispatchScratchAllocationsPass final
                               entryPointRef, dispatchOp.getWorkload())
                               .getResult();
 
-      // Create a dynamic scratch tensor.
+      // Create a dynamic scratch tensor using flow.tensor.empty so that the
+      // Flow→Stream conversion can handle it (tensor.empty would be illegal).
       RankedTensorType scratchTensorType =
           RankedTensorType::get({ShapedType::kDynamic}, builder.getI8Type());
       Value scratchTensor =
-          tensor::EmptyOp::create(builder, loc, scratchTensorType,
-                                  ValueRange{scratchSize})
+          IREE::Flow::TensorEmptyOp::create(builder, loc, scratchTensorType,
+                                            ValueRange{scratchSize})
               .getResult();
+
+      // The number of original dispatch arguments determines where to insert
+      // the scratch binding in the inner function (before result bindings).
+      unsigned numOriginalArgs = dispatchOp.getArguments().size();
 
       // Rebuild the dispatch op with the scratch tensor as an additional
       // argument. We need to reconstruct the op because
@@ -174,6 +184,33 @@ struct FormDispatchScratchAllocationsPass final
       // Replace the old dispatch with the new one.
       dispatchOp.replaceAllUsesWith(newDispatchOp.getResults());
       dispatchOp.erase();
+
+      // Add the scratch binding to the inner workgroup function. Insert it
+      // after the existing argument bindings and before the result bindings.
+      // Each dispatch may share the same executable, so only update once.
+      StringAttr execName = entryPointRef.getRootReference();
+      if (updatedFuncs.contains(execName)) {
+        continue;
+      }
+      updatedFuncs.insert(execName);
+
+      auto funcIt = executableFuncs.find(execName);
+      if (funcIt == executableFuncs.end()) {
+        continue;
+      }
+      mlir::FunctionOpInterface funcOp = funcIt->second;
+      Block &entryBlock = funcOp.getFunctionBody().front();
+      auto scratchBindingType = IREE::TensorExt::DispatchTensorType::get(
+          IREE::TensorExt::TensorAccess::ReadWrite, scratchTensorType);
+      entryBlock.insertArgument(numOriginalArgs, scratchBindingType, loc);
+
+      // Update the function type to include the new argument.
+      SmallVector<Type> argTypes;
+      for (BlockArgument arg : entryBlock.getArguments()) {
+        argTypes.push_back(arg.getType());
+      }
+      funcOp.setType(
+          FunctionType::get(funcOp.getContext(), argTypes, /*results=*/{}));
     }
   }
 };
