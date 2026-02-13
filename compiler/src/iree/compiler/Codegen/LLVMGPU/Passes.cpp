@@ -586,15 +586,26 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createCleanupBufferAllocViewPass());
   funcPassManager.addPass(createGPUCombineValueBarriersPass());
 
-  // Step 7. Lower stream-K recombination before bufferization.
-  // LowerStreamKRecombine uses tensor semantics (linalg.generic, scf.for with
-  // iter_args) so it must run before bufferization converts tensors to memrefs.
-  // ConvertSRefToMemRef and LowerStructuralPCF run post-bufferization in
-  // addLowerToLLVMGPUPasses because layout analysis needs memref context.
+  // Step 6.5. Lower stream-K recombination AFTER thread/MMA tiling but
+  // BEFORE bufferization. At this point, the pcf.stream_k_recombine op
+  // is outside the thread-distributed scf.forall, so the partial tensor
+  // is the full workgroup-level tile (e.g., tensor<32x32xf32>).
+  // The thread_id==0 guard in the lowering ensures only one thread per
+  // workgroup performs atomic/scratch/writeback. A gpu.barrier after the
+  // guard synchronizes all threads before the next outer loop iteration.
   funcPassManager.addPass(IREE::PCF::createResolveTokensPass());
   funcPassManager.addPass(IREE::PCF::createLowerStreamKRecombinePass());
 
-  // Step 8. Bufferize.
+  // Step 6.6. Promote stream-K accumulator to workgroup memory.
+  // In stream-K, the k-loop wraps the thread forall (opposite of normal
+  // matmul). This causes GPUInferMemorySpace to mark the WMMA accumulator
+  // as private. This pass annotates the accumulator tensor.empty with
+  // workgroup memory space so all threads can write their WMMA fragments
+  // to shared memory via tensor.parallel_insert_slice.
+  funcPassManager.addPass(
+      createLLVMGPUPromoteAccumulatorToWorkgroupPass());
+
+  // Step 7. Bufferize.
   addGPUBufferizePasses(funcPassManager);
 
   // Step 8. Resolve remaining parallel loops.

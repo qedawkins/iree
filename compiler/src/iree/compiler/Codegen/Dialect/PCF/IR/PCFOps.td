@@ -444,7 +444,7 @@ def BranchCondReturnOp : PCF_Op<"br.cond_return", [
 // BarrierOp
 //===----------------------------------------------------------------------===//
 
-def BarrierOp : PCF_Op<"barrier", []> {
+def BarrierOp : PCF_Op<"barrier", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = [{Synchronize all workers at the given scope.}];
   let description = [{
     Creates a barrier that synchronizes all workers at the specified scope.
@@ -465,7 +465,7 @@ def BarrierOp : PCF_Op<"barrier", []> {
 // FenceOp
 //===----------------------------------------------------------------------===//
 
-def FenceOp : PCF_Op<"fence", []> {
+def FenceOp : PCF_Op<"fence", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = [{Memory fence on shared references.}];
   let description = [{
     Ensures visibility of memory operations on the given sref values.
@@ -648,6 +648,7 @@ let opDocGroup = OpGroupWriteOps in {
                                OffsetSizeAndStrideOpInterface,
                                AllRanksMatch<["source", "dest"]>,
                                AllElementTypesMatch<["source", "dest"]>,
+                               MemoryEffects<[MemRead, MemWrite]>,
   ]> {
     let summary = [{
     Submit a write of a tensor, vector, or memref to a slice of a `pcf.sref`.

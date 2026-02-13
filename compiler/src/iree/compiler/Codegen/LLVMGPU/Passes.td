@@ -116,6 +116,20 @@ def LLVMGPUSelectLoweringStrategyPass :
   ];
 }
 
+def LLVMGPUPromoteAccumulatorToWorkgroupPass :
+    InterfacePass<"iree-llvmgpu-promote-accumulator-to-workgroup",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Promote Stream-K accumulator tensors from private to workgroup memory.";
+  let description = [{
+    In Stream-K matmul, the k-loop wraps the thread forall (opposite of normal
+    matmul). This causes GPUInferMemorySpace to mark the WMMA accumulator as
+    private, since the alloc_tensor is not a direct user of the thread forall.
+    This pass finds tensor.empty ops that feed into thread-mapped forall
+    shared_outs (through vector.transfer_write and scf.for chains) and replaces
+    them with bufferization.alloc_tensor annotated with workgroup memory space.
+  }];
+}
+
 def LLVMGPUStreamKTilePass :
     InterfacePass<"iree-llvmgpu-stream-k-tile", "mlir::FunctionOpInterface"> {
   let summary = "Tile reduction dimensions using Stream-K distribution with PCF dialect.";
@@ -153,6 +167,7 @@ def LLVMGPUAggregateScratchAllocationsPass :
     "::mlir::iree_compiler::IREE::HAL::HALDialect",
     "::mlir::iree_compiler::IREE::Codegen::IREECodegenDialect",
     "::mlir::arith::ArithDialect",
+    "::mlir::gpu::GPUDialect",
     "::mlir::memref::MemRefDialect",
   ];
 }

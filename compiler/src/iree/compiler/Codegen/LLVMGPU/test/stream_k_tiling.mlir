@@ -10,8 +10,9 @@
 // output_tiles = ceil(128/64) * ceil(128/64) = 2*2 = 4
 // k_tiles = ceil(256/64) = 4
 // total_work = 4 * 4 = 16
-// num_workgroups = 8 (saturate GPU)
-// items_per_wg = ceil(16/8) = 2
+// cuCount = 512 (default, no chip for gfx1150)
+// maxNumInGroup = min(512, 4) = 4
+// scratch: [4*64, 64] = [256, 64] f32
 // ============================================================================
 
 #pipeline_layout_3 = #hal.pipeline.layout<bindings = [
@@ -77,51 +78,53 @@ hal.executable public @matmul_128x128x256_stream_k {
 }
 
 // Stream-K tiling should produce:
-// 1. A pcf.loop with workgroup scope and total_work count.
-// 2. Decode arithmetic: divmod decomposition of linear index.
-// 3. Input slicing using TilingInterface.
-// 4. Compute of partial tile (the matmul on tile-sized operands).
-// 5. pcf.stream_k_recombine with combiner (addf) and writeback.
+// 1. A workgroup count hint (cuCount = 512 for gfx1150 default).
+// 2. A pcf.generic with initializer (scratch + counter allocs).
+// 3. Work range computation (items_per_wg, my_start, my_end).
+// 4. Outer scf.for over output tiles.
+// 5. Inner scf.for accumulating k-tile partials with iter_args.
+// 6. pcf.stream_k_recombine per output tile with combiner + writeback.
 
 // CHECK-LABEL: func @matmul
 //
-// Scratch and counter allocations.
-//       CHECK:   pcf.alloc() : !pcf.sref<256x64xf32
-//       CHECK:   pcf.alloc() : !pcf.sref<i32
+// Workgroup count hint.
+//       CHECK:   iree_codegen.workgroup_count_hint
 //
-// Loop with total_work = 16.
-//       CHECK:   %[[C16:.+]] = arith.constant 16 : index
-//       CHECK:   pcf.loop scope({{.+}}) count(%[[C16]])
-//       CHECK:     execute({{.+}})[%[[WORK_IDX:.+]]: index]
+// pcf.generic with initializer region.
+//       CHECK:   pcf.generic
+//  CHECK-SAME:     scope(#iree_codegen.workgroup_scope<linearize>)
+//       CHECK:     initialize
+//       CHECK:       pcf.alloc() : !pcf.sref<256x64xf32
+//       CHECK:       pcf.alloc() : !pcf.sref<i32
+//       CHECK:       pcf.yield
+//       CHECK:     execute
 //
-// Decode: linear_idx -> out_idx, k_idx.
-//       CHECK:     %[[OUT_IDX:.+]] = arith.divui %[[WORK_IDX]]
-//       CHECK:     %[[K_IDX:.+]] = arith.remui %[[WORK_IDX]]
+// Work range computation.
+//       CHECK:       arith.constant 16 : index
+//       CHECK:       arith.constant 4 : index
+//       CHECK:       arith.constant 1 : index
 //
-// Decompose out_idx into per-parallel-dim coordinates (remui then divui).
-//       CHECK:     arith.remui %[[OUT_IDX]]
-//       CHECK:     arith.divui %[[OUT_IDX]]
+// Outer scf.for over output tiles.
+//       CHECK:       scf.for
 //
-// Group size arithmetic.
-//       CHECK:     hal.interface.workgroup.count
-//       CHECK:     arith.divui
-//       CHECK:     arith.subi
-//       CHECK:     arith.addi
+// Inner scf.for with iter_args (zero tile accumulator).
+//       CHECK:         linalg.fill
+//       CHECK:         scf.for
+//  CHECK-SAME:           iter_args
 //
-// Tiled inputs via extract_slice.
-//       CHECK:     tensor.extract_slice
-//       CHECK:     tensor.extract_slice
+// Tiled matmul (extract_slice + matmul).
+//       CHECK:           tensor.extract_slice
+//       CHECK:           tensor.extract_slice
+//       CHECK:           linalg.matmul
+//       CHECK:           scf.yield
 //
-// Compute partial tile (matmul on sliced operands).
-//       CHECK:     linalg.matmul
-//
-// Recombine.
-//       CHECK:     pcf.stream_k_recombine
-//       CHECK:       combiner
-//       CHECK:         arith.addf
-//       CHECK:       writeback
-//       CHECK:         pcf.write_slice
-//       CHECK:     pcf.return
+// Recombine (after inner loop, inside outer loop).
+//       CHECK:         pcf.stream_k_recombine
+//       CHECK:           combiner
+//       CHECK:             arith.addf
+//       CHECK:           writeback
+//       CHECK:             pcf.write_slice
+//       CHECK:       pcf.return
 
 // ============================================================================
 // TODO: Add more test cases as implementation matures:

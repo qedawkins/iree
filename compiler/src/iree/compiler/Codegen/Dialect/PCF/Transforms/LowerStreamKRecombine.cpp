@@ -10,6 +10,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -111,15 +112,28 @@ struct LowerStreamKRecombineOp final
     Type counterElemType = counterSrefType.getElementType();
     int64_t tileRank = tileType.getRank();
 
+    // Guard the recombine logic with thread_id == 0.
+    // Only thread 0 performs atomic counter, scratch writes, and output
+    // writeback operations. The accumulator tensor is in workgroup memory
+    // (promoted by LLVMGPUPromoteAccumulatorToWorkgroup before bufferize),
+    // so thread 0 can read the fully assembled WMMA result after the
+    // implicit forall barrier.
+    Value tid = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value c0tid = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value isThread0 = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, tid, c0tid);
+    auto threadGuard = scf::IfOp::create(
+        rewriter, loc, /*resultTypes=*/TypeRange{}, isThread0,
+        /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(threadGuard.thenBlock());
+
     // Check for sole contributor optimization: if num_in_group is
     // statically 1, skip all scratch/atomic/branching.
     std::optional<int64_t> staticNumInGroup = getStaticValue(numInGroup);
     if (staticNumInGroup && *staticNumInGroup == 1) {
       // Sole contributor: inline writeback with partial directly.
       inlineWritebackRegion(rewriter, loc, op.getWriteback(), partial);
-      rewriter.eraseOp(op);
-      return success();
-    }
+    } else {
 
     // --- General case: atomic + branching + scratch + writeback ---
 
@@ -257,11 +271,16 @@ struct LowerStreamKRecombineOp final
                     lastBuilder, lastLoc, tileType, scratch, readOffsets,
                     readSizes, readStrides);
 
-                // Loop over remaining slots [1, old).
-                // If old == 1, this loop doesn't execute.
+                // Loop over remaining slots [1, numInGroup).
+                // Reads all contributor slots including our own (slot
+                // `old`), which was written by the WriteSliceOp above.
+                // This avoids directly referencing `partial` in the
+                // reduction, which would create a data dependency on the
+                // matmul result that tile-and-fuse would propagate WMMA
+                // layout through, causing bufferization failures.
                 Value accResult =
                     scf::ForOp::create(lastBuilder,
-                            lastLoc, c1, old, c1,
+                            lastLoc, c1, numInGroup, c1,
                             ValueRange{acc},
                             [&](OpBuilder &loopBuilder, Location loopLoc,
                                 Value iv, ValueRange iterArgs) {
@@ -318,14 +337,12 @@ struct LowerStreamKRecombineOp final
                             })
                         .getResult(0);
 
-                // Combine accumulated scratch with own partial tile.
-                Value finalTile = createPointwiseCombine(
-                    lastBuilder, lastLoc, op.getCombiner(), accResult,
-                    partial);
-
                 // Inline writeback with accumulated result.
+                // accResult already includes all contributions (slots
+                // 0 through numInGroup-1), so no separate add with
+                // `partial` is needed.
                 inlineWritebackRegion(lastBuilder, lastLoc,
-                                      op.getWriteback(), finalTile);
+                                      op.getWriteback(), accResult);
 
                 scf::YieldOp::create(lastBuilder, lastLoc);
               });
@@ -342,6 +359,17 @@ struct LowerStreamKRecombineOp final
           scf::YieldOp::create(soleBuilder, soleLoc);
         });
 
+    } // end of general case (else block)
+
+    // Move insertion point back to after the thread guard.
+    rewriter.setInsertionPointAfter(threadGuard);
+
+    // Barrier: synchronize all threads after the recombine, before the
+    // next outer loop iteration. Prevents race conditions on shared
+    // memory when other threads start the next matmul while thread 0
+    // is still reading the current result for the recombine.
+    gpu::BarrierOp::create(rewriter, loc);
+
     rewriter.eraseOp(op);
     return success();
   }
@@ -352,8 +380,8 @@ struct LowerStreamKRecombinePass final
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<iree_compiler::IREE::PCF::PCFDialect,
                     scf::SCFDialect, arith::ArithDialect,
-                    memref::MemRefDialect, linalg::LinalgDialect,
-                    tensor::TensorDialect>();
+                    gpu::GPUDialect, memref::MemRefDialect,
+                    linalg::LinalgDialect, tensor::TensorDialect>();
   }
   void runOnOperation() override;
 };

@@ -83,6 +83,7 @@ iree_cc_library(
     "LLVMGPULinkExecutables.cpp"
     "LLVMGPULowerExecutableTarget.cpp"
     "LLVMGPUPackSharedMemoryAlloc.cpp"
+    "LLVMGPUPromoteAccumulatorToWorkgroup.cpp"
     "LLVMGPUAggregateScratchAllocations.cpp"
     "LLVMGPUSelectLoweringStrategy.cpp"
     "LLVMGPUStreamKTile.cpp"

@@ -9,15 +9,14 @@
 // Implements the Stream-K tiling transformation for GPU targets. Given a
 // TilingInterface op with a `streamed_reduction` tiling level in its lowering
 // config, this pass linearizes the output_tiles x k_tiles work space and
-// distributes it across workgroups using a pcf.loop.
+// distributes it across workgroups using a pcf.generic.
 //
 // The produced IR structure:
-//   1. pcf.loop scope(#workgroup_scope) count(%total_work)
-//   2. Decode: divmod chain decomposes linear index.
-//   3. Group size: arithmetic for num_in_group.
-//   4. Slice inputs using TilingInterface.
-//   5. Compute partial tile.
-//   6. pcf.stream_k_recombine with combiner + writeback.
+//   1. pcf.generic scope(#workgroup_scope) with initializer (scratch + counter)
+//   2. Work range computation per workgroup (items_per_wg, my_start, my_end).
+//   3. Outer scf.for over output tiles this workgroup touches.
+//   4. Inner scf.for accumulating k-tile partials via TilingInterface.
+//   5. pcf.stream_k_recombine per output tile with combiner + writeback.
 //
 //===----------------------------------------------------------------------===//
 
@@ -27,8 +26,8 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUEnums.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
+#include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
-#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -111,6 +110,43 @@ static std::optional<int64_t> getStaticRangeSize(OpFoldResult size) {
   return std::nullopt;
 }
 
+/// Decompose a linear index into per-dimension coordinates.
+/// dimSizes are ordered outermost-to-innermost; innermost varies fastest.
+static SmallVector<Value> decomposeLinearIndex(OpBuilder &builder, Location loc,
+                                               Value linearIdx,
+                                               ArrayRef<int64_t> dimSizes) {
+  SmallVector<Value> coords;
+  Value remaining = linearIdx;
+  for (int64_t i = dimSizes.size() - 1; i >= 0; --i) {
+    Value dimSize =
+        arith::ConstantIndexOp::create(builder, loc, dimSizes[i]);
+    if (i > 0) {
+      Value coord =
+          arith::RemUIOp::create(builder, loc, remaining, dimSize);
+      coords.push_back(coord);
+      remaining = arith::DivUIOp::create(builder, loc, remaining, dimSize);
+    } else {
+      coords.push_back(remaining);
+    }
+  }
+  std::reverse(coords.begin(), coords.end());
+  return coords;
+}
+
+/// Compute max(a, b) for index values.
+static Value indexMax(OpBuilder &builder, Location loc, Value a, Value b) {
+  Value cond =
+      arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ugt, a, b);
+  return arith::SelectOp::create(builder, loc, cond, a, b);
+}
+
+/// Compute min(a, b) for index values.
+static Value indexMin(OpBuilder &builder, Location loc, Value a, Value b) {
+  Value cond =
+      arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ult, a, b);
+  return arith::SelectOp::create(builder, loc, cond, a, b);
+}
+
 struct LLVMGPUStreamKTilePass final
     : impl::LLVMGPUStreamKTilePassBase<LLVMGPUStreamKTilePass> {
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -142,6 +178,27 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
   IREE::Codegen::LoweringConfigAttrInterface configIface =
       getLoweringConfig(target);
 
+  // Build a lowering config for the inner tiled op by stripping the levels
+  // consumed by this pass (workgroup, streamed_reduction) and keeping
+  // everything else (subgroup, reduction, mma_kind, promote_operands, etc.).
+  IREE::GPU::LoweringConfigAttr innerLoweringConfig;
+  if (auto gpuConfig =
+          getLoweringConfig<IREE::GPU::LoweringConfigAttr>(target)) {
+    StringRef wgName =
+        getTilingLevelName(IREE::GPU::TilingLevel::Workgroup);
+    StringRef streamName =
+        getTilingLevelName(IREE::GPU::TilingLevel::StreamedReduction);
+    SmallVector<NamedAttribute> innerAttrs;
+    for (NamedAttribute attr : gpuConfig.getAttributes()) {
+      StringRef name = attr.getName().getValue();
+      if (name != wgName && name != streamName) {
+        innerAttrs.push_back(attr);
+      }
+    }
+    innerLoweringConfig = IREE::GPU::LoweringConfigAttr::get(
+        ctx, DictionaryAttr::get(ctx, innerAttrs));
+  }
+
   // === Step 2: Get tile sizes. ===
   unsigned wgLevel = llvm::to_underlying(IREE::GPU::TilingLevel::Workgroup);
   unsigned streamLevel =
@@ -154,7 +211,10 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
 
   // === Step 3: Classify dims and build merged tile sizes. ===
   TilingInterface tilingTarget = cast<TilingInterface>(target.getOperation());
-  auto [parallelDims, reductionDims] = classifyDims(tilingTarget);
+  auto [parallelDims_, reductionDims_] = classifyDims(tilingTarget);
+  // Copy out of structured binding so we can capture in lambdas (C++17).
+  SmallVector<unsigned> parallelDims = parallelDims_;
+  SmallVector<unsigned> reductionDims = reductionDims_;
   unsigned numDims = tilingTarget.getLoopIteratorTypes().size();
   SmallVector<int64_t> tileSizes(numDims, 0);
   for (unsigned d : parallelDims) {
@@ -208,10 +268,12 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
     parallelTileCounts.push_back(tileCounts[d]);
   }
 
+  SmallVector<int64_t> reductionTileCounts;
+  for (unsigned d : reductionDims) {
+    reductionTileCounts.push_back(tileCounts[d]);
+  }
+
   // === Step 6: Find output chain. ===
-  // Look for: target -> store_to_buffer (or dispatch.tensor.store).
-  // At this point in the pipeline, dispatch tensors have been converted to
-  // hal.interface.binding.subspan + iree_codegen.store_to_buffer.
   Operation *storeOp = nullptr;
   Value targetResult = target->getResult(0);
   for (Operation *user : targetResult.getUsers()) {
@@ -239,214 +301,308 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
   auto outTensorType = cast<RankedTensorType>(outTensor.getType());
   Type elemType = outTensorType.getElementType();
 
-  // === Step 7: Allocate scratch + counter srefs. ===
+  // === Step 7: Get CU count from GPU target. ===
+  IREE::GPU::TargetAttr gpuTarget = getGPUTargetAttr(funcOp);
+  int64_t cuCount = 512; // Conservative default.
+  if (gpuTarget) {
+    if (auto chip = gpuTarget.getChip()) {
+      cuCount = chip.getWgpCount();
+    }
+  }
+
+  // === Step 8: Compute scratch + counter types. ===
   IREE::PCF::ScopeAttrInterface wgScope =
       cast<IREE::PCF::ScopeAttrInterface>(
           IREE::Codegen::WorkgroupScopeAttr::get(ctx, /*linearize=*/true));
 
-  // Per-output-tile scratch: [kTilesPerOut * tile_dim0, tile_dim1, ...].
   SmallVector<int64_t> tileShape;
   for (unsigned d : parallelDims) {
     tileShape.push_back(tileSizes[d] == 0 ? dimSizes[d] : tileSizes[d]);
   }
 
+  int64_t maxNumInGroup = std::min(cuCount, kTilesPerOut);
   SmallVector<int64_t> scratchShape;
-  scratchShape.push_back(kTilesPerOut * tileShape[0]);
+  scratchShape.push_back(maxNumInGroup * tileShape[0]);
   for (int64_t i = 1, e = tileShape.size(); i < e; ++i) {
     scratchShape.push_back(tileShape[i]);
   }
   auto scratchSrefType =
       IREE::PCF::ShapedRefType::get(ctx, scratchShape, elemType, wgScope);
-  Value scratch =
-      IREE::PCF::AllocOp::create(builder, loc, scratchSrefType).getResult();
-
-  // Counter: rank-0 i32 sref.
   auto counterSrefType =
       IREE::PCF::ShapedRefType::get(ctx, {}, builder.getI32Type(), wgScope);
-  Value counter =
-      IREE::PCF::AllocOp::create(builder, loc, counterSrefType).getResult();
 
-  // === Step 8: Create pcf.loop with output as init. ===
+  // === Step 9: Create workgroup count hint. ===
+  IREE::Codegen::WorkgroupCountHintOp::create(
+      builder, loc, ArrayRef<OpFoldResult>{builder.getIndexAttr(cuCount)});
+
+  // === Step 10: Create pcf.generic with initializer. ===
+  auto genericOp = IREE::PCF::GenericOp::create(
+      builder, loc,
+      /*resultTypes=*/TypeRange{outTensorType},
+      /*scope=*/wgScope,
+      /*inits=*/ValueRange{outTensor},
+      /*dynamicSizes=*/ValueRange{},
+      /*isTied=*/ArrayRef<bool>{true},
+      /*numIterators=*/1);
+
+  // Populate initializer region with scratch + counter allocs.
+  {
+    Region &initRegion = genericOp.getInitializer();
+    Block *initBlock = builder.createBlock(&initRegion);
+    builder.setInsertionPointToStart(initBlock);
+    Value scratchAlloc =
+        IREE::PCF::AllocOp::create(builder, loc, scratchSrefType).getResult();
+    Value counterAlloc =
+        IREE::PCF::AllocOp::create(builder, loc, counterSrefType).getResult();
+    IREE::PCF::YieldOp::create(builder, loc,
+                                ValueRange{scratchAlloc, counterAlloc});
+  }
+
+  // Add leading args (from initializer yields) to the execute region.
+  Block &execBlock = genericOp.getRegion().front();
+  execBlock.insertArgument(0u, scratchSrefType, loc);
+  execBlock.insertArgument(1u, counterSrefType, loc);
+  genericOp.setNumLeadingArgs(2);
+
+  // Block args: [scratch, counter, out_sref, wg_id, wg_count]
+  Value scratchArg = genericOp.getLeadingArgs()[0];
+  Value counterArg = genericOp.getLeadingArgs()[1];
+  Value outRef = genericOp.getRegionRefArgs()[0];
+  Value wgId = genericOp.getIdArgs()[0];
+  Value wgCount = genericOp.getCountArgs()[0];
+
+  // === Step 11: Work range computation inside execute region. ===
+  builder.setInsertionPointToEnd(&execBlock);
+
   Value cTotalWork = arith::ConstantIndexOp::create(builder, loc, totalWork);
-
-  auto loopOp = IREE::PCF::LoopOp::create(builder, loc, wgScope,
-                                           /*count=*/ValueRange{cTotalWork},
-                                           /*inits=*/ValueRange{outTensor});
-
-  // Get the loop body block and its arguments.
-  Block &body = loopOp.getRegion().front();
-  Value outRef = loopOp.getRegionRefArgs()[0]; // Output sref.
-  Value workIdx = loopOp.getIdArgs()[0];       // Linear work index.
-
-  // Set insertion point inside the loop body.
-  builder.setInsertionPointToEnd(&body);
-
-  // === Step 9: Decode arithmetic. ===
-  // out_idx = work_idx / k_tiles_per_out.
-  // k_idx   = work_idx % k_tiles_per_out.
   Value cKTilesPerOut =
       arith::ConstantIndexOp::create(builder, loc, kTilesPerOut);
-  Value outIdx =
-      arith::DivUIOp::create(builder, loc, workIdx, cKTilesPerOut);
-  Value kIdx = arith::RemUIOp::create(builder, loc, workIdx, cKTilesPerOut);
-
-  // Decompose out_idx into per-parallel-dimension tile coordinates.
-  // Innermost dimension varies fastest.
-  SmallVector<Value> parallelTileCoords;
-  Value remaining = outIdx;
-  for (int64_t i = parallelDims.size() - 1; i >= 0; --i) {
-    Value tileCount =
-        arith::ConstantIndexOp::create(builder, loc, parallelTileCounts[i]);
-    if (i > 0) {
-      Value coord =
-          arith::RemUIOp::create(builder, loc, remaining, tileCount);
-      parallelTileCoords.push_back(coord);
-      remaining = arith::DivUIOp::create(builder, loc, remaining, tileCount);
-    } else {
-      parallelTileCoords.push_back(remaining);
-    }
-  }
-  std::reverse(parallelTileCoords.begin(), parallelTileCoords.end());
-
-  // Decompose k_idx into per-reduction-dimension coordinates.
-  SmallVector<int64_t> reductionTileCounts;
-  for (unsigned d : reductionDims) {
-    reductionTileCounts.push_back(tileCounts[d]);
-  }
-  SmallVector<Value> reductionTileCoords;
-  remaining = kIdx;
-  for (int64_t i = reductionDims.size() - 1; i >= 0; --i) {
-    Value tileCount =
-        arith::ConstantIndexOp::create(builder, loc, reductionTileCounts[i]);
-    if (i > 0) {
-      Value coord =
-          arith::RemUIOp::create(builder, loc, remaining, tileCount);
-      reductionTileCoords.push_back(coord);
-      remaining = arith::DivUIOp::create(builder, loc, remaining, tileCount);
-    } else {
-      reductionTileCoords.push_back(remaining);
-    }
-  }
-  std::reverse(reductionTileCoords.begin(), reductionTileCoords.end());
-
-  // Compute per-dimension offsets: coord * tile_size.
-  SmallVector<Value> offsets(numDims);
-  {
-    unsigned pIdx = 0;
-    unsigned rIdx = 0;
-    for (unsigned d = 0; d < numDims; ++d) {
-      if (tileSizes[d] == 0) {
-        offsets[d] = arith::ConstantIndexOp::create(builder, loc, 0);
-      } else {
-        Value ts = arith::ConstantIndexOp::create(builder, loc, tileSizes[d]);
-        bool isParallel = llvm::is_contained(parallelDims, d);
-        if (isParallel) {
-          offsets[d] = arith::MulIOp::create(builder, loc,
-                                             parallelTileCoords[pIdx++], ts);
-        } else {
-          offsets[d] = arith::MulIOp::create(builder, loc,
-                                             reductionTileCoords[rIdx++], ts);
-        }
-      }
-    }
-  }
-
-  // === Step 10: Group size arithmetic. ===
-  // num_workgroups from hal.interface.workgroup.count[0].
-  Value numWorkgroups =
-      IREE::HAL::InterfaceWorkgroupCountOp::create(builder, loc, 0)
-          .getResult();
-  Value itemsPerWg = ceilDiv(builder, loc, cTotalWork, numWorkgroups);
-
-  Value firstLinear =
-      arith::MulIOp::create(builder, loc, outIdx, cKTilesPerOut);
   Value c1 = arith::ConstantIndexOp::create(builder, loc, 1);
-  Value kTilesM1 = arith::SubIOp::create(builder, loc, cKTilesPerOut, c1);
-  Value lastLinear =
-      arith::AddIOp::create(builder, loc, firstLinear, kTilesM1);
-  Value firstWg =
-      arith::DivUIOp::create(builder, loc, firstLinear, itemsPerWg);
-  Value lastWg =
-      arith::DivUIOp::create(builder, loc, lastLinear, itemsPerWg);
-  Value numInGroup = arith::AddIOp::create(
-      builder, loc, arith::SubIOp::create(builder, loc, lastWg, firstWg), c1);
 
-  // === Step 11: Tile the computation using TilingInterface. ===
-  SmallVector<OpFoldResult> tileOffsets;
+  // items_per_wg = ceildiv(totalWork, wg_count)
+  Value itemsPerWg = ceilDiv(builder, loc, cTotalWork, wgCount);
+
+  // my_start = wg_id * items_per_wg
+  Value myStart = arith::MulIOp::create(builder, loc, wgId, itemsPerWg);
+
+  // my_end = min(my_start + items_per_wg, totalWork)
+  Value myStartPlusItems =
+      arith::AddIOp::create(builder, loc, myStart, itemsPerWg);
+  Value myEnd = indexMin(builder, loc, myStartPlusItems, cTotalWork);
+
+  // first_out = my_start / kTilesPerOut
+  Value firstOut =
+      arith::DivUIOp::create(builder, loc, myStart, cKTilesPerOut);
+
+  // last_out = (my_end - 1) / kTilesPerOut  (safe: my_end >= 1 always)
+  Value myEndMinus1 = arith::SubIOp::create(builder, loc, myEnd, c1);
+  Value lastOut =
+      arith::DivUIOp::create(builder, loc, myEndMinus1, cKTilesPerOut);
+  Value lastOutPlus1 = arith::AddIOp::create(builder, loc, lastOut, c1);
+
+  // Tile sizes for getTiledImplementation (static, reused across iterations).
   SmallVector<OpFoldResult> tileSizesOFR;
   for (unsigned d = 0; d < numDims; ++d) {
-    tileOffsets.push_back(offsets[d]);
     int64_t ts = tileSizes[d] == 0 ? dimSizes[d] : tileSizes[d];
     tileSizesOFR.push_back(builder.getIndexAttr(ts));
   }
 
-  FailureOr<TilingResult> tilingResult =
-      tilingTarget.getTiledImplementation(builder, tileOffsets, tileSizesOFR);
-  if (failed(tilingResult)) {
-    tilingTarget.emitOpError("failed to tile with Stream-K parameters");
-    return signalPassFailure();
-  }
-
-  Value partial = tilingResult->tiledValues.front();
-
-  // === Step 12: Build output tile offsets/sizes/strides for recombine. ===
-  SmallVector<OpFoldResult> outTileOffsets;
-  SmallVector<OpFoldResult> outTileSizes;
-  SmallVector<OpFoldResult> outTileStrides;
-  for (unsigned d : parallelDims) {
-    outTileOffsets.push_back(offsets[d]);
-    int64_t ts = tileSizes[d] == 0 ? dimSizes[d] : tileSizes[d];
-    outTileSizes.push_back(builder.getI64IntegerAttr(ts));
-    outTileStrides.push_back(builder.getI64IntegerAttr(1));
-  }
-
-  // === Step 13: Create pcf.stream_k_recombine. ===
-  // The builder auto-creates combiner (2 scalar args) and writeback (1 tensor
-  // arg) regions. We populate them after creation.
-  auto recombineOp = IREE::PCF::StreamKRecombineOp::create(
-      builder, loc, partial,
-      /*dest=*/outRef, outTileOffsets, outTileSizes, outTileStrides,
-      /*scratch=*/scratch,
-      /*counter=*/counter,
-      /*numInGroup=*/numInGroup);
-
-  // Populate combiner region: element-wise addition.
+  // === Step 12: Outer scf.for over output tiles. ===
+  auto outerFor = scf::ForOp::create(builder, loc, firstOut, lastOutPlus1, c1);
   {
-    Block &combinerBlock = recombineOp.getCombiner().front();
-    OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPointToStart(&combinerBlock);
+    OpBuilder::InsertionGuard outerGuard(builder);
+    builder.setInsertionPointToStart(outerFor.getBody());
+    Value outIdx = outerFor.getInductionVar();
 
-    Value lhs = combinerBlock.getArgument(0);
-    Value rhs = combinerBlock.getArgument(1);
-    Value sum;
-    if (isa<FloatType>(elemType)) {
-      sum = arith::AddFOp::create(builder, loc, lhs, rhs);
-    } else {
-      sum = arith::AddIOp::create(builder, loc, lhs, rhs);
+    // Compute k-range for this output tile within our work range.
+    Value outStartLinear =
+        arith::MulIOp::create(builder, loc, outIdx, cKTilesPerOut);
+    Value outEndLinear =
+        arith::AddIOp::create(builder, loc, outStartLinear, cKTilesPerOut);
+
+    // k_start = max(my_start, outStartLinear) - outStartLinear
+    Value kStartRaw = indexMax(builder, loc, myStart, outStartLinear);
+    Value kStart =
+        arith::SubIOp::create(builder, loc, kStartRaw, outStartLinear);
+
+    // k_end = min(my_end, outEndLinear) - outStartLinear
+    Value kEndRaw = indexMin(builder, loc, myEnd, outEndLinear);
+    Value kEnd =
+        arith::SubIOp::create(builder, loc, kEndRaw, outStartLinear);
+
+    // Decompose out_idx into per-parallel-dim tile coordinates.
+    SmallVector<Value> parallelTileCoords =
+        decomposeLinearIndex(builder, loc, outIdx, parallelTileCounts);
+
+    // Compute parallel offsets: coord * tile_size.
+    SmallVector<Value> parallelOffsets;
+    for (unsigned i = 0; i < parallelDims.size(); ++i) {
+      unsigned d = parallelDims[i];
+      if (tileSizes[d] == 0) {
+        parallelOffsets.push_back(
+            arith::ConstantIndexOp::create(builder, loc, 0));
+      } else {
+        Value ts =
+            arith::ConstantIndexOp::create(builder, loc, tileSizes[d]);
+        parallelOffsets.push_back(
+            arith::MulIOp::create(builder, loc, parallelTileCoords[i], ts));
+      }
     }
-    IREE::PCF::YieldOp::create(builder, loc, sum);
+
+    // Create zero-filled tile for accumulator init.
+    Value zero = arith::ConstantOp::create(builder, loc,
+                                           builder.getZeroAttr(elemType));
+    Value emptyTile =
+        tensor::EmptyOp::create(builder, loc, tileShape, elemType);
+    Value zeroTile =
+        linalg::FillOp::create(builder, loc, zero, emptyTile).getResult(0);
+
+    // === Step 13: Inner scf.for accumulating k-tile partials. ===
+    auto innerFor = scf::ForOp::create(
+        builder, loc, kStart, kEnd, c1,
+        /*iterArgs=*/ValueRange{zeroTile},
+        [&](OpBuilder &ib, Location il, Value k, ValueRange iterArgs) {
+          Value acc = iterArgs[0];
+
+          // Decompose k into per-reduction-dim tile coordinates.
+          SmallVector<Value> reductionTileCoords =
+              decomposeLinearIndex(ib, il, k, reductionTileCounts);
+
+          // Merge parallel + reduction offsets into full offset array.
+          SmallVector<OpFoldResult> tileOffsets(numDims);
+          unsigned pIdx = 0;
+          unsigned rIdx = 0;
+          for (unsigned d = 0; d < numDims; ++d) {
+            if (tileSizes[d] == 0) {
+              tileOffsets[d] =
+                  arith::ConstantIndexOp::create(ib, il, 0).getResult();
+            } else {
+              bool isParallel = llvm::is_contained(parallelDims, d);
+              if (isParallel) {
+                tileOffsets[d] = parallelOffsets[pIdx++];
+              } else {
+                Value ts =
+                    arith::ConstantIndexOp::create(ib, il, tileSizes[d]);
+                tileOffsets[d] =
+                    arith::MulIOp::create(ib, il, reductionTileCoords[rIdx++],
+                                          ts)
+                        .getResult();
+              }
+            }
+          }
+
+          // Tile computation using TilingInterface.
+          FailureOr<TilingResult> tilingResult =
+              tilingTarget.getTiledImplementation(ib, tileOffsets, tileSizesOFR);
+          // Note: if tiling fails at this point it's a programming error in the
+          // pass setup, not a user-visible error. We assert instead of
+          // signalPassFailure since we're inside a lambda.
+          assert(succeeded(tilingResult) &&
+                 "getTiledImplementation failed inside Stream-K inner loop");
+
+          // The tiled op uses a slice of the original fill as output init.
+          // Replace it with the iter_arg accumulator so the matmul accumulates
+          // directly: result = acc + A_slice @ B_slice.
+          Operation *tiledOp = tilingResult->tiledOps.front();
+          if (auto tiledLinalgOp = dyn_cast<linalg::LinalgOp>(tiledOp)) {
+            Value oldOutInit = tiledLinalgOp.getDpsInits()[0];
+            tiledLinalgOp.getDpsInitsMutable()[0].set(acc);
+            // Propagate inner lowering config (with workgroup and
+            // streamed_reduction stripped) so thread-level tiling passes
+            // pick up this op.
+            if (innerLoweringConfig) {
+              setLoweringConfig(tiledOp, innerLoweringConfig);
+            } else {
+              tiledOp->removeAttr("lowering_config");
+            }
+            // Erase dead extract_slice of the fill result.
+            if (auto sliceOp =
+                    oldOutInit.getDefiningOp<tensor::ExtractSliceOp>()) {
+              if (sliceOp->use_empty()) {
+                sliceOp->erase();
+              }
+            }
+          }
+
+          Value newAcc = tilingResult->tiledValues.front();
+          scf::YieldOp::create(ib, il, ValueRange{newAcc});
+        });
+
+    Value accum = innerFor.getResult(0);
+
+    // === Step 14: Compute numInGroup and create recombine. ===
+    Value firstLinear =
+        arith::MulIOp::create(builder, loc, outIdx, cKTilesPerOut);
+    Value kTilesM1 =
+        arith::SubIOp::create(builder, loc, cKTilesPerOut, c1);
+    Value lastLinear =
+        arith::AddIOp::create(builder, loc, firstLinear, kTilesM1);
+    Value firstWg =
+        arith::DivUIOp::create(builder, loc, firstLinear, itemsPerWg);
+    Value lastWg =
+        arith::DivUIOp::create(builder, loc, lastLinear, itemsPerWg);
+    Value numInGroup = arith::AddIOp::create(
+        builder, loc,
+        arith::SubIOp::create(builder, loc, lastWg, firstWg), c1);
+
+    // Build output tile offsets/sizes/strides for recombine.
+    SmallVector<OpFoldResult> outTileOffsets;
+    SmallVector<OpFoldResult> outTileSizes;
+    SmallVector<OpFoldResult> outTileStrides;
+    for (unsigned i = 0; i < parallelDims.size(); ++i) {
+      outTileOffsets.push_back(parallelOffsets[i]);
+      unsigned d = parallelDims[i];
+      int64_t ts = tileSizes[d] == 0 ? dimSizes[d] : tileSizes[d];
+      outTileSizes.push_back(builder.getI64IntegerAttr(ts));
+      outTileStrides.push_back(builder.getI64IntegerAttr(1));
+    }
+
+    // Create pcf.stream_k_recombine.
+    auto recombineOp = IREE::PCF::StreamKRecombineOp::create(
+        builder, loc, accum,
+        /*dest=*/outRef, outTileOffsets, outTileSizes, outTileStrides,
+        /*scratch=*/scratchArg,
+        /*counter=*/counterArg,
+        /*numInGroup=*/numInGroup);
+
+    // Populate combiner region: element-wise addition.
+    {
+      Block &combinerBlock = recombineOp.getCombiner().front();
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToStart(&combinerBlock);
+
+      Value lhs = combinerBlock.getArgument(0);
+      Value rhs = combinerBlock.getArgument(1);
+      Value sum;
+      if (isa<FloatType>(elemType)) {
+        sum = arith::AddFOp::create(builder, loc, lhs, rhs);
+      } else {
+        sum = arith::AddIOp::create(builder, loc, lhs, rhs);
+      }
+      IREE::PCF::YieldOp::create(builder, loc, sum);
+    }
+
+    // Populate writeback region: write final tile to output sref.
+    {
+      Block &writebackBlock = recombineOp.getWriteback().front();
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToStart(&writebackBlock);
+
+      Value finalTile = writebackBlock.getArgument(0);
+      IREE::PCF::WriteSliceOp::create(builder, loc, finalTile, outRef,
+                                      outTileOffsets, outTileSizes,
+                                      outTileStrides);
+      IREE::PCF::YieldOp::create(builder, loc, ValueRange{});
+    }
+
+    // Outer loop yield is auto-created by SingleBlockImplicitTerminator.
   }
 
-  // Populate writeback region: write final tile to output sref.
-  {
-    Block &writebackBlock = recombineOp.getWriteback().front();
-    OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPointToStart(&writebackBlock);
-
-    Value finalTile = writebackBlock.getArgument(0);
-    IREE::PCF::WriteSliceOp::create(builder, loc, finalTile, outRef,
-                                    outTileOffsets, outTileSizes,
-                                    outTileStrides);
-    IREE::PCF::YieldOp::create(builder, loc, ValueRange{});
-  }
-
-  // === Step 14: Add pcf.return terminator. ===
-  builder.setInsertionPointToEnd(&body);
+  // === Step 15: Add pcf.return terminator. ===
   IREE::PCF::ReturnOp::create(builder, loc);
 
-  // === Step 15: Replace original ops with loop result. ===
-  // The dispatch.tensor.store now stores the loop result.
-  targetResult.replaceAllUsesWith(loopOp.getResult(0));
+  // === Step 16: Replace original ops with generic result. ===
+  targetResult.replaceAllUsesWith(genericOp.getResult(0));
 
   // Erase the original target and fill (in reverse order of def-use).
   target->erase();

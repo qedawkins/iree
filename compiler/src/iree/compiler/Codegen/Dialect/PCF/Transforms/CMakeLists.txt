@@ -51,6 +51,7 @@ iree_cc_library(
     MLIRFuncDialect
     MLIRFuncTransforms
     MLIRFunctionInterfaces
+    MLIRGPUDialect
     MLIRIR
     MLIRInferTypeOpInterface
     MLIRLinalgDialect

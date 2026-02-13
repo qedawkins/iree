@@ -8,6 +8,8 @@
 // scratch: 256*64*2 = 32768 bytes at offset 0.
 // counter: 4 bytes at offset alignTo(32768, 16) = 32768.
 // total: alignTo(32768 + 4, 16) = 32784.
+//
+// binding(2) is used by the output; the first unused binding is 0.
 // ============================================================================
 
 #pipeline_layout = #hal.pipeline.layout<bindings = [
@@ -48,12 +50,13 @@ hal.executable public @two_alloc_scratch {
 //       CHECK:     %[[TOTAL:.+]] = arith.constant 32784 : index
 //       CHECK:     hal.return %[[TOTAL]]
 
-// Function body: scratch binding + two memref.view ops.
+// Function body: scratch binding (with GPU address space) + memory_space_cast + two memref.view ops.
 //       CHECK:   func.func @main
-//       CHECK:     %[[BUF:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(3) alignment(64) offset({{.+}}) : memref<32784xi8>
-//       CHECK:     memref.view %[[BUF]][{{.+}}][] : memref<32784xi8> to memref<256x64xf16>
+//       CHECK:     hal.interface.binding.subspan layout({{.+}}) binding(0) {{.*}} : memref<32784xi8, #gpu.address_space<global>>
+//       CHECK:     %[[BYTES:.+]] = memref.memory_space_cast {{.*}} : memref<32784xi8, #gpu.address_space<global>> to memref<32784xi8>
+//       CHECK:     memref.view %[[BYTES]][{{.+}}][] : memref<32784xi8> to memref<256x64xf16>
 //       CHECK:     %[[OFF1:.+]] = arith.constant 32768 : index
-//       CHECK:     memref.view %[[BUF]][%[[OFF1]]][] : memref<32784xi8> to memref<i32>
+//       CHECK:     memref.view %[[BYTES]][%[[OFF1]]][] : memref<32784xi8> to memref<i32>
 //   CHECK-NOT:     iree_codegen.alloc_scratch
 
 // -----
@@ -93,6 +96,8 @@ hal.executable public @no_alloc_scratch {
 //
 // scratch: 64*64*4 = 16384 bytes at offset 0.
 // total: alignTo(16384, 16) = 16384.
+//
+// binding(0) is used by the output; the first unused binding is 1.
 // ============================================================================
 
 #pipeline_layout3 = #hal.pipeline.layout<bindings = [
@@ -131,7 +136,8 @@ hal.executable public @single_alloc_scratch {
 //       CHECK:     %[[T:.+]] = arith.constant 16384 : index
 //       CHECK:     hal.return %[[T]]
 //       CHECK:   func.func @main
-//       CHECK:     hal.interface.binding.subspan layout({{.+}}) binding(3) {{.*}} : memref<16384xi8>
+//       CHECK:     hal.interface.binding.subspan layout({{.+}}) binding(1) {{.*}} : memref<16384xi8, #gpu.address_space<global>>
+//       CHECK:     memref.memory_space_cast {{.*}} : memref<16384xi8, #gpu.address_space<global>> to memref<16384xi8>
 //       CHECK:     memref.view {{.*}} : memref<16384xi8> to memref<64x64xf32>
 //   CHECK-NOT:     iree_codegen.alloc_scratch
 
@@ -143,6 +149,8 @@ hal.executable public @single_alloc_scratch {
 // alloc 1: memref<3xf32> = 3 * 4 = 12 bytes at offset 0.
 // alloc 2: memref<i32> = 4 bytes at offset alignTo(12, 16) = 16.
 // total: alignTo(16 + 4, 16) = 32.
+//
+// binding(0) is used; the first unused binding is 1.
 // ============================================================================
 
 #pipeline_layout4 = #hal.pipeline.layout<bindings = [
@@ -181,8 +189,9 @@ hal.executable public @alignment_padding {
 //       CHECK:     %[[T:.+]] = arith.constant 32 : index
 //       CHECK:     hal.return %[[T]]
 //       CHECK:   func.func @main
-//       CHECK:     %[[BUF:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(1) {{.*}} : memref<32xi8>
-//       CHECK:     memref.view %[[BUF]][{{.*}}][] : memref<32xi8> to memref<3xf32>
+//       CHECK:     hal.interface.binding.subspan layout({{.+}}) binding(1) {{.*}} : memref<32xi8, #gpu.address_space<global>>
+//       CHECK:     %[[BYTES:.+]] = memref.memory_space_cast {{.*}} : memref<32xi8, #gpu.address_space<global>> to memref<32xi8>
+//       CHECK:     memref.view %[[BYTES]][{{.*}}][] : memref<32xi8> to memref<3xf32>
 //       CHECK:     %[[OFF:.+]] = arith.constant 16 : index
-//       CHECK:     memref.view %[[BUF]][%[[OFF]]][] : memref<32xi8> to memref<i32>
+//       CHECK:     memref.view %[[BYTES]][%[[OFF]]][] : memref<32xi8> to memref<i32>
 //   CHECK-NOT:     iree_codegen.alloc_scratch

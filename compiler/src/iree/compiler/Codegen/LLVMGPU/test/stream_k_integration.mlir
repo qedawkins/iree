@@ -7,12 +7,13 @@
 // Test 1: Stream-K tiling + recombine lowering for 128x128x256 matmul.
 //
 // This chains two passes:
-//   1. iree-llvmgpu-stream-k-tile: Produces pcf.loop + pcf.stream_k_recombine.
+//   1. iree-llvmgpu-stream-k-tile: Produces pcf.generic + pcf.stream_k_recombine.
 //   2. iree-pcf-lower-stream-k-recombine: Lowers recombine to atomics + branching.
 //
 // After both passes, we should see:
-//   - pcf.loop with workgroup scope (from tiling).
+//   - pcf.generic with initializer (from tiling).
 //   - No pcf.stream_k_recombine ops (all lowered).
+//   - Outer scf.for over output tiles with inner scf.for accumulation.
 //   - Atomic RMW on counter sref (from lowering).
 //   - scf.if branching (sole/last/not-last contributor logic).
 //   - pcf.write_slice in writeback branch.
@@ -81,23 +82,32 @@ hal.executable public @matmul_stream_k_integration {
 }
 
 // After tiling + lowering:
-// - pcf.loop present (from tiling).
+// - pcf.generic with initializer present (from tiling).
 // - No stream_k_recombine (lowered away).
-// - pcf.alloc with workgroup scope for partial results and counter.
-//   (ConvertSRefToMemRef will convert these to alloc_scratch, tested in
-//    PCF/Transforms/test/convert_sref_to_memref.mlir. The alloc_scratch
-//    aggregation is tested in aggregate_scratch_allocations.mlir.)
-// - Atomic counter increment present.
-// - Branching for writeback present.
+// - Allocs in initializer for partial results and counter.
+// - Nested scf.for loops (outer output tiles, inner k-tiles).
+// - Thread guard (gpu.thread_id + scf.if) around recombine ops.
+// - Atomic counter increment inside thread guard.
+// - Branching for writeback inside thread guard.
+// - gpu.barrier after thread guard for synchronization.
 
 // CHECK-LABEL: func @matmul
-//       CHECK:   pcf.alloc() : !pcf.sref<{{.+}}, #iree_codegen.workgroup_scope
-//       CHECK:   pcf.alloc() : !pcf.sref<i32, #iree_codegen.workgroup_scope
-//       CHECK:   pcf.loop
-// CHECK-NOT:     pcf.stream_k_recombine
-//       CHECK:   pcf.get_memref
-//       CHECK:   memref.atomic_rmw
-//       CHECK:   arith.cmpi
-//       CHECK:   scf.if
-//       CHECK:     pcf.write_slice
-//       CHECK:   pcf.return
+//       CHECK:   iree_codegen.workgroup_count_hint
+//       CHECK:   pcf.generic
+//       CHECK:     initialize
+//       CHECK:       pcf.alloc() : !pcf.sref<{{.+}}, #iree_codegen.workgroup_scope
+//       CHECK:       pcf.alloc() : !pcf.sref<i32, #iree_codegen.workgroup_scope
+//       CHECK:     execute
+// CHECK-NOT:       pcf.stream_k_recombine
+//       CHECK:       scf.for
+//       CHECK:         scf.for
+//       CHECK:           linalg.matmul
+//       CHECK:         gpu.thread_id
+//       CHECK:         scf.if
+//       CHECK:           pcf.get_memref
+//       CHECK:           memref.atomic_rmw
+//       CHECK:           arith.cmpi
+//       CHECK:           scf.if
+//       CHECK:             pcf.write_slice
+//       CHECK:         gpu.barrier
+//       CHECK:       pcf.return
