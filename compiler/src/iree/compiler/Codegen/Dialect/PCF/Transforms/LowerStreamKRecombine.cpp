@@ -105,11 +105,11 @@ struct LowerStreamKRecombineOp final
     Value partial = op.getPartialTile();
     Value scratch = op.getScratch();
     Value counter = op.getCounter();
+    Value counterIndex = op.getCounterIndex();
     Value numInGroup = op.getNumInGroup();
 
     ShapedType tileType = op.getPartialTileType();
-    ShapedRefType counterSrefType = op.getCounterType();
-    Type counterElemType = counterSrefType.getElementType();
+    Type counterElemType = op.getCounterType().getElementType();
     int64_t tileRank = tileType.getRank();
 
     // Guard the recombine logic with thread_id == 0.
@@ -144,22 +144,46 @@ struct LowerStreamKRecombineOp final
         rewriter.getIntegerAttr(counterElemType, 1));
 
     // Step 1: Get memref from counter sref for atomic operation.
-    // Counter is rank-0 (scalar sref), so offsets/sizes/strides are empty.
-    // pcf.get_memref requires strided layout with dynamic offset.
+    // Counter is 1D (one entry per output tile).  We get the full 1D memref
+    // and use counter_index to address the specific element.
+    ShapedRefType counterSrefType = op.getCounterType();
+
+    // Compute per-output-tile scratch base row.  Scratch is partitioned as
+    // [numOutputTiles * maxNumInGroup * tileM, tileN].  Each output tile
+    // gets `perTileScratchRows = scratchDim0 / numOutputTiles` rows.
+    ShapedRefType scratchSrefType = op.getScratchType();
+    int64_t scratchDim0 = scratchSrefType.getShape()[0];
+    int64_t numOutputTiles = counterSrefType.getShape()[0];
+    int64_t perTileScratchRows = scratchDim0 / numOutputTiles;
+    Value perTileScratchRowsVal =
+        arith::ConstantIndexOp::create(rewriter, loc, perTileScratchRows);
+    Value scratchBaseRow =
+        arith::MulIOp::create(rewriter, loc, counterIndex,
+                              perTileScratchRowsVal);
+    int64_t counterRank = counterSrefType.getRank();
+    SmallVector<int64_t> counterMemRefShape(counterSrefType.getShape());
     auto stridedLayout = StridedLayoutAttr::get(
-        rewriter.getContext(), ShapedType::kDynamic, /*strides=*/{});
+        rewriter.getContext(), ShapedType::kDynamic,
+        SmallVector<int64_t>(counterRank, ShapedType::kDynamic));
     MemRefType counterMemRefType =
-        MemRefType::get({}, counterElemType, stridedLayout);
+        MemRefType::get(counterMemRefShape, counterElemType, stridedLayout);
+    // Build sizes from the static shape (all entries are static).
+    SmallVector<OpFoldResult> counterSizes;
+    for (int64_t dim : counterMemRefShape) {
+      counterSizes.push_back(rewriter.getIndexAttr(dim));
+    }
     Value counterMemRef = GetMemrefOp::create(
         rewriter, loc, counterMemRefType, counter,
-        /*offsets=*/ArrayRef<OpFoldResult>{},
-        /*sizes=*/ArrayRef<OpFoldResult>{},
-        /*strides=*/ArrayRef<OpFoldResult>{});
+        /*offsets=*/SmallVector<OpFoldResult>(counterRank,
+                                             rewriter.getIndexAttr(0)),
+        /*sizes=*/counterSizes,
+        /*strides=*/SmallVector<OpFoldResult>(counterRank,
+                                             rewriter.getIndexAttr(1)));
 
-    // Step 2: Atomic increment counter, get old value.
+    // Step 2: Atomic increment counter at counter_index, get old value.
     Value oldInt = memref::AtomicRMWOp::create(
         rewriter, loc, counterElemType, arith::AtomicRMWKind::addi, c1Int,
-        counterMemRef, ValueRange{});
+        counterMemRef, ValueRange{counterIndex});
 
     // Convert old count to index for comparisons.
     Value old = arith::IndexCastOp::create(
@@ -199,8 +223,11 @@ struct LowerStreamKRecombineOp final
                 dim0Size = arith::ConstantIndexOp::create(
                     thenBuilder, thenLoc, tileType.getDimSize(0));
               }
-              Value slotOffset =
+              Value localOffset =
                   arith::MulIOp::create(thenBuilder, thenLoc, old, dim0Size);
+              Value slotOffset =
+                  arith::AddIOp::create(thenBuilder, thenLoc,
+                                        scratchBaseRow, localOffset);
               writeOffsets.push_back(slotOffset);
             } else {
               writeOffsets.push_back(
@@ -248,9 +275,14 @@ struct LowerStreamKRecombineOp final
                 SmallVector<OpFoldResult> readSizes;
                 SmallVector<OpFoldResult> readStrides;
                 for (int64_t d = 0; d < tileRank; ++d) {
+                  if (d == 0) {
+                    // Slot 0 within this output tile's scratch partition.
+                    readOffsets.push_back(scratchBaseRow);
+                  } else {
                   readOffsets.push_back(
                       arith::ConstantIndexOp::create(lastBuilder, lastLoc, 0)
                           .getResult());
+                  }
                   if (tileType.isDynamicDim(d)) {
                     readSizes.push_back(
                         tensor::DimOp::create(
@@ -299,9 +331,13 @@ struct LowerStreamKRecombineOp final
                                         loopBuilder, loopLoc,
                                         tileType.getDimSize(0));
                               }
-                              Value slotOff =
+                              Value localOff =
                                   arith::MulIOp::create(
                                       loopBuilder, loopLoc, iv, dim0Size);
+                              Value slotOff =
+                                  arith::AddIOp::create(
+                                      loopBuilder, loopLoc,
+                                      scratchBaseRow, localOff);
 
                               SmallVector<OpFoldResult> loopReadOffsets;
                               SmallVector<OpFoldResult> loopReadSizes(

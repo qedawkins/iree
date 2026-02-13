@@ -96,7 +96,7 @@ hal.executable public @matmul_stream_k_integration {
 //       CHECK:   pcf.generic
 //       CHECK:     initialize
 //       CHECK:       pcf.alloc() : !pcf.sref<{{.+}}, #iree_codegen.workgroup_scope
-//       CHECK:       pcf.alloc() : !pcf.sref<i32, #iree_codegen.workgroup_scope
+//       CHECK:       pcf.alloc() : !pcf.sref<4xi32, #iree_codegen.workgroup_scope
 //       CHECK:     execute
 // CHECK-NOT:       pcf.stream_k_recombine
 //       CHECK:       scf.for

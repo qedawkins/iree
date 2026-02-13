@@ -12,7 +12,7 @@
 // total_work = 4 * 4 = 16
 // cuCount = 512 (default, no chip for gfx1150)
 // maxNumInGroup = min(512, 4) = 4
-// scratch: [4*64, 64] = [256, 64] f32
+// scratch: [4*4*64, 64] = [1024, 64] f32  (outputTiles * maxNumInGroup * tileM)
 // ============================================================================
 
 #pipeline_layout_3 = #hal.pipeline.layout<bindings = [
@@ -94,8 +94,8 @@ hal.executable public @matmul_128x128x256_stream_k {
 //       CHECK:   pcf.generic
 //  CHECK-SAME:     scope(#iree_codegen.workgroup_scope<linearize>)
 //       CHECK:     initialize
-//       CHECK:       pcf.alloc() : !pcf.sref<256x64xf32
-//       CHECK:       pcf.alloc() : !pcf.sref<i32
+//       CHECK:       pcf.alloc() : !pcf.sref<1024x64xf32
+//       CHECK:       pcf.alloc() : !pcf.sref<4xi32
 //       CHECK:       pcf.yield
 //       CHECK:     execute
 //

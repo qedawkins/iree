@@ -809,7 +809,8 @@ void StreamKRecombineOp::build(OpBuilder &b, OperationState &result,
                                ArrayRef<OpFoldResult> offsets,
                                ArrayRef<OpFoldResult> sizes,
                                ArrayRef<OpFoldResult> strides, Value scratch,
-                               Value counter, Value numInGroup) {
+                               Value counter, Value counterIndex,
+                               Value numInGroup) {
   SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
   SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
   dispatchIndexOpFoldResults(offsets, dynamicOffsets, staticOffsets);
@@ -823,6 +824,7 @@ void StreamKRecombineOp::build(OpBuilder &b, OperationState &result,
   result.addOperands(dynamicStrides);
   result.addOperands(scratch);
   result.addOperands(counter);
+  result.addOperands(counterIndex);
   result.addOperands(numInGroup);
 
   result.addAttribute("static_offsets",
@@ -835,7 +837,7 @@ void StreamKRecombineOp::build(OpBuilder &b, OperationState &result,
   props.setOperandSegmentSizes(
       {1, 1, static_cast<int32_t>(dynamicOffsets.size()),
        static_cast<int32_t>(dynamicSizes.size()),
-       static_cast<int32_t>(dynamicStrides.size()), 1, 1, 1});
+       static_cast<int32_t>(dynamicStrides.size()), 1, 1, 1, 1});
 
   // Create the combiner region with two scalar block arguments.
   auto tileType = cast<RankedTensorType>(partialTile.getType());
@@ -912,11 +914,12 @@ LogicalResult StreamKRecombineOp::verify() {
         "combiner must yield a single value matching the element type");
   }
 
-  // Verify counter sref is scalar (rank-0) for atomic increment.
+  // Verify counter sref is rank-0 (scalar) or rank-1 (per-output-tile array).
+  // When rank-1, counter_index selects which element to atomically increment.
   ShapedRefType counterType = getCounterType();
-  if (counterType.getRank() != 0) {
+  if (counterType.getRank() > 1) {
     return emitOpError(
-        "counter sref must be scalar (rank-0) for atomic increment");
+        "counter sref must be rank-0 or rank-1 for atomic increment");
   }
 
   // Verify counter element type is integer.
@@ -974,7 +977,7 @@ LogicalResult StreamKRecombineOp::verify() {
 ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
                                       OperationState &result) {
   OpAsmParser::UnresolvedOperand partialTile, dest, scratch, counter,
-      numInGroup;
+      counterIndex, numInGroup;
 
   // Parse: %partial
   if (failed(parser.parseOperand(partialTile))) {
@@ -1000,11 +1003,14 @@ ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
   result.addAttribute("static_sizes", staticSizes);
   result.addAttribute("static_strides", staticStrides);
 
-  // Parse: scratch %scratch counter %counter
+  // Parse: scratch %scratch counter %counter[%counter_index]
   if (failed(parser.parseKeyword("scratch")) ||
       failed(parser.parseOperand(scratch)) ||
       failed(parser.parseKeyword("counter")) ||
-      failed(parser.parseOperand(counter))) {
+      failed(parser.parseOperand(counter)) ||
+      failed(parser.parseLSquare()) ||
+      failed(parser.parseOperand(counterIndex)) ||
+      failed(parser.parseRSquare())) {
     return failure();
   }
 
@@ -1061,6 +1067,7 @@ ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
       failed(parser.resolveOperands(strides, indexType, result.operands)) ||
       failed(parser.resolveOperand(scratch, scratchType, result.operands)) ||
       failed(parser.resolveOperand(counter, counterType, result.operands)) ||
+      failed(parser.resolveOperand(counterIndex, indexType, result.operands)) ||
       failed(parser.resolveOperand(numInGroup, indexType, result.operands))) {
     return failure();
   }
@@ -1070,7 +1077,7 @@ ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
   props.setOperandSegmentSizes(
       {1, 1, static_cast<int32_t>(offsets.size()),
        static_cast<int32_t>(sizes.size()),
-       static_cast<int32_t>(strides.size()), 1, 1, 1});
+       static_cast<int32_t>(strides.size()), 1, 1, 1, 1});
 
   return success();
 }
@@ -1086,7 +1093,8 @@ void StreamKRecombineOp::print(OpAsmPrinter &p) {
   p << " ";
   printDynamicIndexList(p, *this, getStrides(), getStaticStrides());
   p.printNewline();
-  p << "    scratch " << getScratch() << " counter " << getCounter();
+  p << "    scratch " << getScratch() << " counter " << getCounter()
+    << "[" << getCounterIndex() << "]";
   p.printNewline();
   p << "    group(" << getNumInGroup() << ")";
   p.printNewline();

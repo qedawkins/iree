@@ -322,14 +322,18 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
 
   int64_t maxNumInGroup = std::min(cuCount, kTilesPerOut);
   SmallVector<int64_t> scratchShape;
-  scratchShape.push_back(maxNumInGroup * tileShape[0]);
+  // Scratch is partitioned per output tile: each tile gets maxNumInGroup
+  // partial-tile slots.  Total rows = outputTiles * maxNumInGroup * tileM.
+  scratchShape.push_back(outputTiles * maxNumInGroup * tileShape[0]);
   for (int64_t i = 1, e = tileShape.size(); i < e; ++i) {
     scratchShape.push_back(tileShape[i]);
   }
   auto scratchSrefType =
       IREE::PCF::ShapedRefType::get(ctx, scratchShape, elemType, wgScope);
-  auto counterSrefType =
-      IREE::PCF::ShapedRefType::get(ctx, {}, builder.getI32Type(), wgScope);
+  // Counter is a 1D array with one entry per output tile.  Each entry tracks
+  // how many workgroups have contributed to that tile (for recombine).
+  auto counterSrefType = IREE::PCF::ShapedRefType::get(
+      ctx, {outputTiles}, builder.getI32Type(), wgScope);
 
   // === Step 9: Create workgroup count hint. ===
   IREE::Codegen::WorkgroupCountHintOp::create(
@@ -563,6 +567,7 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
         /*dest=*/outRef, outTileOffsets, outTileSizes, outTileStrides,
         /*scratch=*/scratchArg,
         /*counter=*/counterArg,
+        /*counter_index=*/outIdx,
         /*numInGroup=*/numInGroup);
 
     // Populate combiner region: element-wise addition.
