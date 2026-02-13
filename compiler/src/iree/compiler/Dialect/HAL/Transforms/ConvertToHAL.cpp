@@ -53,6 +53,7 @@ static void stripExportRegions(ModuleOp moduleOp) {
         exportOp.removeConditionFallbackAttr();
         exportOp.getCondition().getBlocks().clear();
         exportOp.getWorkgroupCount().getBlocks().clear();
+        exportOp.getScratchSize().getBlocks().clear();
       }
     }
   }

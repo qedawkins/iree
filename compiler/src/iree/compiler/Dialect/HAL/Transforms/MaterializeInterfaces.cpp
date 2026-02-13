@@ -478,6 +478,24 @@ declareEntryPointOps(IREE::Stream::ExecutableOp sourceExecutableOp,
       updateDispatchTargets(dispatchOp, exportExpansions,
                             requiredExecutableTargets);
     }
+
+    // Update scratch_size call sites to reference the first variant export.
+    // All variants share the same scratch_size calculation so we pick the
+    // first expanded ref.
+    auto oldScratchRef =
+        SymbolRefAttr::get(sourceExecutableOp.getNameAttr(),
+                           {FlatSymbolRefAttr::get(exportOp.getNameAttr())});
+    auto scratchIt = exportExpansions.find(oldScratchRef);
+    if (scratchIt != exportExpansions.end() && !scratchIt->second.empty()) {
+      SymbolRefAttr newScratchRef =
+          cast<SymbolRefAttr>(scratchIt->second.front().first);
+      sourceExecutableOp->getParentOfType<ModuleOp>().walk(
+          [&](IREE::Stream::ExecutableScratchSizeOp scratchOp) {
+            if (scratchOp.getEntryPointAttr() == oldScratchRef) {
+              scratchOp.setEntryPointAttr(newScratchRef);
+            }
+          });
+    }
   }
 
   // Clone all of the ops in the source module to each variant.

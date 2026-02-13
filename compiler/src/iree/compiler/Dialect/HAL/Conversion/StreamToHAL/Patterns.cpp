@@ -1694,6 +1694,23 @@ struct ChannelCountOpPattern
   }
 };
 
+struct ExecutableScratchSizeOpPattern
+    : public StreamConversionPattern<
+          IREE::Stream::ExecutableScratchSizeOp> {
+  using StreamConversionPattern::StreamConversionPattern;
+  LogicalResult
+  matchAndRewrite(IREE::Stream::ExecutableScratchSizeOp scratchSizeOp,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Resolve the device from the stream affinity context.
+    Value device = lookupDeviceFor(scratchSizeOp, rewriter);
+    rewriter.replaceOpWithNewOp<IREE::HAL::ExecutableCalculateScratchSizeOp>(
+        scratchSizeOp, rewriter.getIndexType(), device,
+        scratchSizeOp.getEntryPointAttr(), adaptor.getWorkload());
+    return success();
+  }
+};
+
 struct ElideYieldOpPattern
     : public StreamConversionPattern<IREE::Stream::YieldOp> {
   using StreamConversionPattern::StreamConversionPattern;
@@ -1792,6 +1809,8 @@ void populateStreamToHALPatterns(MLIRContext *context,
   patterns.insert<ChannelCreateOpPattern, ChannelSplitOpPattern,
                   ChannelRankOpPattern, ChannelCountOpPattern>(
       mapping, typeConverter, context);
+  patterns.insert<ExecutableScratchSizeOpPattern>(mapping, typeConverter,
+                                                   context);
   patterns.insert<ElideYieldOpPattern>(mapping, typeConverter, context);
 }
 

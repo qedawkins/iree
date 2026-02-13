@@ -287,3 +287,15 @@ util.func public @scratch_main(%arg0: !stream.resource<transient>, %arg1: index)
   } => !stream.timepoint
   util.return %0 : !stream.timepoint
 }
+
+// Tests that stream.executable.scratch_size entry point refs are updated
+// from 2-level (stream) to 3-level (hal) during materialization.
+
+// CHECK-LABEL: @scratch_size_query
+// CHECK: stream.executable.scratch_size @scratch_ex::@x86_64::@entry
+util.func public @scratch_size_query(%workload: index) -> index attributes {
+  stream.affinity = #hal.device.affinity<@scratch_device>
+} {
+  %size = stream.executable.scratch_size @scratch_ex::@entry[%workload] : index
+  util.return %size : index
+}

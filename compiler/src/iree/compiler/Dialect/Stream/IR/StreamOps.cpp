@@ -5202,12 +5202,16 @@ ExecutableScratchSizeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   Operation *entryPointOp =
       symbolTable.lookupNearestSymbolFrom(*this, getEntryPointAttr());
   if (!entryPointOp) {
-    return emitOpError() << "undefined entry point: " << getEntryPoint();
+    // After MaterializeInterfaces the entry point may reference a
+    // hal.executable.export instead of a stream.executable.export. Bail rather
+    // than error to match the pattern used by CmdDispatchOp.
+    return success();
   }
   auto exportOp = dyn_cast<IREE::Stream::ExecutableExportOp>(entryPointOp);
   if (!exportOp) {
-    return emitOpError() << "entry point is not a stream.executable.export: "
-                         << getEntryPoint();
+    // Entry point resolved to a non-stream export (e.g. hal.executable.export
+    // after materialization). Allow this; conversion will handle it.
+    return success();
   }
   if (!exportOp.getScratchSizeBody()) {
     return emitOpError() << "entry point does not have a scratch_size region: "
