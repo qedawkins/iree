@@ -107,7 +107,7 @@ struct LowerStreamKRecombineOp final
     Value counter = op.getCounter();
     Value numInGroup = op.getNumInGroup();
 
-    RankedTensorType tileType = op.getPartialTileType();
+    ShapedType tileType = op.getPartialTileType();
     ShapedRefType counterSrefType = op.getCounterType();
     Type counterElemType = counterSrefType.getElementType();
     int64_t tileRank = tileType.getRank();
