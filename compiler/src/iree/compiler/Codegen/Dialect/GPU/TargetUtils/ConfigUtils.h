@@ -41,7 +41,8 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
 LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
                                       mlir::FunctionOpInterface entryPoint,
                                       Operation *op,
-                                      bool useDirectLoad = false);
+                                      bool useDirectLoad = false,
+                                      bool enableStreamK = false);
 
 /// Helper for setting up a default tile and fuse config for targeting
 /// simple thread distribution. Currently restricted to linalg ops.

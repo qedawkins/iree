@@ -121,6 +121,12 @@ static llvm::cl::opt<bool> clDirectConvolution(
     llvm::cl::desc("Use direct convolution in tile and fuse pipeline"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> clGPUEnableStreamK(
+    "iree-codegen-llvmgpu-enable-stream-k",
+    llvm::cl::desc("Enable Stream-K distribution for matmul. Adds "
+                   "streamed_reduction tiling level to the lowering config."),
+    llvm::cl::init(false));
+
 namespace {
 
 using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
@@ -2262,7 +2268,8 @@ static LogicalResult setRootConfig(IREE::GPU::TargetAttr target,
   }
   if (clGPUUseTileAndFuseMatmul) {
     if (succeeded(IREE::GPU::setMatmulLoweringConfig(
-            target, entryPointFn, computeOp, clUseDirectLoad))) {
+            target, entryPointFn, computeOp, clUseDirectLoad,
+            clGPUEnableStreamK))) {
       LDBG() << "Tile and fuse matmul config";
       return success();
     }

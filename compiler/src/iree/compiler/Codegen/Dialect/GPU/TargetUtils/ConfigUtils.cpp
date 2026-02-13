@@ -1114,7 +1114,8 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
 
 LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
                                       mlir::FunctionOpInterface entryPoint,
-                                      Operation *op, bool useDirectLoad) {
+                                      Operation *op, bool useDirectLoad,
+                                      bool enableStreamK) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp ||
       (!linalg::isaContractionOpInterface(linalgOp) &&
@@ -1163,6 +1164,27 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
   }
   std::array<int64_t, 3> workgroupSize = {configAndWgSize->second, 1, 1};
   LoweringConfigAttr loweringConfig = configAndWgSize->first;
+
+  // When Stream-K is enabled, add a streamed_reduction tiling level using the
+  // same tile sizes as the reduction level. This causes LLVMGPUStreamKTile to
+  // distribute reduction work across workgroups.
+  if (enableStreamK) {
+    MLIRContext *context = linalgOp->getContext();
+    DictionaryAttr configDict = loweringConfig.getAttributes();
+    ArrayAttr reductionAttr = configDict.getAs<ArrayAttr>("reduction");
+    if (reductionAttr) {
+      Builder b(context);
+      SmallVector<NamedAttribute> attrs(configDict.getValue());
+      attrs.push_back(
+          b.getNamedAttr("streamed_reduction", reductionAttr));
+      llvm::sort(attrs, [](const NamedAttribute &lhs,
+                            const NamedAttribute &rhs) {
+        return lhs.getName().getValue() < rhs.getName().getValue();
+      });
+      loweringConfig =
+          LoweringConfigAttr::get(context, DictionaryAttr::get(context, attrs));
+    }
+  }
 
   SmallVector<NamedAttribute, 1> pipelineAttrs;
   auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
