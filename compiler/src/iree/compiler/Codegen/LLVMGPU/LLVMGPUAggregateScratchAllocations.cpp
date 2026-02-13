@@ -48,9 +48,10 @@ void LLVMGPUAggregateScratchAllocationsPass::runOnOperation() {
   ModuleOp moduleOp = getOperation();
   MLIRContext *ctx = &getContext();
 
-  // Find the function with alloc_scratch ops. V1 asserts at most one.
+  // Find the function with alloc_scratch ops. V1 supports at most one.
   FunctionOpInterface targetFunc;
   SmallVector<IREE::Codegen::AllocScratchOp> allocOps;
+  bool hasMultipleFunctions = false;
 
   moduleOp->walk([&](FunctionOpInterface funcOp) {
     SmallVector<IREE::Codegen::AllocScratchOp> funcAllocOps;
@@ -63,12 +64,16 @@ void LLVMGPUAggregateScratchAllocationsPass::runOnOperation() {
     if (targetFunc) {
       funcOp.emitOpError(
           "multiple functions with alloc_scratch ops not supported");
+      hasMultipleFunctions = true;
       return;
     }
     targetFunc = funcOp;
     allocOps = std::move(funcAllocOps);
   });
 
+  if (hasMultipleFunctions) {
+    return signalPassFailure();
+  }
   if (!targetFunc) {
     return; // No alloc_scratch ops — pass is a no-op.
   }

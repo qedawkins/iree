@@ -441,7 +441,9 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createConvertAccGEMMToGEMMPass());
 
   // Stream-K tiling: tile reduction dimensions using Stream-K distribution.
-  // This is a no-op when no streamed_reduction config is present.
+  // Runs before workgroup distribution because it replaces the standard
+  // reduction tiling with a Stream-K partitioned loop structure.
+  // No-op when no streamed_reduction config is present.
   funcPassManager.addPass(createLLVMGPUStreamKTilePass());
 
   tileAndDistributeToWorkgroup(funcPassManager, /*useForall=*/true,

@@ -83,10 +83,16 @@ hal.executable public @matmul_stream_k_integration {
 // After tiling + lowering:
 // - pcf.loop present (from tiling).
 // - No stream_k_recombine (lowered away).
+// - pcf.alloc with workgroup scope for partial results and counter.
+//   (ConvertSRefToMemRef will convert these to alloc_scratch, tested in
+//    PCF/Transforms/test/convert_sref_to_memref.mlir. The alloc_scratch
+//    aggregation is tested in aggregate_scratch_allocations.mlir.)
 // - Atomic counter increment present.
 // - Branching for writeback present.
 
 // CHECK-LABEL: func @matmul
+//       CHECK:   pcf.alloc() : !pcf.sref<{{.+}}, #iree_codegen.workgroup_scope
+//       CHECK:   pcf.alloc() : !pcf.sref<i32, #iree_codegen.workgroup_scope
 //       CHECK:   pcf.loop
 // CHECK-NOT:     pcf.stream_k_recombine
 //       CHECK:   pcf.get_memref

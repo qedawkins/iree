@@ -134,3 +134,55 @@ hal.executable public @single_alloc_scratch {
 //       CHECK:     hal.interface.binding.subspan layout({{.+}}) binding(3) {{.*}} : memref<16384xi8>
 //       CHECK:     memref.view {{.*}} : memref<16384xi8> to memref<64x64xf32>
 //   CHECK-NOT:     iree_codegen.alloc_scratch
+
+// -----
+
+// ============================================================================
+// Test 4: Alignment padding (first alloc is NOT 16-byte aligned).
+//
+// alloc 1: memref<3xf32> = 3 * 4 = 12 bytes at offset 0.
+// alloc 2: memref<i32> = 4 bytes at offset alignTo(12, 16) = 16.
+// total: alignTo(16 + 4, 16) = 32.
+// ============================================================================
+
+#pipeline_layout4 = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
+]>
+
+hal.executable public @alignment_padding {
+  hal.executable.variant public @rocm target(<"rocm", "rocm-hsaco-fb">) {
+    hal.executable.export public @main ordinal(0) layout(#pipeline_layout4)
+    count(%device: !hal.device) -> (index, index, index) {
+      %c1 = arith.constant 1 : index
+      hal.return %c1, %c1, %c1 : index, index, index
+    }
+    scratch(%device: !hal.device) -> index {
+      %c0 = arith.constant 0 : index
+      hal.return %c0 : index
+    }
+    builtin.module {
+      func.func @main() {
+        %c0 = arith.constant 0 : index
+        %buf = hal.interface.binding.subspan layout(#pipeline_layout4) binding(0) alignment(64) offset(%c0) : memref<16xf32>
+        %s1 = iree_codegen.alloc_scratch() : memref<3xf32>
+        %s2 = iree_codegen.alloc_scratch() : memref<i32>
+        %val = memref.load %s1[%c0] : memref<3xf32>
+        memref.store %val, %buf[%c0] : memref<16xf32>
+        return
+      }
+    }
+  }
+}
+
+// scratch_size region updated with total = 32 (12 bytes + padding to 16 + 4 bytes, aligned to 16).
+// CHECK-LABEL: hal.executable public @alignment_padding
+//       CHECK:   scratch(%{{.+}}: !hal.device) -> index
+//       CHECK:     %[[T:.+]] = arith.constant 32 : index
+//       CHECK:     hal.return %[[T]]
+//       CHECK:   func.func @main
+//       CHECK:     %[[BUF:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(1) {{.*}} : memref<32xi8>
+//       CHECK:     memref.view %[[BUF]][{{.*}}][] : memref<32xi8> to memref<3xf32>
+//       CHECK:     %[[OFF:.+]] = arith.constant 16 : index
+//       CHECK:     memref.view %[[BUF]][%[[OFF]]][] : memref<32xi8> to memref<i32>
+//   CHECK-NOT:     iree_codegen.alloc_scratch
