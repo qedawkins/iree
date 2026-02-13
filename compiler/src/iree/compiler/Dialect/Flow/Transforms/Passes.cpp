@@ -152,6 +152,11 @@ void buildFlowTransformPassPipeline(OpPassManager &passManager,
   // runtime profiling/tracing.
   passManager.addPass(IREE::Flow::createAnnotateDispatchesPass());
 
+  // Add scratch buffer allocations to matmul-like dispatches. This populates
+  // scratch_size regions on exports and adds scratch tensor arguments to
+  // dispatch call sites. No-op when no matmul-like ops are found.
+  passManager.addPass(IREE::Flow::createFormDispatchScratchAllocationsPass());
+
   // Trace/break dispatches by ordinal in the specified region. There is a
   // similar version of the pass run both before and after deduplication
   // depending on if the target is specified by ordinal or by symbol.
