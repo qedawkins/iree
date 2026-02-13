@@ -303,9 +303,8 @@ struct StreamKRecombineOpInterface
       Block &wbBlock = writeback.front();
       if (!wbBlock.getArguments().empty()) {
         BlockArgument wbArg = wbBlock.getArgument(0);
-        if (auto tensorType = dyn_cast<RankedTensorType>(wbArg.getType())) {
-          auto memrefType = MemRefType::get(
-              tensorType.getShape(), tensorType.getElementType());
+        if (isa<RankedTensorType>(wbArg.getType())) {
+          MemRefType memrefType = cast<MemRefType>((*newPartial).getType());
           wbArg.setType(memrefType);
 
           // If the first op is bufferization.to_buffer, replace its uses

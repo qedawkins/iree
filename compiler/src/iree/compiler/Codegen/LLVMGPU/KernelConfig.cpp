@@ -2261,12 +2261,8 @@ static LogicalResult setRootConfig(IREE::GPU::TargetAttr target,
     computeOp->print(llvm::dbgs(), OpPrintingFlags().skipRegions());
     llvm::dbgs() << "\n";
   });
-  // When stream-K is enabled, skip the data-tiled MMA path so the
-  // tile-and-fuse matmul path (which adds streamed_reduction) is reached.
-  if (!clGPUEnableStreamK &&
-      succeeded(setDataTiledMmaInnerTiledLoweringConfig(
+  if (succeeded(setDataTiledMmaInnerTiledLoweringConfig(
           target, entryPointFn, computeOp, ukernelConfig))) {
-    LDBG() << "Tile and fuse data tiled MMA inner_tiled config";
     return success();
   }
   if (clGPUUseTileAndFuseMatmul) {

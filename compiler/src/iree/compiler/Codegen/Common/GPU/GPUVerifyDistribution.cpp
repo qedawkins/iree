@@ -76,6 +76,13 @@ struct GPUVerifyDistributionPass final
               continue;
             }
 
+            // Skip memrefs without explicit address space annotation.
+            // These are intermediates from bufferization or PCF lowering
+            // that will be assigned proper address spaces later.
+            if (!type.getMemorySpace()) {
+              continue;
+            }
+
             // Allow DMA copies.
             if (isa<linalg::CopyOp>(op) &&
                 getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(op)) {

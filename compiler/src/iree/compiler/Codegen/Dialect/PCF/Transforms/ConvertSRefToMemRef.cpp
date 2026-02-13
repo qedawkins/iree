@@ -267,15 +267,17 @@ void StridedLayoutValueElement::initializeValue(Value value,
 
 ChangeStatus StridedLayoutValueElement::updateOpResult(
     OpResult result, StridedLayoutState &newState, DFX::Solver &solver) {
-  llvm::TypeSwitch<Operation *, void>(result.getOwner())
+  Operation *owner = result.getOwner();
+  llvm::TypeSwitch<Operation *, void>(owner)
       .Case([&](PCF::AllocOp allocOp) {
         PCF::ShapedRefType resultType = allocOp.getResultType();
         // Workgroup-scope allocs become alloc_scratch with no memory space.
         // They bypass the normal getAllocMemSpace path which returns failure
         // for workgroup scope.
         if (isa<Codegen::WorkgroupScopeAttr>(resultType.getScope())) {
-          newState.setAssumed(MemRefType::get(resultType.getShape(),
-                                              resultType.getElementType()));
+          MemRefType memrefType = MemRefType::get(resultType.getShape(),
+                                                  resultType.getElementType());
+          newState.setAssumed(memrefType);
           newState.indicateOptimisticFixpoint();
           return;
         }
@@ -880,10 +882,14 @@ struct ConvertGetMemrefOp final : OpConversionPattern<PCF::GetMemrefOp> {
       sourceType = noMemSpaceType;
     }
 
-    // Cast to maximally dynamic layout to match the return type.
+    // Cast to maximally dynamic layout for the subview. The cast must preserve
+    // the source shape — the subview below handles the shape change.
     if (sourceType.getLayout() != resultType.getLayout()) {
-      source = memref::CastOp::create(rewriter, getMemrefOp.getLoc(),
-                                      resultType, source);
+      MemRefType castType =
+          MemRefType::get(sourceType.getShape(), sourceType.getElementType(),
+                          resultType.getLayout(), sourceType.getMemorySpace());
+      source = memref::CastOp::create(rewriter, getMemrefOp.getLoc(), castType,
+                                      source);
     }
 
     // Create subview using the slice params.
@@ -930,6 +936,21 @@ struct ConvertAllocOp final : OpConversionPattern<PCF::AllocOp> {
     rewriter.replaceOpWithNewOp<memref::AllocOp>(
         allocOp, allocType, adaptor.getDynamicSizes(),
         /*symbolOperands=*/ValueRange(), alignment);
+    return success();
+  }
+};
+
+/// Converts `pcf.fence` by erasing it. The stream-K recombine uses atomics
+/// that already provide the necessary memory ordering guarantees.
+/// TODO: Lower to `iree_codegen.fence` with scope-derived memory space when
+/// fence semantics are needed beyond what atomics provide.
+struct ConvertFenceOp final : OpConversionPattern<PCF::FenceOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(PCF::FenceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.eraseOp(op);
     return success();
   }
 };
@@ -1212,7 +1233,8 @@ void ConvertSRefToMemRefPass::runOnOperation() {
 
   patterns.add<ConvertGenericOp, ConvertLoopOp, ConvertWriteSliceOp,
                ConvertReadSliceOp, ConvertGetMemrefOp, ConvertAllocOp,
-               ConvertOptimizationBarrier>(typeConverter, context);
+               ConvertFenceOp, ConvertOptimizationBarrier>(typeConverter,
+                                                           context);
 
   // Function related conversion patterns need the analysis to lookup function
   // type conversions.

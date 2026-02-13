@@ -925,12 +925,28 @@ LogicalResult StreamKRecombineOp::verify() {
         "counter sref element type must be integer (i32 or i64)");
   }
 
-  // Verify writeback region: exactly 1 tensor arg matching partial_tile type.
+  // Verify writeback region: exactly 1 arg with compatible type.
+  // After bufferization and bank conflict padding, the partial tile's memref
+  // strides may differ from the writeback arg's strides, so we check shape,
+  // element type, and address space rather than exact type equality.
   Block &writebackBlock = getWriteback().front();
   if (writebackBlock.getNumArguments() != 1) {
     return emitOpError("writeback region must take exactly 1 argument");
   }
-  if (writebackBlock.getArgument(0).getType() != tileType) {
+  Type wbArgType = writebackBlock.getArgument(0).getType();
+  if (auto wbMemref = dyn_cast<MemRefType>(wbArgType)) {
+    if (auto tileMemref = dyn_cast<MemRefType>(tileType)) {
+      if (wbMemref.getShape() != tileMemref.getShape() ||
+          wbMemref.getElementType() != tileMemref.getElementType() ||
+          wbMemref.getMemorySpace() != tileMemref.getMemorySpace()) {
+        return emitOpError(
+            "writeback argument type must match partial tile type");
+      }
+    } else {
+      return emitOpError(
+          "writeback argument type must match partial tile type");
+    }
+  } else if (wbArgType != tileType) {
     return emitOpError(
         "writeback argument type must match partial tile type");
   }

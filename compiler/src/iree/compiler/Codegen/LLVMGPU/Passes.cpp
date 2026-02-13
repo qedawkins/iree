@@ -586,7 +586,15 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createCleanupBufferAllocViewPass());
   funcPassManager.addPass(createGPUCombineValueBarriersPass());
 
-  // Step 7. Bufferize.
+  // Step 7. Lower stream-K recombination before bufferization.
+  // LowerStreamKRecombine uses tensor semantics (linalg.generic, scf.for with
+  // iter_args) so it must run before bufferization converts tensors to memrefs.
+  // ConvertSRefToMemRef and LowerStructuralPCF run post-bufferization in
+  // addLowerToLLVMGPUPasses because layout analysis needs memref context.
+  funcPassManager.addPass(IREE::PCF::createResolveTokensPass());
+  funcPassManager.addPass(IREE::PCF::createLowerStreamKRecombinePass());
+
+  // Step 8. Bufferize.
   addGPUBufferizePasses(funcPassManager);
 
   // Step 8. Resolve remaining parallel loops.
@@ -1007,11 +1015,13 @@ static void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager,
 
   modulePassManager.addPass(createLowerUKernelOpsToCallsPass());
 
-  // Lower PCF ops to SCF.
+  // Lower remaining PCF ops to memref/SCF. ResolveTokens and
+  // LowerStreamKRecombine run pre-bufferization in the per-pipeline passes.
+  // ConvertSRefToMemRef must run at module level because its DFX Explorer
+  // needs rootOp to be the builtin.module (not a func.func) so the call
+  // graph traversal correctly visits function-level values.
+  modulePassManager.addPass(IREE::PCF::createConvertSRefToMemRefPass());
   FunctionLikeNest(modulePassManager)
-      .addPass(IREE::PCF::createResolveTokensPass)
-      .addPass(IREE::PCF::createLowerStreamKRecombinePass)
-      .addPass(IREE::PCF::createConvertSRefToMemRefPass)
       .addPass(IREE::PCF::createLowerStructuralPCFPass);
 
   // Aggregate scratch allocations into a single scratch buffer binding.

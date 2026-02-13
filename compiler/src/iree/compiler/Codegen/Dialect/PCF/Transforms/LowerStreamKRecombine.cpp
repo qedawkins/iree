@@ -43,34 +43,33 @@ static void inlineWritebackRegion(OpBuilder &builder, Location loc,
   }
 }
 
-/// Create a linalg.generic that applies the combiner region element-wise
-/// over two tensors of the same tile type. The combiner region is cloned
-/// into the generic body with pcf.yield replaced by linalg.yield.
+/// Create a linalg.generic that applies the combiner region element-wise,
+/// accumulating `rhs` into `lhs` in-place. Using `lhs` as both input and
+/// output ensures the result is "equivalent" to the iter_arg for
+/// bufferization.
 static Value createPointwiseCombine(OpBuilder &builder, Location loc,
                                     Region &combinerRegion, Value lhs,
                                     Value rhs) {
   auto tileType = cast<RankedTensorType>(lhs.getType());
   int64_t rank = tileType.getRank();
 
-  // All-parallel identity maps for element-wise operation.
+  // Identity maps: 1 input (rhs) + 1 output (lhs, also readable).
   AffineMap identityMap =
       AffineMap::getMultiDimIdentityMap(rank, builder.getContext());
-  SmallVector<AffineMap> indexingMaps(3, identityMap);
+  SmallVector<AffineMap> indexingMaps(2, identityMap);
   SmallVector<utils::IteratorType> iteratorTypes(
       rank, utils::IteratorType::parallel);
 
   Block &combinerBlock = combinerRegion.front();
 
-  Value init = tensor::EmptyOp::create(builder, loc, tileType.getShape(),
-                                        tileType.getElementType());
   auto genericOp = linalg::GenericOp::create(
-      builder, loc, tileType, /*inputs=*/ValueRange{lhs, rhs},
-      /*outputs=*/ValueRange{init}, indexingMaps, iteratorTypes,
+      builder, loc, tileType, /*inputs=*/ValueRange{rhs},
+      /*outputs=*/ValueRange{lhs}, indexingMaps, iteratorTypes,
       [&](OpBuilder &bodyBuilder, Location bodyLoc, ValueRange bodyArgs) {
-        // bodyArgs: [lhs_elem, rhs_elem, out_elem].
+        // bodyArgs: [rhs_elem, lhs_elem (from output)].
         IRMapping mapping;
-        mapping.map(combinerBlock.getArgument(0), bodyArgs[0]);
-        mapping.map(combinerBlock.getArgument(1), bodyArgs[1]);
+        mapping.map(combinerBlock.getArgument(0), bodyArgs[1]);
+        mapping.map(combinerBlock.getArgument(1), bodyArgs[0]);
         for (Operation &op : combinerBlock.without_terminator()) {
           bodyBuilder.clone(op, mapping);
         }

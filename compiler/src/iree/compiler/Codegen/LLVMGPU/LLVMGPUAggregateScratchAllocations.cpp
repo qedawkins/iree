@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
@@ -113,10 +114,25 @@ void LLVMGPUAggregateScratchAllocationsPass::runOnOperation() {
     return signalPassFailure();
   }
 
-  // Scratch binding is the last binding in the pipeline layout.
-  // This is by construction: the host-side FormDispatchScratchAllocations pass
-  // appends the scratch binding as the final entry.
-  int64_t scratchBindingIdx = pipelineLayout.getBindings().size() - 1;
+  // Find the scratch binding index by identifying the binding not used by any
+  // existing subspan op. The host-side FormDispatchScratchAllocations inserts
+  // the scratch binding between input and output arguments.
+  DenseSet<int64_t> usedBindings;
+  targetFunc->walk([&](IREE::HAL::InterfaceBindingSubspanOp subspanOp) {
+    usedBindings.insert(subspanOp.getBinding().getSExtValue());
+  });
+  int64_t scratchBindingIdx = -1;
+  for (int64_t i = 0, e = pipelineLayout.getBindings().size(); i < e; ++i) {
+    if (!usedBindings.contains(i)) {
+      scratchBindingIdx = i;
+      break;
+    }
+  }
+  if (scratchBindingIdx < 0) {
+    targetFunc.emitOpError(
+        "could not find unused binding index for scratch allocation");
+    return signalPassFailure();
+  }
 
   // Step 3: Create scratch buffer binding at function entry.
   OpBuilder builder(ctx);
@@ -124,8 +140,11 @@ void LLVMGPUAggregateScratchAllocationsPass::runOnOperation() {
       &targetFunc.getFunctionBody().front());
 
   Value c0 = arith::ConstantIndexOp::create(builder, loc, 0);
+  Attribute globalAddrSpace =
+      gpu::AddressSpaceAttr::get(ctx, gpu::AddressSpace::Global);
   MemRefType scratchBufferType =
-      MemRefType::get({totalBytes}, builder.getI8Type());
+      MemRefType::get({totalBytes}, builder.getI8Type(),
+                      /*layout=*/MemRefLayoutAttrInterface{}, globalAddrSpace);
 
   Value scratchBuffer = IREE::HAL::InterfaceBindingSubspanOp::create(
       builder, loc, scratchBufferType, pipelineLayout,
@@ -134,6 +153,15 @@ void LLVMGPUAggregateScratchAllocationsPass::runOnOperation() {
       builder.getIndexAttr(64),
       /*flags=*/IREE::HAL::DescriptorFlagsAttr{});
 
+  // Cast away the GPU address space for the byte buffer used by memref.view.
+  // The alloc_scratch results have no address space, and downstream ops
+  // (memref.cast, memref.subview) expect no address space. The LLVM lowering
+  // of hal.interface.binding.subspan handles the actual GPU pointer space.
+  MemRefType noAddrSpaceType =
+      MemRefType::get({totalBytes}, builder.getI8Type());
+  Value scratchBytes = memref::MemorySpaceCastOp::create(
+      builder, loc, noAddrSpaceType, scratchBuffer);
+
   // Step 4: Replace each alloc_scratch with memref.view into scratch buffer.
   for (auto [i, allocOp] : llvm::enumerate(allocOps)) {
     builder.setInsertionPoint(allocOp);
@@ -141,7 +169,7 @@ void LLVMGPUAggregateScratchAllocationsPass::runOnOperation() {
         builder, allocOp.getLoc(), byteOffsets[i]);
     Value view = memref::ViewOp::create(
         builder, allocOp.getLoc(), allocOp.getResultType(),
-        scratchBuffer, offset, ValueRange{});
+        scratchBytes, offset, ValueRange{});
     allocOp.replaceAllUsesWith(view);
     allocOp.erase();
   }
