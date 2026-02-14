@@ -33,7 +33,6 @@ iree_cc_library(
     "FuseConsumers.cpp"
     "FuseProducers.cpp"
     "FusePCFWrites.cpp"
-    "LowerStreamKRecombine.cpp"
     "LowerStructuralPCF.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"

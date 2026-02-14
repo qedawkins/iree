@@ -587,14 +587,10 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createGPUCombineValueBarriersPass());
 
   // Step 6.5. Lower stream-K recombination AFTER thread/MMA tiling but
-  // BEFORE bufferization. At this point, the pcf.stream_k_recombine op
-  // is outside the thread-distributed scf.forall, so the partial tensor
-  // is the full workgroup-level tile (e.g., tensor<32x32xf32>).
-  // The thread_id==0 guard in the lowering ensures only one thread per
-  // workgroup performs atomic/scratch/writeback. A gpu.barrier after the
-  // guard synchronizes all threads before the next outer loop iteration.
+  // BEFORE bufferization. ResolveTokens lowers pcf.token operations.
+  // stream_k_recombine is lowered by fusion-based passes, not a standalone
+  // lowering pass.
   funcPassManager.addPass(IREE::PCF::createResolveTokensPass());
-  funcPassManager.addPass(IREE::PCF::createLowerStreamKRecombinePass());
 
   // Step 6.6. Promote stream-K accumulator to workgroup memory.
   // In stream-K, the k-loop wraps the thread forall (opposite of normal
@@ -1026,8 +1022,8 @@ static void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager,
 
   modulePassManager.addPass(createLowerUKernelOpsToCallsPass());
 
-  // Lower remaining PCF ops to memref/SCF. ResolveTokens and
-  // LowerStreamKRecombine run pre-bufferization in the per-pipeline passes.
+  // Lower remaining PCF ops to memref/SCF. ResolveTokens runs
+  // pre-bufferization in the per-pipeline passes.
   // ConvertSRefToMemRef must run at module level because its DFX Explorer
   // needs rootOp to be the builtin.module (not a func.func) so the call
   // graph traversal correctly visits function-level values.

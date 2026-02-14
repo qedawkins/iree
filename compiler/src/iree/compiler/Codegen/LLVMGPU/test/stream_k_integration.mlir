@@ -1,23 +1,16 @@
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx1150 \
 // RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module( \
-// RUN:     func.func(iree-llvmgpu-stream-k-tile), \
-// RUN:     iree-pcf-lower-stream-k-recombine))))" %s | FileCheck %s
+// RUN:     func.func(iree-llvmgpu-stream-k-tile)))))" %s | FileCheck %s
 
 // ============================================================================
-// Test 1: Stream-K tiling + recombine lowering for 128x128x256 matmul.
+// Test 1: Stream-K tiling for 128x128x256 matmul.
 //
-// This chains two passes:
-//   1. iree-llvmgpu-stream-k-tile: Produces pcf.generic + pcf.stream_k_recombine.
-//   2. iree-pcf-lower-stream-k-recombine: Lowers recombine to atomics + branching.
+// iree-llvmgpu-stream-k-tile produces pcf.generic + pcf.stream_k_recombine.
 //
-// After both passes, we should see:
+// After tiling, we should see:
 //   - pcf.generic with initializer (from tiling).
-//   - No pcf.stream_k_recombine ops (all lowered).
+//   - pcf.stream_k_recombine ops (not yet lowered).
 //   - Outer scf.for over output tiles with inner scf.for accumulation.
-//   - Atomic RMW on counter sref (from lowering).
-//   - scf.if branching (sole/last/not-last contributor logic).
-//   - pcf.write_slice in writeback branch.
-//   - pcf.fence for memory ordering.
 // ============================================================================
 
 #pipeline_layout_4 = #hal.pipeline.layout<bindings = [
@@ -83,13 +76,9 @@ hal.executable public @matmul_stream_k_integration {
 
 // After tiling + lowering:
 // - pcf.generic with initializer present (from tiling).
-// - No stream_k_recombine (lowered away).
+// - pcf.stream_k_recombine present (not yet lowered).
 // - Allocs in initializer for partial results and counter.
 // - Nested scf.for loops (outer output tiles, inner k-tiles).
-// - Thread guard (gpu.thread_id + scf.if) around recombine ops.
-// - Atomic counter increment inside thread guard.
-// - Branching for writeback inside thread guard.
-// - gpu.barrier after thread guard for synchronization.
 
 // CHECK-LABEL: func @matmul
 //       CHECK:   iree_codegen.workgroup_count_hint
@@ -98,16 +87,8 @@ hal.executable public @matmul_stream_k_integration {
 //       CHECK:       pcf.alloc() : !pcf.sref<{{.+}}, #iree_codegen.workgroup_scope
 //       CHECK:       pcf.alloc() : !pcf.sref<4xi32, #iree_codegen.workgroup_scope
 //       CHECK:     execute
-// CHECK-NOT:       pcf.stream_k_recombine
 //       CHECK:       scf.for
 //       CHECK:         scf.for
 //       CHECK:           linalg.matmul
-//       CHECK:         gpu.thread_id
-//       CHECK:         scf.if
-//       CHECK:           pcf.get_memref
-//       CHECK:           memref.atomic_rmw
-//       CHECK:           arith.cmpi
-//       CHECK:           scf.if
-//       CHECK:             pcf.write_slice
-//       CHECK:         gpu.barrier
+//       CHECK:         pcf.stream_k_recombine
 //       CHECK:       pcf.return
