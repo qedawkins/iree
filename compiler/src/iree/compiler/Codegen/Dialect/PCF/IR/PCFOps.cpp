@@ -1248,6 +1248,8 @@ void GetMemrefOp::build(OpBuilder &b, OperationState &result, Type resultType,
 // Folders
 //===----------------------------------------------------------------------===//
 
+OpFoldResult GuaranteeValueOp::fold(FoldAdaptor) { return getSource(); }
+
 LogicalResult WriteSliceOp::fold(FoldAdaptor adaptor,
                                  SmallVectorImpl<OpFoldResult> &results) {
   SmallVector<OpFoldResult> mixedOffsets = getMixedOffsets();

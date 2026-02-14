@@ -52,6 +52,14 @@ FailureOr<PCF::GenericOp>
 convertForallToGenericNest(RewriterBase &rewriter, scf::ForallOp forallOp,
                            ArrayRef<PCF::ScopeAttrInterface> scopes);
 
+// One entry per structured control flow op between a consumer and its
+// producer. Used to mirror the consumer's enclosing control flow inside the
+// producer's region during fusion.
+struct ControlFlowEntry {
+  Operation *op;       // The control flow op (e.g., scf::IfOp).
+  unsigned regionIndex; // Which region the consumer is in (0=then, 1=else).
+};
+
 struct ConsumerFusionParams {
   // List of operands in the consumer that are fused along.
   SmallVector<unsigned> operands;
@@ -66,6 +74,10 @@ struct ConsumerFusionParams {
   // In the first case, slices[0] is the most dominant slice (and thus the
   // insertion point for the fused op).
   SmallVector<PCF::WriteSliceOp> slices;
+  // Chain of structured control flow ops between the consumer and the
+  // producer, innermost-first. Empty when the consumer is at the same scope
+  // level as the producer (no control flow to mirror).
+  SmallVector<ControlFlowEntry> controlFlowContext;
 };
 
 // Helpers to match a consumer as fusable into a producer. There are two

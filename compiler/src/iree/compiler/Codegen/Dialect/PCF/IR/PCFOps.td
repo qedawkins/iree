@@ -631,6 +631,57 @@ def StreamKRecombineOp : PCF_Op<"stream_k_recombine", [
 } // OpGroupControlFlowOps
 
 //===----------------------------------------------------------------------===//
+// ValueOps
+//===----------------------------------------------------------------------===//
+
+def OpGroupValueOps : OpDocGroup {
+  let summary = "Value ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupValueOps in {
+
+  //===----------------------------------------------------------------------===//
+  // GuaranteeValueOp
+  //===----------------------------------------------------------------------===//
+
+  def PCF_GuaranteeValueOp : PCF_Op<"guarantee_value", [
+      Pure,
+      AllTypesMatch<["source", "result"]>,
+  ]> {
+    let summary = "Marks a value as guaranteed valid at this control flow point.";
+    let description = [{
+      Asserts that the operand (a result of a pcf.generic or pcf.loop) holds a
+      valid, fully-computed value at the point where this op appears. Inserted by
+      consumer fusion when fusing a consumer that lives inside control flow.
+
+      The mirrored control flow inside the pcf region ensures the fused
+      computation only runs under the same predicate. This op replaces the
+      original consumer, telling subsequent fusion passes that the control flow
+      context is already captured in the producer.
+
+      Semantically this is an identity. Folds to its source during
+      canonicalization.
+
+      Example:
+      ```mlir
+      %0 = pcf.generic scope(#scope) execute(...) -> tensor<64xf32> { ... }
+      scf.if %cond {
+        %1 = pcf.guarantee_value %0 : tensor<64xf32>
+        // %1 is guaranteed valid because %cond was mirrored inside the generic.
+      }
+      ```
+    }];
+
+    let arguments = (ins AnyType:$source);
+    let results = (outs AnyType:$result);
+    let assemblyFormat = "$source attr-dict `:` type($source)";
+    let hasFolder = 1;
+  }
+
+} // OpGroupValueOps
+
+//===----------------------------------------------------------------------===//
 // WriteOps
 //===----------------------------------------------------------------------===//
 

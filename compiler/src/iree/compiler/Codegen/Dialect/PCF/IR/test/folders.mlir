@@ -126,3 +126,26 @@ func.func @get_memref_no_fold_dynamic(%source: !pcf.sref<32x64xf32, sync(#pcf.se
   %0 = pcf.get_memref %source[%offset, 0] [8, 8] [1, 1] : !pcf.sref<32x64xf32, sync(#pcf.sequential)> to memref<8x8xf32, strided<[?, ?], offset: ?>>
   return %0 : memref<8x8xf32, strided<[?, ?], offset: ?>>
 }
+
+// -----
+
+// CHECK-LABEL: @guarantee_value_fold
+func.func @guarantee_value_fold(%arg0: tensor<64xf32>) -> tensor<64xf32> {
+  // guarantee_value folds to its source.
+  // CHECK-NOT: pcf.guarantee_value
+  // CHECK: return %arg0
+  %0 = pcf.guarantee_value %arg0 : tensor<64xf32>
+  return %0 : tensor<64xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @guarantee_value_chain_fold
+func.func @guarantee_value_chain_fold(%arg0: tensor<64xf32>) -> tensor<64xf32> {
+  // Chains of guarantee_value fold completely.
+  // CHECK-NOT: pcf.guarantee_value
+  // CHECK: return %arg0
+  %0 = pcf.guarantee_value %arg0 : tensor<64xf32>
+  %1 = pcf.guarantee_value %0 : tensor<64xf32>
+  return %1 : tensor<64xf32>
+}

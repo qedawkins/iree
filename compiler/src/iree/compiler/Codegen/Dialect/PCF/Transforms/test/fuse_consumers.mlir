@@ -649,3 +649,146 @@ func.func @no_fuse_multiple_uses(%arg0: tensor<?x?xi32>) -> (tensor<4x5xi32>, te
 //       CHECK:  %[[SLICE1:.+]] = tensor.extract_slice %[[GENERIC]][0, 0]
 //       CHECK:  %[[SLICE2:.+]] = tensor.extract_slice %[[GENERIC]][4, 5]
 //       CHECK:  return %[[SLICE1]], %[[SLICE2]]
+
+// -----
+
+// Test: consumer inside scf.if (then branch) is fused with mirrored control flow.
+// The consumer result is yielded from scf.if so it is not DCE'd.
+func.func @fuse_consumer_through_scf_if(%arg0: tensor<?x?xi32>, %dest: tensor<?x?xi32>, %cond: i1) -> (tensor<?x?xi32>, tensor<?x?xi32>) {
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%ref = %arg0)[%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<?x?xi32, sync(#pcf.test_scope)>)
+        -> (tensor<?x?xi32>) {
+    %cst = arith.constant dense<5> : tensor<4x5xi32>
+    pcf.write_slice %cst into %ref[%id0, %id1] [4, 5] [1, 1] : tensor<4x5xi32> into !pcf.sref<?x?xi32, sync(#pcf.test_scope)>
+    pcf.return
+  }
+  %r = scf.if %cond -> (tensor<?x?xi32>) {
+    %1 = linalg.copy ins(%0: tensor<?x?xi32>) outs(%dest: tensor<?x?xi32>) -> tensor<?x?xi32>
+    scf.yield %1 : tensor<?x?xi32>
+  } else {
+    scf.yield %dest : tensor<?x?xi32>
+  }
+  return %0, %r : tensor<?x?xi32>, tensor<?x?xi32>
+}
+
+// CHECK-LABEL: @fuse_consumer_through_scf_if
+//  CHECK-SAME:   %[[ARG0:[A-Za-z0-9_]+]]: tensor<?x?xi32>
+//  CHECK-SAME:   %[[DEST:[A-Za-z0-9_]+]]: tensor<?x?xi32>
+//  CHECK-SAME:   %[[COND:[A-Za-z0-9_]+]]: i1
+
+//       CHECK:  %[[CST:.+]] = arith.constant dense<5> : tensor<4x5xi32>
+//       CHECK:  %[[GENERIC:.+]]:2 = pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:    execute(%[[REF:[A-Za-z0-9_]+]] = %[[ARG0]], %[[FUSED_REF:[A-Za-z0-9_]+]] = %[[DEST]])[%[[ID0:[A-Za-z0-9_]+]]: index, %[[ID1:[A-Za-z0-9_]+]]: index
+
+// Mirrored scf.if inside the pcf.generic — fused consumer runs conditionally.
+//       CHECK:    scf.if %[[COND]] {
+//       CHECK:      %[[SLICE:.+]] = tensor.extract_slice %[[DEST]][%[[ID0]], %[[ID1]]] [4, 5]
+//       CHECK:      %[[COPY:.+]] = linalg.copy ins(%[[CST]]{{.*}} outs(%[[SLICE]]
+//       CHECK:      pcf.write_slice %[[COPY]] into %[[FUSED_REF]][%[[ID0]], %[[ID1]]]
+//       CHECK:    }
+
+// Original write_slice remains unconditional.
+//       CHECK:    pcf.write_slice %[[CST]] into %[[REF]][%[[ID0]], %[[ID1]]]
+//       CHECK:    pcf.return
+
+// Outside: guarantee_value folds away; scf.if yields the new result directly.
+//       CHECK:  scf.if %[[COND]]
+//       CHECK:    scf.yield %[[GENERIC]]#1
+//       CHECK:  } else {
+//       CHECK:    scf.yield %[[DEST]]
+//       CHECK:  }
+//       CHECK:  return %[[GENERIC]]#0
+
+// -----
+
+// Test: consumer inside scf.if (else branch).
+func.func @fuse_consumer_through_scf_if_else(%arg0: tensor<?x?xi32>, %dest: tensor<?x?xi32>, %cond: i1) -> (tensor<?x?xi32>, tensor<?x?xi32>) {
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%ref = %arg0)[%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<?x?xi32, sync(#pcf.test_scope)>)
+        -> (tensor<?x?xi32>) {
+    %cst = arith.constant dense<5> : tensor<4x5xi32>
+    pcf.write_slice %cst into %ref[%id0, %id1] [4, 5] [1, 1] : tensor<4x5xi32> into !pcf.sref<?x?xi32, sync(#pcf.test_scope)>
+    pcf.return
+  }
+  %r = scf.if %cond -> (tensor<?x?xi32>) {
+    scf.yield %dest : tensor<?x?xi32>
+  } else {
+    %1 = linalg.copy ins(%0: tensor<?x?xi32>) outs(%dest: tensor<?x?xi32>) -> tensor<?x?xi32>
+    scf.yield %1 : tensor<?x?xi32>
+  }
+  return %0, %r : tensor<?x?xi32>, tensor<?x?xi32>
+}
+
+// CHECK-LABEL: @fuse_consumer_through_scf_if_else
+//  CHECK-SAME:   %[[ARG0:[A-Za-z0-9_]+]]: tensor<?x?xi32>
+//  CHECK-SAME:   %[[DEST:[A-Za-z0-9_]+]]: tensor<?x?xi32>
+//  CHECK-SAME:   %[[COND:[A-Za-z0-9_]+]]: i1
+
+//       CHECK:  %[[CST:.+]] = arith.constant dense<5> : tensor<4x5xi32>
+//       CHECK:  %[[GENERIC:.+]]:2 = pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:    execute(%[[REF:[A-Za-z0-9_]+]] = %[[ARG0]], %[[FUSED_REF:[A-Za-z0-9_]+]] = %[[DEST]])[%[[ID0:[A-Za-z0-9_]+]]: index, %[[ID1:[A-Za-z0-9_]+]]: index
+
+// Mirrored scf.if with fused consumer in the else branch.
+//       CHECK:    scf.if %[[COND]] {
+//       CHECK:    } else {
+//       CHECK:      %[[SLICE:.+]] = tensor.extract_slice %[[DEST]][%[[ID0]], %[[ID1]]] [4, 5]
+//       CHECK:      %[[COPY:.+]] = linalg.copy ins(%[[CST]]{{.*}} outs(%[[SLICE]]
+//       CHECK:      pcf.write_slice %[[COPY]] into %[[FUSED_REF]][%[[ID0]], %[[ID1]]]
+//       CHECK:    }
+
+// Original write_slice remains unconditional.
+//       CHECK:    pcf.write_slice %[[CST]] into %[[REF]][%[[ID0]], %[[ID1]]]
+//       CHECK:    pcf.return
+
+// Outside: guarantee_value folded away.
+//       CHECK:  scf.if %[[COND]]
+//       CHECK:    scf.yield %[[DEST]]
+//       CHECK:  } else {
+//       CHECK:    scf.yield %[[GENERIC]]#1
+//       CHECK:  }
+//       CHECK:  return %[[GENERIC]]#0
+
+// -----
+
+// Test: two consumers inside the same scf.if, both should be fused.
+func.func @fuse_two_consumers_in_scf_if(%arg0: tensor<?x?xi32>, %dest1: tensor<?x?xi32>, %dest2: tensor<?x?xi32>, %cond: i1) -> (tensor<?x?xi32>, tensor<?x?xi32>, tensor<?x?xi32>) {
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%ref = %arg0)[%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<?x?xi32, sync(#pcf.test_scope)>)
+        -> (tensor<?x?xi32>) {
+    %cst = arith.constant dense<5> : tensor<4x5xi32>
+    pcf.write_slice %cst into %ref[%id0, %id1] [4, 5] [1, 1] : tensor<4x5xi32> into !pcf.sref<?x?xi32, sync(#pcf.test_scope)>
+    pcf.return
+  }
+  %r:2 = scf.if %cond -> (tensor<?x?xi32>, tensor<?x?xi32>) {
+    %1 = linalg.copy ins(%0: tensor<?x?xi32>) outs(%dest1: tensor<?x?xi32>) -> tensor<?x?xi32>
+    %2 = linalg.copy ins(%0: tensor<?x?xi32>) outs(%dest2: tensor<?x?xi32>) -> tensor<?x?xi32>
+    scf.yield %1, %2 : tensor<?x?xi32>, tensor<?x?xi32>
+  } else {
+    scf.yield %dest1, %dest2 : tensor<?x?xi32>, tensor<?x?xi32>
+  }
+  return %0, %r#0, %r#1 : tensor<?x?xi32>, tensor<?x?xi32>, tensor<?x?xi32>
+}
+
+// Both consumers inside the scf.if should be fused, each with mirrored CF.
+// CHECK-LABEL: @fuse_two_consumers_in_scf_if
+//  CHECK-SAME:   %[[ARG0:[A-Za-z0-9_]+]]: tensor<?x?xi32>
+//  CHECK-SAME:   %[[DEST1:[A-Za-z0-9_]+]]: tensor<?x?xi32>
+//  CHECK-SAME:   %[[DEST2:[A-Za-z0-9_]+]]: tensor<?x?xi32>
+//  CHECK-SAME:   %[[COND:[A-Za-z0-9_]+]]: i1
+
+// Two mirrored scf.if blocks inside pcf.generic, one per consumer.
+//       CHECK:  %[[GENERIC:.+]]:3 = pcf.generic scope(#pcf.test_scope)
+//       CHECK:    scf.if %[[COND]]
+//       CHECK:      pcf.write_slice {{.*}} into %{{.+}}[%{{.+}}, %{{.+}}]
+//       CHECK:    scf.if %[[COND]]
+//       CHECK:      pcf.write_slice {{.*}} into %{{.+}}[%{{.+}}, %{{.+}}]
+// Original write_slice is unconditional.
+//       CHECK:    pcf.write_slice {{.*}} into %{{.+}}[%{{.+}}, %{{.+}}]
+//       CHECK:    pcf.return
+
+// Outside: both guarantee_values folded away.
+//       CHECK:  scf.if %[[COND]]
+//       CHECK:    scf.yield %[[GENERIC]]#2, %[[GENERIC]]#1
