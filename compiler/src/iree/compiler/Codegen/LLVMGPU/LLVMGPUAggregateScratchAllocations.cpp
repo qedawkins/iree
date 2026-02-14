@@ -37,7 +37,7 @@ namespace mlir::iree_compiler {
 namespace {
 
 /// Alignment in bytes for each scratch allocation slot.
-static constexpr int64_t kScratchAlignment = 16;
+constexpr int64_t kScratchAlignment = 16;
 
 struct LLVMGPUAggregateScratchAllocationsPass final
     : impl::LLVMGPUAggregateScratchAllocationsPassBase<

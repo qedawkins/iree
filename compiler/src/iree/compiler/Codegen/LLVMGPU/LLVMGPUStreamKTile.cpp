@@ -74,8 +74,10 @@ static linalg::LinalgOp findStreamKTarget(Operation *funcOp) {
 /// Compute ceil(a, b) for index values.
 static Value ceilDiv(OpBuilder &builder, Location loc, Value a, Value b) {
   Value one = arith::ConstantIndexOp::create(builder, loc, 1);
-  Value aMinusOne = arith::SubIOp::create(builder, loc, a, one);
-  Value sum = arith::AddIOp::create(builder, loc, aMinusOne, b);
+  Value aMinusOne = arith::SubIOp::create(builder, loc, a, one,
+                                          arith::IntegerOverflowFlags::nsw);
+  Value sum = arith::AddIOp::create(builder, loc, aMinusOne, b,
+                                    arith::IntegerOverflowFlags::nsw);
   return arith::DivUIOp::create(builder, loc, sum, b);
 }
 
@@ -387,11 +389,12 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
   Value itemsPerWg = ceilDiv(builder, loc, cTotalWork, wgCount);
 
   // my_start = wg_id * items_per_wg
-  Value myStart = arith::MulIOp::create(builder, loc, wgId, itemsPerWg);
+  Value myStart = arith::MulIOp::create(builder, loc, wgId, itemsPerWg,
+                                        arith::IntegerOverflowFlags::nsw);
 
   // my_end = min(my_start + items_per_wg, totalWork)
-  Value myStartPlusItems =
-      arith::AddIOp::create(builder, loc, myStart, itemsPerWg);
+  Value myStartPlusItems = arith::AddIOp::create(
+      builder, loc, myStart, itemsPerWg, arith::IntegerOverflowFlags::nsw);
   Value myEnd = indexMin(builder, loc, myStartPlusItems, cTotalWork);
 
   // first_out = my_start / kTilesPerOut
@@ -399,10 +402,12 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
       arith::DivUIOp::create(builder, loc, myStart, cKTilesPerOut);
 
   // last_out = (my_end - 1) / kTilesPerOut  (safe: my_end >= 1 always)
-  Value myEndMinus1 = arith::SubIOp::create(builder, loc, myEnd, c1);
+  Value myEndMinus1 = arith::SubIOp::create(builder, loc, myEnd, c1,
+                                             arith::IntegerOverflowFlags::nsw);
   Value lastOut =
       arith::DivUIOp::create(builder, loc, myEndMinus1, cKTilesPerOut);
-  Value lastOutPlus1 = arith::AddIOp::create(builder, loc, lastOut, c1);
+  Value lastOutPlus1 = arith::AddIOp::create(builder, loc, lastOut, c1,
+                                              arith::IntegerOverflowFlags::nsw);
 
   // Tile sizes for getTiledImplementation (static, reused across iterations).
   SmallVector<OpFoldResult> tileSizesOFR;
@@ -419,20 +424,23 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
     Value outIdx = outerFor.getInductionVar();
 
     // Compute k-range for this output tile within our work range.
-    Value outStartLinear =
-        arith::MulIOp::create(builder, loc, outIdx, cKTilesPerOut);
-    Value outEndLinear =
-        arith::AddIOp::create(builder, loc, outStartLinear, cKTilesPerOut);
+    Value outStartLinear = arith::MulIOp::create(
+        builder, loc, outIdx, cKTilesPerOut,
+        arith::IntegerOverflowFlags::nsw);
+    Value outEndLinear = arith::AddIOp::create(
+        builder, loc, outStartLinear, cKTilesPerOut,
+        arith::IntegerOverflowFlags::nsw);
 
     // k_start = max(my_start, outStartLinear) - outStartLinear
     Value kStartRaw = indexMax(builder, loc, myStart, outStartLinear);
-    Value kStart =
-        arith::SubIOp::create(builder, loc, kStartRaw, outStartLinear);
+    Value kStart = arith::SubIOp::create(builder, loc, kStartRaw,
+                                          outStartLinear,
+                                          arith::IntegerOverflowFlags::nsw);
 
     // k_end = min(my_end, outEndLinear) - outStartLinear
     Value kEndRaw = indexMin(builder, loc, myEnd, outEndLinear);
-    Value kEnd =
-        arith::SubIOp::create(builder, loc, kEndRaw, outStartLinear);
+    Value kEnd = arith::SubIOp::create(builder, loc, kEndRaw, outStartLinear,
+                                       arith::IntegerOverflowFlags::nsw);
 
     // Decompose out_idx into per-parallel-dim tile coordinates.
     SmallVector<Value> parallelTileCoords =
@@ -448,8 +456,9 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
       } else {
         Value ts =
             arith::ConstantIndexOp::create(builder, loc, tileSizes[d]);
-        parallelOffsets.push_back(
-            arith::MulIOp::create(builder, loc, parallelTileCoords[i], ts));
+        parallelOffsets.push_back(arith::MulIOp::create(
+            builder, loc, parallelTileCoords[i], ts,
+            arith::IntegerOverflowFlags::nsw));
       }
     }
 
@@ -489,7 +498,8 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
                     arith::ConstantIndexOp::create(ib, il, tileSizes[d]);
                 tileOffsets[d] =
                     arith::MulIOp::create(ib, il, reductionTileCoords[rIdx++],
-                                          ts)
+                                          ts,
+                                          arith::IntegerOverflowFlags::nsw)
                         .getResult();
               }
             }
@@ -535,19 +545,23 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
     Value accum = innerFor.getResult(0);
 
     // === Step 14: Compute numInGroup and create recombine. ===
-    Value firstLinear =
-        arith::MulIOp::create(builder, loc, outIdx, cKTilesPerOut);
-    Value kTilesM1 =
-        arith::SubIOp::create(builder, loc, cKTilesPerOut, c1);
-    Value lastLinear =
-        arith::AddIOp::create(builder, loc, firstLinear, kTilesM1);
+    Value firstLinear = arith::MulIOp::create(
+        builder, loc, outIdx, cKTilesPerOut,
+        arith::IntegerOverflowFlags::nsw);
+    Value kTilesM1 = arith::SubIOp::create(
+        builder, loc, cKTilesPerOut, c1, arith::IntegerOverflowFlags::nsw);
+    Value lastLinear = arith::AddIOp::create(
+        builder, loc, firstLinear, kTilesM1,
+        arith::IntegerOverflowFlags::nsw);
     Value firstWg =
         arith::DivUIOp::create(builder, loc, firstLinear, itemsPerWg);
     Value lastWg =
         arith::DivUIOp::create(builder, loc, lastLinear, itemsPerWg);
     Value numInGroup = arith::AddIOp::create(
         builder, loc,
-        arith::SubIOp::create(builder, loc, lastWg, firstWg), c1);
+        arith::SubIOp::create(builder, loc, lastWg, firstWg,
+                              arith::IntegerOverflowFlags::nsw),
+        c1, arith::IntegerOverflowFlags::nsw);
 
     // Build output tile offsets/sizes/strides for recombine.
     SmallVector<OpFoldResult> outTileOffsets;

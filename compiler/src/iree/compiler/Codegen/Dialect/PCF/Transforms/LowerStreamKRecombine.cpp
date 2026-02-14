@@ -1,4 +1,4 @@
-// Copyright 2025 The IREE Authors
+// Copyright 2026 The IREE Authors
 //
 // Licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -159,7 +159,8 @@ struct LowerStreamKRecombineOp final
         arith::ConstantIndexOp::create(rewriter, loc, perTileScratchRows);
     Value scratchBaseRow =
         arith::MulIOp::create(rewriter, loc, counterIndex,
-                              perTileScratchRowsVal);
+                              perTileScratchRowsVal,
+                              arith::IntegerOverflowFlags::nsw);
     int64_t counterRank = counterSrefType.getRank();
     SmallVector<int64_t> counterMemRefShape(counterSrefType.getShape());
     auto stridedLayout = StridedLayoutAttr::get(
@@ -192,7 +193,8 @@ struct LowerStreamKRecombineOp final
     // Step 3: Compute branch conditions.
     Value isOnly = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::eq, numInGroup, c1);
-    Value numMinus1 = arith::SubIOp::create(rewriter, loc, numInGroup, c1);
+    Value numMinus1 = arith::SubIOp::create(rewriter, loc, numInGroup, c1,
+                                             arith::IntegerOverflowFlags::nsw);
     Value isLast = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::eq, old, numMinus1);
 
@@ -223,11 +225,12 @@ struct LowerStreamKRecombineOp final
                 dim0Size = arith::ConstantIndexOp::create(
                     thenBuilder, thenLoc, tileType.getDimSize(0));
               }
-              Value localOffset =
-                  arith::MulIOp::create(thenBuilder, thenLoc, old, dim0Size);
-              Value slotOffset =
-                  arith::AddIOp::create(thenBuilder, thenLoc,
-                                        scratchBaseRow, localOffset);
+              Value localOffset = arith::MulIOp::create(
+                  thenBuilder, thenLoc, old, dim0Size,
+                  arith::IntegerOverflowFlags::nsw);
+              Value slotOffset = arith::AddIOp::create(
+                  thenBuilder, thenLoc, scratchBaseRow, localOffset,
+                  arith::IntegerOverflowFlags::nsw);
               writeOffsets.push_back(slotOffset);
             } else {
               writeOffsets.push_back(
@@ -331,13 +334,13 @@ struct LowerStreamKRecombineOp final
                                         loopBuilder, loopLoc,
                                         tileType.getDimSize(0));
                               }
-                              Value localOff =
-                                  arith::MulIOp::create(
-                                      loopBuilder, loopLoc, iv, dim0Size);
-                              Value slotOff =
-                                  arith::AddIOp::create(
-                                      loopBuilder, loopLoc,
-                                      scratchBaseRow, localOff);
+                              Value localOff = arith::MulIOp::create(
+                                  loopBuilder, loopLoc, iv, dim0Size,
+                                  arith::IntegerOverflowFlags::nsw);
+                              Value slotOff = arith::AddIOp::create(
+                                  loopBuilder, loopLoc, scratchBaseRow,
+                                  localOff,
+                                  arith::IntegerOverflowFlags::nsw);
 
                               SmallVector<OpFoldResult> loopReadOffsets;
                               SmallVector<OpFoldResult> loopReadSizes(
