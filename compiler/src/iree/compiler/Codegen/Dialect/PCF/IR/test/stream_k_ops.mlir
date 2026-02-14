@@ -8,11 +8,13 @@ util.func private @basic_recombine_f32(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // CHECK: pcf.stream_k_recombine %[[PARTIAL:.+]]
   // CHECK-NEXT: into %[[OUT:.+]] [%[[OFF_M:.+]], %[[OFF_N:.+]]] [64, 64] [1, 1]
-  // CHECK-NEXT: scratch %[[SCRATCH:.+]] counter %[[CTR:.+]]
+  // CHECK-NEXT: scratch %[[SCRATCH:.+]] counter %[[CTR:.+]][%[[IDX:.+]]]
   // CHECK-NEXT: group(%[[NUM:.+]])
+  // CHECK-NEXT: ordinal(%[[ORD:.+]])
   // CHECK-NEXT: combiner
   // CHECK-NEXT: ^bb0(%[[LHS:.+]]: f32, %[[RHS:.+]]: f32):
   // CHECK-NEXT:   arith.addf %[[LHS]], %[[RHS]]
@@ -26,8 +28,9 @@ util.func private @basic_recombine_f32(
   // CHECK-NEXT: scratch_type !pcf.sref<64x64xf32, #pcf.test_scope> counter_type !pcf.sref<i32, #pcf.test_scope>
   pcf.stream_k_recombine %partial
       into %out_ref [%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -55,13 +58,15 @@ util.func private @basic_recombine_i32(
     %scratch_ref: !pcf.sref<32x32xi32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // CHECK: pcf.stream_k_recombine %{{.+}}
   // CHECK: : tensor<32x32xi32> into !pcf.sref<128x128xi32, #pcf.test_scope>
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [32, 32] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: i32, %rhs: i32):
           %sum = arith.addi %lhs, %rhs : i32
@@ -89,6 +94,7 @@ util.func private @dynamic_offsets_sizes(
     %scratch_ref: !pcf.sref<?x?xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index,
     %sz_m: index, %sz_n: index) {
   // CHECK: pcf.stream_k_recombine %{{.+}}
@@ -96,8 +102,9 @@ util.func private @dynamic_offsets_sizes(
   // CHECK: : tensor<?x?xf32> into !pcf.sref<?x?xf32, #pcf.test_scope>
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [%sz_m, %sz_n] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -125,6 +132,7 @@ util.func private @writeback_with_epilogue(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %bias: tensor<64xf32>,
     %off_m: index, %off_n: index) {
   // CHECK: pcf.stream_k_recombine
@@ -135,8 +143,9 @@ util.func private @writeback_with_epilogue(
   // CHECK: pcf.yield
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -178,13 +187,15 @@ util.func private @f16_element_type(
     %scratch_ref: !pcf.sref<64x64xf16, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // CHECK: pcf.stream_k_recombine
   // CHECK: : tensor<64x64xf16> into !pcf.sref<256x256xf16, #pcf.test_scope>
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f16, %rhs: f16):
           %sum = arith.addf %lhs, %rhs : f16
@@ -212,14 +223,16 @@ util.func private @recombine_1d(
     %scratch_ref: !pcf.sref<128xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off: index) {
   // CHECK: pcf.stream_k_recombine
   // CHECK-NEXT: into %{{.+}} [%{{.+}}] [128] [1]
   // CHECK: : tensor<128xf32> into !pcf.sref<1024xf32, #pcf.test_scope>
   pcf.stream_k_recombine %partial
       into %out_ref[%off] [128] [1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -247,14 +260,16 @@ util.func private @recombine_3d(
     %scratch_ref: !pcf.sref<4x8x16xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %o0: index, %o1: index, %o2: index) {
   // CHECK: pcf.stream_k_recombine
   // CHECK-NEXT: into %{{.+}} [%{{.+}}, %{{.+}}, %{{.+}}] [4, 8, 16] [1, 1, 1]
   // CHECK: : tensor<4x8x16xf32> into !pcf.sref<16x32x64xf32, #pcf.test_scope>
   pcf.stream_k_recombine %partial
       into %out_ref[%o0, %o1, %o2] [4, 8, 16] [1, 1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32

@@ -575,6 +575,12 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
       outTileStrides.push_back(builder.getI64IntegerAttr(1));
     }
 
+    // Compute contributor ordinal = wg_id - firstWg.
+    // This is the 0-based index of this workgroup within the group of
+    // workgroups contributing to the same output tile.
+    Value contributorOrdinal = arith::SubIOp::create(
+        builder, loc, wgId, firstWg, arith::IntegerOverflowFlags::nsw);
+
     // Create pcf.stream_k_recombine.
     auto recombineOp = IREE::PCF::StreamKRecombineOp::create(
         builder, loc, accum,
@@ -582,7 +588,8 @@ void LLVMGPUStreamKTilePass::runOnOperation() {
         /*scratch=*/scratchArg,
         /*counter=*/counterArg,
         /*counter_index=*/outIdx,
-        /*numInGroup=*/numInGroup);
+        /*numInGroup=*/numInGroup,
+        /*contributorOrdinal=*/contributorOrdinal);
 
     // Populate combiner region: element-wise addition.
     {

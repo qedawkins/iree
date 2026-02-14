@@ -95,6 +95,49 @@ static std::optional<int64_t> getStaticValue(Value v) {
   return std::nullopt;
 }
 
+/// Compute scratch slot offsets/sizes/strides for a given slot index.
+/// Slot layout: scratch rows are partitioned per output tile, and within each
+/// partition, contributor `slotIndex` writes at row `base + slotIndex * dim0`.
+static void buildScratchSlotAddressing(
+    OpBuilder &builder, Location loc, ShapedType tileType,
+    Value scratchBaseRow, Value slotIndex, Value partial,
+    SmallVector<OpFoldResult> &offsets, SmallVector<OpFoldResult> &sizes,
+    SmallVector<OpFoldResult> &strides) {
+  int64_t tileRank = tileType.getRank();
+  for (int64_t d = 0; d < tileRank; ++d) {
+    if (d == 0) {
+      Value dim0Size;
+      if (tileType.isDynamicDim(0)) {
+        Value c0Idx = arith::ConstantIndexOp::create(builder, loc, 0);
+        dim0Size = tensor::DimOp::create(builder, loc, partial, c0Idx);
+      } else {
+        dim0Size = arith::ConstantIndexOp::create(builder, loc,
+                                                   tileType.getDimSize(0));
+      }
+      Value localOffset = arith::MulIOp::create(
+          builder, loc, slotIndex, dim0Size,
+          arith::IntegerOverflowFlags::nsw);
+      Value slotOffset = arith::AddIOp::create(
+          builder, loc, scratchBaseRow, localOffset,
+          arith::IntegerOverflowFlags::nsw);
+      offsets.push_back(slotOffset);
+    } else {
+      offsets.push_back(
+          arith::ConstantIndexOp::create(builder, loc, 0).getResult());
+    }
+    if (tileType.isDynamicDim(d)) {
+      sizes.push_back(
+          tensor::DimOp::create(
+              builder, loc, partial,
+              arith::ConstantIndexOp::create(builder, loc, d).getResult())
+              .getResult());
+    } else {
+      sizes.push_back(builder.getI64IntegerAttr(tileType.getDimSize(d)));
+    }
+    strides.push_back(builder.getI64IntegerAttr(1));
+  }
+}
+
 struct LowerStreamKRecombineOp final
     : OpRewritePattern<StreamKRecombineOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -107,25 +150,10 @@ struct LowerStreamKRecombineOp final
     Value counter = op.getCounter();
     Value counterIndex = op.getCounterIndex();
     Value numInGroup = op.getNumInGroup();
+    Value contributorOrdinal = op.getContributorOrdinal();
 
     ShapedType tileType = op.getPartialTileType();
     Type counterElemType = op.getCounterType().getElementType();
-    int64_t tileRank = tileType.getRank();
-
-    // Guard the recombine logic with thread_id == 0.
-    // Only thread 0 performs atomic counter, scratch writes, and output
-    // writeback operations. The accumulator tensor is in workgroup memory
-    // (promoted by LLVMGPUPromoteAccumulatorToWorkgroup before bufferize),
-    // so thread 0 can read the fully assembled WMMA result after the
-    // implicit forall barrier.
-    Value tid = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
-    Value c0tid = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    Value isThread0 = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::eq, tid, c0tid);
-    auto threadGuard = scf::IfOp::create(
-        rewriter, loc, /*resultTypes=*/TypeRange{}, isThread0,
-        /*withElseRegion=*/false);
-    rewriter.setInsertionPointToStart(threadGuard.thenBlock());
 
     // Check for sole contributor optimization: if num_in_group is
     // statically 1, skip all scratch/atomic/branching.
@@ -133,281 +161,220 @@ struct LowerStreamKRecombineOp final
     if (staticNumInGroup && *staticNumInGroup == 1) {
       // Sole contributor: inline writeback with partial directly.
       inlineWritebackRegion(rewriter, loc, op.getWriteback(), partial);
-    } else {
+      rewriter.eraseOp(op);
+      return success();
+    }
 
-    // --- General case: atomic + branching + scratch + writeback ---
+    // ================================================================
+    // General case: 3-zone distributed architecture.
+    //
+    // Zone A: Distributed scratch write (no thread guard).
+    //         Writes partial tile to scratch BEFORE the atomic so other
+    //         workgroups cannot read our slot prematurely.
+    //
+    // Zone B: Single-invocation atomic (thread_id == 0).
+    //         Increments the completion counter. Only the last
+    //         contributor proceeds to Zone C.
+    //
+    // Zone C: Recombine + writeback (inside isLast, thread_id == 0).
+    //         Reads all scratch slots, combines them, inlines writeback.
+    //
+    // Non-split path: Direct writeback in else branch (distributed,
+    //         fusable into the producer via 696 control flow fusion).
+    // ================================================================
 
     // Constants.
+    Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
     Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
     Value c1Int = arith::ConstantOp::create(
         rewriter, loc, counterElemType,
         rewriter.getIntegerAttr(counterElemType, 1));
 
-    // Step 1: Get memref from counter sref for atomic operation.
-    // Counter is 1D (one entry per output tile).  We get the full 1D memref
-    // and use counter_index to address the specific element.
-    ShapedRefType counterSrefType = op.getCounterType();
+    // isSplit = numInGroup != 1 (true when output tile is shared by
+    // multiple workgroups and scratch/atomic path is needed).
+    Value isSplit = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ne, numInGroup, c1);
 
-    // Compute per-output-tile scratch base row.  Scratch is partitioned as
-    // [numOutputTiles * maxNumInGroup * tileM, tileN].  Each output tile
+    // Compute per-output-tile scratch base row. Scratch is partitioned as
+    // [numOutputTiles * maxNumInGroup * tileM, tileN]. Each output tile
     // gets `perTileScratchRows = scratchDim0 / numOutputTiles` rows.
     ShapedRefType scratchSrefType = op.getScratchType();
-    int64_t scratchDim0 = scratchSrefType.getShape()[0];
-    int64_t numOutputTiles = counterSrefType.getShape()[0];
-    int64_t perTileScratchRows = scratchDim0 / numOutputTiles;
-    Value perTileScratchRowsVal =
-        arith::ConstantIndexOp::create(rewriter, loc, perTileScratchRows);
-    Value scratchBaseRow =
-        arith::MulIOp::create(rewriter, loc, counterIndex,
-                              perTileScratchRowsVal,
-                              arith::IntegerOverflowFlags::nsw);
-    int64_t counterRank = counterSrefType.getRank();
-    SmallVector<int64_t> counterMemRefShape(counterSrefType.getShape());
-    auto stridedLayout = StridedLayoutAttr::get(
-        rewriter.getContext(), ShapedType::kDynamic,
-        SmallVector<int64_t>(counterRank, ShapedType::kDynamic));
-    MemRefType counterMemRefType =
-        MemRefType::get(counterMemRefShape, counterElemType, stridedLayout);
-    // Build sizes from the static shape (all entries are static).
-    SmallVector<OpFoldResult> counterSizes;
-    for (int64_t dim : counterMemRefShape) {
-      counterSizes.push_back(rewriter.getIndexAttr(dim));
+    ShapedRefType counterSrefType = op.getCounterType();
+    Value scratchBaseRow;
+    if (counterSrefType.getRank() > 0) {
+      int64_t scratchDim0 = scratchSrefType.getShape()[0];
+      int64_t numOutputTiles = counterSrefType.getShape()[0];
+      int64_t perTileScratchRows = scratchDim0 / numOutputTiles;
+      Value perTileScratchRowsVal =
+          arith::ConstantIndexOp::create(rewriter, loc, perTileScratchRows);
+      scratchBaseRow =
+          arith::MulIOp::create(rewriter, loc, counterIndex,
+                                perTileScratchRowsVal,
+                                arith::IntegerOverflowFlags::nsw);
+    } else {
+      // Rank-0 counter: single output tile, no partitioning.
+      scratchBaseRow = c0;
     }
-    Value counterMemRef = GetMemrefOp::create(
-        rewriter, loc, counterMemRefType, counter,
-        /*offsets=*/SmallVector<OpFoldResult>(counterRank,
-                                             rewriter.getIndexAttr(0)),
-        /*sizes=*/counterSizes,
-        /*strides=*/SmallVector<OpFoldResult>(counterRank,
-                                             rewriter.getIndexAttr(1)));
 
-    // Step 2: Atomic increment counter at counter_index, get old value.
-    Value oldInt = memref::AtomicRMWOp::create(
-        rewriter, loc, counterElemType, arith::AtomicRMWKind::addi, c1Int,
-        counterMemRef, ValueRange{counterIndex});
+    // ============================================================
+    // Zone A: Distributed scratch write (no thread guard).
+    // All threads participate. The scratch write uses
+    // contributor_ordinal (computed deterministically from the work
+    // distribution) instead of the atomic return value, because the
+    // atomic has not happened yet.
+    // ============================================================
+    scf::IfOp::create(rewriter, loc, isSplit,
+        [&](OpBuilder &zoneABuilder, Location zoneALoc) {
+          SmallVector<OpFoldResult> writeOffsets, writeSizes, writeStrides;
+          buildScratchSlotAddressing(zoneABuilder, zoneALoc, tileType,
+                                     scratchBaseRow, contributorOrdinal,
+                                     partial, writeOffsets, writeSizes,
+                                     writeStrides);
+          WriteSliceOp::create(zoneABuilder, zoneALoc, partial, scratch,
+                               writeOffsets, writeSizes, writeStrides);
+          scf::YieldOp::create(zoneABuilder, zoneALoc);
+        });
 
-    // Convert old count to index for comparisons.
-    Value old = arith::IndexCastOp::create(
-        rewriter, loc, rewriter.getIndexType(), oldInt);
+    // Barrier: synchronize all threads within this workgroup. Ensures
+    // every thread's scratch write is complete before thread 0 proceeds
+    // with the release fence and atomic.
+    gpu::BarrierOp::create(rewriter, loc, gpu::AddressSpace::Workgroup);
 
-    // Step 3: Compute branch conditions.
-    Value isOnly = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::eq, numInGroup, c1);
-    Value numMinus1 = arith::SubIOp::create(rewriter, loc, numInGroup, c1,
-                                             arith::IntegerOverflowFlags::nsw);
-    Value isLast = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::eq, old, numMinus1);
-
-    // notOnly = !isOnly.
-    Value trueVal = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
-    Value notOnly = arith::XOrIOp::create(rewriter, loc, isOnly, trueVal);
-
-    // Step 4: Non-sole contributor path.
-    scf::IfOp::create(rewriter,
-        loc, notOnly,
-        [&](OpBuilder &thenBuilder, Location thenLoc) {
-          // Compute scratch slot offset for this contributor.
-          // Slot layout: scratch is viewed as [K * dim0, dim1, ...].
-          // Contributor `old` writes to offset [old * dim0, 0, ...].
-          SmallVector<OpFoldResult> writeOffsets;
-          SmallVector<OpFoldResult> writeSizes;
-          SmallVector<OpFoldResult> writeStrides;
-          for (int64_t d = 0; d < tileRank; ++d) {
-            if (d == 0) {
-              // Leading dimension: offset = old * dim0_size.
-              Value dim0Size;
-              if (tileType.isDynamicDim(0)) {
-                Value c0Idx =
-                    arith::ConstantIndexOp::create(thenBuilder, thenLoc, 0);
-                dim0Size = tensor::DimOp::create(
-                    thenBuilder, thenLoc, partial, c0Idx);
-              } else {
-                dim0Size = arith::ConstantIndexOp::create(
-                    thenBuilder, thenLoc, tileType.getDimSize(0));
-              }
-              Value localOffset = arith::MulIOp::create(
-                  thenBuilder, thenLoc, old, dim0Size,
-                  arith::IntegerOverflowFlags::nsw);
-              Value slotOffset = arith::AddIOp::create(
-                  thenBuilder, thenLoc, scratchBaseRow, localOffset,
-                  arith::IntegerOverflowFlags::nsw);
-              writeOffsets.push_back(slotOffset);
-            } else {
-              writeOffsets.push_back(
-                  arith::ConstantIndexOp::create(thenBuilder, thenLoc, 0)
-                      .getResult());
-            }
-            if (tileType.isDynamicDim(d)) {
-              // Use tensor.dim for dynamic dimensions.
-              writeSizes.push_back(
-                  tensor::DimOp::create(
-                      thenBuilder, thenLoc, partial,
-                      arith::ConstantIndexOp::create(thenBuilder, thenLoc, d).getResult())
-                      .getResult());
-            } else {
-              writeSizes.push_back(
-                  thenBuilder.getI64IntegerAttr(tileType.getDimSize(d)));
-            }
-            writeStrides.push_back(thenBuilder.getI64IntegerAttr(1));
-          }
-
-          // Write partial tile to scratch at computed slot.
-          WriteSliceOp::create(
-              thenBuilder, thenLoc, partial, scratch, writeOffsets, writeSizes,
-              writeStrides);
-
-          // Release fence: make our scratch write visible to other
-          // workgroups.
-          FenceOp::create(thenBuilder, thenLoc,
-                          /*is_release=*/true,
-                          ValueRange{scratch});
-
-          // Last contributor: accumulate and writeback.
-          scf::IfOp::create(thenBuilder,
-              thenLoc, isLast,
-              [&](OpBuilder &lastBuilder, Location lastLoc) {
-                // Acquire fence: see all other workgroups' scratch
-                // writes.
-                FenceOp::create(lastBuilder, lastLoc,
-                                /*is_release=*/false,
+    // ============================================================
+    // Zone B+C and non-split writeback.
+    //
+    // Split path (then): thread_id==0 performs release fence, atomic
+    //   increment, isLast check, and recombine+writeback.
+    // Non-split path (else): direct writeback runs distributed (no
+    //   thread guard) so it can be fused into the producer via 696
+    //   control flow fusion.
+    // ============================================================
+    scf::IfOp::create(rewriter, loc, isSplit,
+        /*thenBuilder=*/[&](OpBuilder &splitBuilder, Location splitLoc) {
+          // Thread-0 guard: atomic and recombine are single-invocation.
+          Value tid = gpu::ThreadIdOp::create(splitBuilder, splitLoc,
+                                              gpu::Dimension::x);
+          Value isThread0 = arith::CmpIOp::create(
+              splitBuilder, splitLoc, arith::CmpIPredicate::eq, tid, c0);
+          scf::IfOp::create(splitBuilder, splitLoc, isThread0,
+              [&](OpBuilder &t0Builder, Location t0Loc) {
+                // Release fence: make this workgroup's scratch write
+                // visible to other workgroups before the atomic signals
+                // completion.
+                FenceOp::create(t0Builder, t0Loc, /*is_release=*/true,
                                 ValueRange{scratch});
 
-                // Accumulate scratch slots.
-                // Start with slot 0.
-                SmallVector<OpFoldResult> readOffsets;
-                SmallVector<OpFoldResult> readSizes;
-                SmallVector<OpFoldResult> readStrides;
-                for (int64_t d = 0; d < tileRank; ++d) {
-                  if (d == 0) {
-                    // Slot 0 within this output tile's scratch partition.
-                    readOffsets.push_back(scratchBaseRow);
-                  } else {
-                  readOffsets.push_back(
-                      arith::ConstantIndexOp::create(lastBuilder, lastLoc, 0)
-                          .getResult());
-                  }
-                  if (tileType.isDynamicDim(d)) {
-                    readSizes.push_back(
-                        tensor::DimOp::create(
-                            lastBuilder, lastLoc, partial,
-                            arith::ConstantIndexOp::create(
-                                lastBuilder, lastLoc, d)
-                                .getResult())
-                            .getResult());
-                  } else {
-                    readSizes.push_back(
-                        lastBuilder.getI64IntegerAttr(tileType.getDimSize(d)));
-                  }
-                  readStrides.push_back(
-                      lastBuilder.getI64IntegerAttr(1));
+                // Zone B: Atomic increment counter.
+                int64_t counterRank = counterSrefType.getRank();
+                SmallVector<int64_t> counterMemRefShape(
+                    counterSrefType.getShape());
+                auto stridedLayout = StridedLayoutAttr::get(
+                    rewriter.getContext(), ShapedType::kDynamic,
+                    SmallVector<int64_t>(counterRank, ShapedType::kDynamic));
+                MemRefType counterMemRefType = MemRefType::get(
+                    counterMemRefShape, counterElemType, stridedLayout);
+                SmallVector<OpFoldResult> counterSizes;
+                for (int64_t dim : counterMemRefShape) {
+                  counterSizes.push_back(rewriter.getIndexAttr(dim));
                 }
+                Value counterMemRef = GetMemrefOp::create(
+                    t0Builder, t0Loc, counterMemRefType, counter,
+                    /*offsets=*/SmallVector<OpFoldResult>(
+                        counterRank, rewriter.getIndexAttr(0)),
+                    /*sizes=*/counterSizes,
+                    /*strides=*/SmallVector<OpFoldResult>(
+                        counterRank, rewriter.getIndexAttr(1)));
 
-                Value acc = ReadSliceOp::create(
-                    lastBuilder, lastLoc, tileType, scratch, readOffsets,
-                    readSizes, readStrides);
+                // For rank-0 counters (single output tile), no subscript
+                // indices are needed. For rank-1+ counters, index by
+                // counter_index (the output tile index).
+                SmallVector<Value> atomicIndices;
+                if (counterRank > 0)
+                  atomicIndices.push_back(counterIndex);
+                Value oldInt = memref::AtomicRMWOp::create(
+                    t0Builder, t0Loc, counterElemType,
+                    arith::AtomicRMWKind::addi, c1Int, counterMemRef,
+                    atomicIndices);
+                Value old = arith::IndexCastOp::create(
+                    t0Builder, t0Loc, rewriter.getIndexType(), oldInt);
 
-                // Loop over remaining slots [1, numInGroup).
-                // Reads all contributor slots including our own (slot
-                // `old`), which was written by the WriteSliceOp above.
-                // This avoids directly referencing `partial` in the
-                // reduction, which would create a data dependency on the
-                // matmul result that tile-and-fuse would propagate WMMA
-                // layout through, causing bufferization failures.
-                Value accResult =
-                    scf::ForOp::create(lastBuilder,
-                            lastLoc, c1, numInGroup, c1,
-                            ValueRange{acc},
-                            [&](OpBuilder &loopBuilder, Location loopLoc,
-                                Value iv, ValueRange iterArgs) {
-                              // Compute slot offset.
-                              Value dim0Size;
-                              if (tileType.isDynamicDim(0)) {
-                                Value c0Idx =
-                                    arith::ConstantIndexOp::create(
-                                        loopBuilder, loopLoc, 0);
-                                dim0Size =
-                                    tensor::DimOp::create(
-                                        loopBuilder, loopLoc, partial, c0Idx);
-                              } else {
-                                dim0Size =
-                                    arith::ConstantIndexOp::create(
-                                        loopBuilder, loopLoc,
-                                        tileType.getDimSize(0));
-                              }
-                              Value localOff = arith::MulIOp::create(
-                                  loopBuilder, loopLoc, iv, dim0Size,
-                                  arith::IntegerOverflowFlags::nsw);
-                              Value slotOff = arith::AddIOp::create(
-                                  loopBuilder, loopLoc, scratchBaseRow,
-                                  localOff,
-                                  arith::IntegerOverflowFlags::nsw);
+                // isLast: this workgroup is the last contributor.
+                Value numMinus1 = arith::SubIOp::create(
+                    t0Builder, t0Loc, numInGroup, c1,
+                    arith::IntegerOverflowFlags::nsw);
+                Value isLast = arith::CmpIOp::create(
+                    t0Builder, t0Loc, arith::CmpIPredicate::eq, old,
+                    numMinus1);
 
-                              SmallVector<OpFoldResult> loopReadOffsets;
-                              SmallVector<OpFoldResult> loopReadSizes(
-                                  readSizes);
-                              SmallVector<OpFoldResult> loopReadStrides(
-                                  readStrides);
-                              for (int64_t d = 0; d < tileRank; ++d) {
-                                if (d == 0) {
-                                  loopReadOffsets.push_back(slotOff);
-                                } else {
-                                  loopReadOffsets.push_back(
-                                      arith::ConstantIndexOp::create(
-                                          loopBuilder, loopLoc, 0)
-                                          .getResult());
-                                }
-                              }
+                // Zone C: Recombine + writeback (last contributor only).
+                scf::IfOp::create(t0Builder, t0Loc, isLast,
+                    [&](OpBuilder &lastBuilder, Location lastLoc) {
+                      // Acquire fence: see all other workgroups'
+                      // scratch writes.
+                      FenceOp::create(lastBuilder, lastLoc,
+                                      /*is_release=*/false,
+                                      ValueRange{scratch});
 
-                              Value slotTile =
-                                  ReadSliceOp::create(
-                                      loopBuilder, loopLoc, tileType, scratch,
-                                      loopReadOffsets, loopReadSizes,
-                                      loopReadStrides);
+                      // Read slot 0 as initial accumulator.
+                      SmallVector<OpFoldResult> readOffsets, readSizes,
+                          readStrides;
+                      buildScratchSlotAddressing(
+                          lastBuilder, lastLoc, tileType, scratchBaseRow,
+                          c0, partial, readOffsets, readSizes, readStrides);
+                      Value acc = ReadSliceOp::create(
+                          lastBuilder, lastLoc, tileType, scratch,
+                          readOffsets, readSizes, readStrides);
 
-                              // Combine current accumulator with this
-                              // slot.
-                              Value combined = createPointwiseCombine(
-                                  loopBuilder, loopLoc,
-                                  op.getCombiner(), iterArgs[0],
-                                  slotTile);
+                      // Combine remaining slots [1, numInGroup).
+                      Value accResult =
+                          scf::ForOp::create(lastBuilder, lastLoc,
+                                  c1, numInGroup, c1, ValueRange{acc},
+                                  [&](OpBuilder &loopBuilder,
+                                      Location loopLoc, Value iv,
+                                      ValueRange iterArgs) {
+                                    SmallVector<OpFoldResult> loopOffsets,
+                                        loopSizes, loopStrides;
+                                    buildScratchSlotAddressing(
+                                        loopBuilder, loopLoc, tileType,
+                                        scratchBaseRow, iv, partial,
+                                        loopOffsets, loopSizes,
+                                        loopStrides);
+                                    Value slotTile = ReadSliceOp::create(
+                                        loopBuilder, loopLoc, tileType,
+                                        scratch, loopOffsets, loopSizes,
+                                        loopStrides);
+                                    Value combined =
+                                        createPointwiseCombine(
+                                            loopBuilder, loopLoc,
+                                            op.getCombiner(), iterArgs[0],
+                                            slotTile);
+                                    scf::YieldOp::create(loopBuilder,
+                                                         loopLoc, combined);
+                                  })
+                              .getResult(0);
 
-                              scf::YieldOp::create(
-                                  loopBuilder, loopLoc, combined);
-                            })
-                        .getResult(0);
-
-                // Inline writeback with accumulated result.
-                // accResult already includes all contributions (slots
-                // 0 through numInGroup-1), so no separate add with
-                // `partial` is needed.
-                inlineWritebackRegion(lastBuilder, lastLoc,
-                                      op.getWriteback(), accResult);
-
-                scf::YieldOp::create(lastBuilder, lastLoc);
+                      // Inline writeback with accumulated result.
+                      inlineWritebackRegion(lastBuilder, lastLoc,
+                                            op.getWriteback(), accResult);
+                      scf::YieldOp::create(lastBuilder, lastLoc);
+                    });
+                scf::YieldOp::create(t0Builder, t0Loc);
               });
-
-          scf::YieldOp::create(thenBuilder, thenLoc);
+          scf::YieldOp::create(splitBuilder, splitLoc);
+        },
+        /*elseBuilder=*/[&](OpBuilder &nonSplitBuilder,
+                            Location nonSplitLoc) {
+          // Non-split path: direct writeback (distributed).
+          // This write_slice will be fused into the producer through
+          // the scf.if's else branch via 696 control flow fusion.
+          inlineWritebackRegion(nonSplitBuilder, nonSplitLoc,
+                                op.getWriteback(), partial);
+          scf::YieldOp::create(nonSplitBuilder, nonSplitLoc);
         });
 
-    // Step 5: Sole contributor writeback.
-    scf::IfOp::create(rewriter,
-        loc, isOnly,
-        [&](OpBuilder &soleBuilder, Location soleLoc) {
-          inlineWritebackRegion(soleBuilder, soleLoc, op.getWriteback(),
-                                partial);
-          scf::YieldOp::create(soleBuilder, soleLoc);
-        });
-
-    } // end of general case (else block)
-
-    // Move insertion point back to after the thread guard.
-    rewriter.setInsertionPointAfter(threadGuard);
-
-    // Barrier: synchronize all threads after the recombine, before the
-    // next outer loop iteration. Prevents race conditions on shared
-    // memory when other threads start the next matmul while thread 0
-    // is still reading the current result for the recombine.
-    gpu::BarrierOp::create(rewriter, loc);
+    // Final barrier: synchronize all threads before the next outer loop
+    // iteration. Prevents race conditions on shared memory.
+    gpu::BarrierOp::create(rewriter, loc, gpu::AddressSpace::Workgroup);
 
     rewriter.eraseOp(op);
     return success();

@@ -557,7 +557,8 @@ def StreamKRecombineOp : PCF_Op<"stream_k_recombine", [
     PCF_AnyShapedRef:$scratch,
     PCF_AnyShapedRef:$counter,
     Index:$counter_index,
-    Index:$num_in_group
+    Index:$num_in_group,
+    Index:$contributor_ordinal
   );
 
   let results = (outs);
@@ -572,7 +573,7 @@ def StreamKRecombineOp : PCF_Op<"stream_k_recombine", [
       "ArrayRef<OpFoldResult>":$offsets, "ArrayRef<OpFoldResult>":$sizes,
       "ArrayRef<OpFoldResult>":$strides,
       "Value":$scratch, "Value":$counter, "Value":$counter_index,
-      "Value":$num_in_group)>,
+      "Value":$num_in_group, "Value":$contributor_ordinal)>,
   ];
 
   let extraClassDeclaration = [{

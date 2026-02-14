@@ -810,7 +810,7 @@ void StreamKRecombineOp::build(OpBuilder &b, OperationState &result,
                                ArrayRef<OpFoldResult> sizes,
                                ArrayRef<OpFoldResult> strides, Value scratch,
                                Value counter, Value counterIndex,
-                               Value numInGroup) {
+                               Value numInGroup, Value contributorOrdinal) {
   SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
   SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
   dispatchIndexOpFoldResults(offsets, dynamicOffsets, staticOffsets);
@@ -826,6 +826,7 @@ void StreamKRecombineOp::build(OpBuilder &b, OperationState &result,
   result.addOperands(counter);
   result.addOperands(counterIndex);
   result.addOperands(numInGroup);
+  result.addOperands(contributorOrdinal);
 
   result.addAttribute("static_offsets",
                        b.getDenseI64ArrayAttr(staticOffsets));
@@ -837,7 +838,7 @@ void StreamKRecombineOp::build(OpBuilder &b, OperationState &result,
   props.setOperandSegmentSizes(
       {1, 1, static_cast<int32_t>(dynamicOffsets.size()),
        static_cast<int32_t>(dynamicSizes.size()),
-       static_cast<int32_t>(dynamicStrides.size()), 1, 1, 1, 1});
+       static_cast<int32_t>(dynamicStrides.size()), 1, 1, 1, 1, 1});
 
   // Create the combiner region with two scalar block arguments.
   auto tileType = cast<RankedTensorType>(partialTile.getType());
@@ -977,7 +978,7 @@ LogicalResult StreamKRecombineOp::verify() {
 ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
                                       OperationState &result) {
   OpAsmParser::UnresolvedOperand partialTile, dest, scratch, counter,
-      counterIndex, numInGroup;
+      counterIndex, numInGroup, contributorOrdinal;
 
   // Parse: %partial
   if (failed(parser.parseOperand(partialTile))) {
@@ -1018,6 +1019,14 @@ ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
   if (failed(parser.parseKeyword("group")) ||
       failed(parser.parseLParen()) ||
       failed(parser.parseOperand(numInGroup)) ||
+      failed(parser.parseRParen())) {
+    return failure();
+  }
+
+  // Parse: ordinal(%contributor_ordinal)
+  if (failed(parser.parseKeyword("ordinal")) ||
+      failed(parser.parseLParen()) ||
+      failed(parser.parseOperand(contributorOrdinal)) ||
       failed(parser.parseRParen())) {
     return failure();
   }
@@ -1068,7 +1077,9 @@ ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
       failed(parser.resolveOperand(scratch, scratchType, result.operands)) ||
       failed(parser.resolveOperand(counter, counterType, result.operands)) ||
       failed(parser.resolveOperand(counterIndex, indexType, result.operands)) ||
-      failed(parser.resolveOperand(numInGroup, indexType, result.operands))) {
+      failed(parser.resolveOperand(numInGroup, indexType, result.operands)) ||
+      failed(parser.resolveOperand(contributorOrdinal, indexType,
+                                   result.operands))) {
     return failure();
   }
 
@@ -1077,7 +1088,7 @@ ParseResult StreamKRecombineOp::parse(OpAsmParser &parser,
   props.setOperandSegmentSizes(
       {1, 1, static_cast<int32_t>(offsets.size()),
        static_cast<int32_t>(sizes.size()),
-       static_cast<int32_t>(strides.size()), 1, 1, 1, 1});
+       static_cast<int32_t>(strides.size()), 1, 1, 1, 1, 1});
 
   return success();
 }
@@ -1097,6 +1108,8 @@ void StreamKRecombineOp::print(OpAsmPrinter &p) {
     << "[" << getCounterIndex() << "]";
   p.printNewline();
   p << "    group(" << getNumInGroup() << ")";
+  p.printNewline();
+  p << "    ordinal(" << getContributorOrdinal() << ")";
   p.printNewline();
   p << "    combiner ";
   p.printRegion(getCombiner(), /*printEntryBlockArgs=*/true,

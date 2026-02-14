@@ -7,12 +7,14 @@ util.func private @combiner_wrong_num_args(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // expected-error@+1 {{combiner region must take exactly 2 arguments}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32):
           pcf.yield %lhs : f32
@@ -36,12 +38,14 @@ util.func private @combiner_wrong_arg_type(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // expected-error@+1 {{combiner argument type must match partial tile element type}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: i32, %rhs: i32):
           %sum = arith.addi %lhs, %rhs : i32
@@ -66,12 +70,14 @@ util.func private @combiner_wrong_result_type(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // expected-error@+1 {{combiner must yield a single value matching the element type}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %c1 = arith.constant 1 : i32
@@ -96,12 +102,14 @@ util.func private @writeback_wrong_arg_type(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // expected-error@+1 {{writeback argument type must match partial tile type}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -126,12 +134,14 @@ util.func private @output_sref_rank_mismatch(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off: index) {
   // expected-error@+1 {{output sref rank must be >= partial tile rank}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off] [64] [1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -156,12 +166,14 @@ util.func private @output_sref_eltype_mismatch(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // expected-error@+1 {{output sref element type must match partial tile element type}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -186,12 +198,14 @@ util.func private @scratch_sref_wrong_eltype(
     %scratch_ref: !pcf.sref<64x64xi32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // expected-error@+1 {{scratch sref element type must match partial tile element type}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -216,12 +230,14 @@ util.func private @offsets_count_mismatch(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index, %off_extra: index) {
   // expected-error@+1 {{expected number of offsets to match output sref rank}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n, %off_extra] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -239,19 +255,21 @@ util.func private @offsets_count_mismatch(
 
 // -----
 
-// Counter sref has wrong rank (non-scalar). Must be rank-0 for atomic RMW.
+// Counter sref has wrong rank (rank-2). Must be rank-0 or rank-1.
 util.func private @counter_wrong_rank(
     %partial: tensor<64x64xf32>,
     %out_ref: !pcf.sref<256x256xf32, #pcf.test_scope>,
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
-    %counter_ref: !pcf.sref<4xi32, #pcf.test_scope>,
+    %counter_ref: !pcf.sref<2x2xi32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
-  // expected-error@+1 {{counter sref must be scalar (rank-0) for atomic increment}}
+  // expected-error@+1 {{counter sref must be rank-0 or rank-1 for atomic increment}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -263,7 +281,7 @@ util.func private @counter_wrong_rank(
       }
       : tensor<64x64xf32> into !pcf.sref<256x256xf32, #pcf.test_scope>
       scratch_type !pcf.sref<64x64xf32, #pcf.test_scope>
-      counter_type !pcf.sref<4xi32, #pcf.test_scope>
+      counter_type !pcf.sref<2x2xi32, #pcf.test_scope>
   util.return
 }
 
@@ -276,12 +294,14 @@ util.func private @counter_wrong_eltype(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<f32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   // expected-error@+1 {{counter sref element type must be integer (i32 or i64)}}
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32

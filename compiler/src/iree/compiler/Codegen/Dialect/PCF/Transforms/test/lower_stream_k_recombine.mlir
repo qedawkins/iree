@@ -5,13 +5,16 @@
 // ============================================================================
 // Test 1: Basic lowering of stream_k_recombine for f32 matmul tile.
 //
-// Expected lowered structure:
-//   1. Atomic RMW increment on counter (via pcf.get_memref + memref.atomic_rmw).
-//   2. Check: is_only = (num_in_group == 1).
-//   3. Check: is_last = (old_count == num_in_group - 1).
-//   4. If not sole contributor: write partial to scratch slot, release fence.
-//      If last: acquire fence + accumulate all scratch slots + writeback.
-//   5. If sole contributor: direct writeback.
+// Expected lowered 3-zone structure:
+//   Zone A: scf.if isSplit { pcf.write_slice to scratch }
+//   Barrier (intra-workgroup sync)
+//   scf.if isSplit {
+//     Zone B: thread_id==0 { release fence + atomic + isLast check }
+//     Zone C: if isLast { acquire fence + combine loop + writeback }
+//   } else {
+//     Direct writeback (distributed, for fusion via 696)
+//   }
+//   Barrier (final sync)
 // ============================================================================
 
 func.func @basic_lowering(
@@ -20,11 +23,13 @@ func.func @basic_lowering(
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -42,38 +47,44 @@ func.func @basic_lowering(
   return
 }
 
-// Atomic increment on counter via get_memref.
+// isSplit condition.
 // CHECK-LABEL: func @basic_lowering
-//       CHECK:   pcf.get_memref %{{.+}}[] [] []
-//       CHECK:   %[[OLD:.+]] = memref.atomic_rmw addi
-//  CHECK-SAME:     : (i32, memref<i32
+//       CHECK:   %[[IS_SPLIT:.+]] = arith.cmpi ne, %{{.+}}, %c1
 //
-// Sole contributor check.
-//       CHECK:   %[[IS_ONLY:.+]] = arith.cmpi eq, %{{.+}}, %c1
-//
-// Last contributor check.
-//       CHECK:   arith.cmpi eq
-//
-// Not-sole branch: scratch write + release fence.
-//       CHECK:   scf.if
+// Zone A: Distributed scratch write (before barrier, before atomic).
+//       CHECK:   scf.if %[[IS_SPLIT]]
 //       CHECK:     pcf.write_slice %{{.+}} into %{{.+}}
-//       CHECK:     pcf.fence release
 //
-// Last-contributor branch: acquire fence + accumulation + writeback.
+// Intra-workgroup barrier.
+//       CHECK:   gpu.barrier
+//
+// Split/non-split branch.
+//       CHECK:   scf.if %[[IS_SPLIT]]
+//
+// Thread-0 guard for Zone B+C.
 //       CHECK:     scf.if
-//       CHECK:       pcf.fence acquire
-//       CHECK:       pcf.read_slice
-//       CHECK:       scf.for
-//       CHECK:         pcf.read_slice
-//       CHECK:         linalg.generic
-//       CHECK:           arith.addf
-//       CHECK:       linalg.generic
-//       CHECK:         arith.addf
-//       CHECK:       pcf.write_slice
 //
-// Sole contributor writeback.
-//       CHECK:   scf.if %[[IS_ONLY]]
+// Zone B: Release fence + atomic.
+//       CHECK:       pcf.fence release
+//       CHECK:       pcf.get_memref %{{.+}}[] [] []
+//       CHECK:       memref.atomic_rmw addi
+//
+// Zone C: Recombine + writeback (last contributor).
+//       CHECK:       scf.if
+//       CHECK:         pcf.fence acquire
+//       CHECK:         pcf.read_slice
+//       CHECK:         scf.for
+//       CHECK:           pcf.read_slice
+//       CHECK:           linalg.generic
+//       CHECK:             arith.addf
+//       CHECK:         pcf.write_slice
+//
+// Non-split else branch: direct writeback (distributed).
+//       CHECK:   } else {
 //       CHECK:     pcf.write_slice
+//
+// Final barrier.
+//       CHECK:   gpu.barrier
 
 // -----
 
@@ -81,7 +92,7 @@ func.func @basic_lowering(
 // Test 2: Sole contributor fast path (num_in_group == 1 statically).
 //
 // When num_in_group is statically 1, the entire scratch path should
-// be optimized away. Only the writeback remains.
+// be optimized away. Only the writeback remains. No barriers needed.
 // ============================================================================
 
 func.func @sole_contributor_static(
@@ -89,12 +100,14 @@ func.func @sole_contributor_static(
     %out_ref: !pcf.sref<256x256xf32, #pcf.test_scope>,
     %scratch_ref: !pcf.sref<64x64xf32, #pcf.test_scope>,
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   %c1 = arith.constant 1 : index
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%c1)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -116,6 +129,7 @@ func.func @sole_contributor_static(
 // CHECK-LABEL: func @sole_contributor_static
 // CHECK-NOT:     memref.atomic_rmw
 // CHECK-NOT:     pcf.fence
+// CHECK-NOT:     gpu.barrier
 // CHECK:         pcf.write_slice
 // CHECK-NOT:     memref.atomic_rmw
 
@@ -125,7 +139,8 @@ func.func @sole_contributor_static(
 // Test 3: Writeback with epilogue ops (bias add + relu).
 //
 // The writeback region should be inlined into both the last-contributor
-// and sole-contributor branches. Epilogue ops must appear in both.
+// (Zone C) and non-split (else branch) paths. Epilogue ops must appear
+// in both.
 // ============================================================================
 
 func.func @writeback_with_epilogue(
@@ -135,11 +150,13 @@ func.func @writeback_with_epilogue(
     %counter_ref: !pcf.sref<i32, #pcf.test_scope>,
     %num_in_group: index,
     %bias: tensor<64xf32>,
+    %counter_idx: index, %ordinal: index,
     %off_m: index, %off_n: index) {
   pcf.stream_k_recombine %partial
       into %out_ref[%off_m, %off_n] [64, 64] [1, 1]
-      scratch %scratch_ref counter %counter_ref
+      scratch %scratch_ref counter %counter_ref[%counter_idx]
       group(%num_in_group)
+      ordinal(%ordinal)
       combiner {
         ^bb0(%lhs: f32, %rhs: f32):
           %sum = arith.addf %lhs, %rhs : f32
@@ -170,23 +187,31 @@ func.func @writeback_with_epilogue(
   return
 }
 
-// Epilogue ops (linalg.generic for bias+relu) should appear in the
-// last-contributor branch.
+// Zone A: scratch write.
 // CHECK-LABEL: func @writeback_with_epilogue
-//       CHECK:   memref.atomic_rmw
 //       CHECK:   scf.if
 //       CHECK:     pcf.write_slice {{.*}} into %{{.+}}
-//       CHECK:     pcf.fence release
-//       CHECK:     scf.if
-//       CHECK:       pcf.fence acquire
-//       CHECK:       linalg.generic
-//       CHECK:         arith.addf
-//       CHECK:       linalg.generic
-//       CHECK:         arith.maximumf
-//       CHECK:       pcf.write_slice
 //
-// Sole contributor also gets the epilogue.
+// Barrier.
+//       CHECK:   gpu.barrier
+//
+// Zone B: atomic (inside thread-0 guard inside split branch).
 //       CHECK:   scf.if
+//       CHECK:     scf.if
+//       CHECK:       pcf.fence release
+//       CHECK:       memref.atomic_rmw
+//
+// Zone C: Recombine + writeback with epilogue (last contributor).
+//       CHECK:       scf.if
+//       CHECK:         pcf.fence acquire
+//       CHECK:         linalg.generic
+//       CHECK:           arith.addf
+//       CHECK:         linalg.generic
+//       CHECK:           arith.maximumf
+//       CHECK:         pcf.write_slice
+//
+// Non-split else branch also gets the epilogue.
+//       CHECK:   } else {
 //       CHECK:     linalg.generic
 //       CHECK:       arith.maximumf
 //       CHECK:     pcf.write_slice
