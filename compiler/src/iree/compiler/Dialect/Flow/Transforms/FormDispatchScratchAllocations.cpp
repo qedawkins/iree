@@ -7,6 +7,7 @@
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtDialect.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -40,9 +41,10 @@ bool containsMatmulLikeOp(Region &region) {
   return found;
 }
 
-/// Populates the scratch_size region of an export op with a placeholder
-/// computation. The region takes workload arguments and returns a constant
-/// scratch size.
+/// Populates the scratch_size region of an export op with a
+/// `dispatch.scratch_size_from_slice` placeholder. The region takes workload
+/// arguments and returns the result of the from_slice op, which will be
+/// resolved later during codegen by materializing the backwards program slice.
 void populateScratchSizeRegion(ExecutableExportOp exportOp,
                                unsigned numWorkloadArgs) {
   Region &scratchRegion = exportOp.getScratchSize();
@@ -57,12 +59,15 @@ void populateScratchSizeRegion(ExecutableExportOp exportOp,
     block->addArgument(IndexType::get(exportOp.getContext()), loc);
   }
 
-  // Populate with a placeholder constant. The actual scratch size computation
-  // will be refined later when the codegen strategy is known.
+  // Populate with scratch_size_from_slice placeholder. The actual scratch size
+  // computation will be materialized later by cloning the backwards program
+  // slice from the dispatch body (through workload ordinals).
   OpBuilder builder(exportOp.getContext());
   builder.setInsertionPointToStart(block);
   Value scratchSize =
-      arith::ConstantIndexOp::create(builder, loc, 4096).getResult();
+      IREE::TensorExt::DispatchScratchSizeFromSliceOp::create(
+          builder, loc, builder.getIndexType(), block->getArguments())
+          .getResult();
   Flow::ReturnOp::create(builder, loc, scratchSize);
 }
 
@@ -202,7 +207,44 @@ struct FormDispatchScratchAllocationsPass final
       Block &entryBlock = funcOp.getFunctionBody().front();
       auto scratchBindingType = IREE::TensorExt::DispatchTensorType::get(
           IREE::TensorExt::TensorAccess::ReadWrite, scratchTensorType);
-      entryBlock.insertArgument(numOriginalArgs, scratchBindingType, loc);
+      BlockArgument scratchArg =
+          entryBlock.insertArgument(numOriginalArgs, scratchBindingType, loc);
+
+      // Collect existing workload ordinal ops from the function body, sorted
+      // by ordinal index. These are created by
+      // MaterializeDefaultWorkgroupCountRegion in DispatchCreation (before the
+      // Flow pipeline), so they should already be present.
+      SmallVector<std::pair<int64_t, Value>> ordinalPairs;
+      Operation *lastOrdinal = nullptr;
+      for (auto &op : entryBlock) {
+        if (auto ordinalOp =
+                dyn_cast<IREE::TensorExt::DispatchWorkloadOrdinalOp>(op)) {
+          ordinalPairs.push_back(
+              {ordinalOp.getOrdinal().getSExtValue(), ordinalOp.getResult()});
+          lastOrdinal = &op;
+        }
+      }
+      llvm::sort(ordinalPairs, llvm::less_first());
+      SmallVector<Value> workloadOrdinals;
+      for (auto &[idx, val] : ordinalPairs) {
+        workloadOrdinals.push_back(val);
+      }
+
+      // Insert a dispatch.tensor.scratch op to anchor the scratch binding.
+      // This ties the scratch argument to the workload ordinals, providing
+      // the root for the backwards program slice that will later populate
+      // the scratch_size region. Must be inserted after ordinal ops to
+      // maintain SSA dominance.
+      OpBuilder funcBuilder(funcOp.getContext());
+      if (lastOrdinal) {
+        funcBuilder.setInsertionPointAfter(lastOrdinal);
+      } else {
+        funcBuilder.setInsertionPointToStart(&entryBlock);
+      }
+
+      IREE::TensorExt::DispatchTensorScratchOp::create(
+          funcBuilder, loc, scratchBindingType, scratchArg,
+          /*source_dims=*/ValueRange{}, workloadOrdinals);
 
       // Update the function type to include the new argument.
       SmallVector<Type> argTypes;

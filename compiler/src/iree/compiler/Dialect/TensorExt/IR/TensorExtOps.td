@@ -445,6 +445,74 @@ def IREETensorExt_DispatchWorkloadOrdinalOp :
 }
 
 //===---------------------------------------------------------------------===//
+// Scratch Parameterization Ops
+//===---------------------------------------------------------------------===//
+
+def IREETensorExt_DispatchScratchSizeFromSliceOp :
+    IREETensorExt_PureOp<"dispatch.scratch_size_from_slice"> {
+  let summary = [{
+    Placeholder for scratch size computed from backwards program slice.
+  }];
+  let description = [{
+    Analogous to `dispatch.workgroup_count_from_slice` but for the
+    `scratch_size` region on executable export ops. This op takes the workload
+    values as operands and returns a single index representing the required
+    scratch buffer size in bytes.
+
+    During codegen, the actual scratch size computation (derived from
+    `iree_codegen.alloc_scratch` ops) is resolved using a backwards program
+    slice through `iree_tensor_ext.dispatch.workload.ordinal` ops. This op is
+    then replaced with the materialized computation.
+  }];
+
+  let arguments = (ins Variadic<Index>:$operands);
+  let results = (outs Index:$result);
+
+  let assemblyFormat = [{
+    attr-dict `(` $operands `)`
+  }];
+}
+
+def IREETensorExt_DispatchTensorScratchOp :
+    IREETensorExt_Op<"dispatch.tensor.scratch", [
+      AttrSizedOperandSegments,
+    ]> {
+  let summary = [{Retains a scratch dispatch tensor binding with workload ordinals.}];
+  let description = [{
+    Anchors the scratch binding argument in the dispatch function body. This op
+    initially has no data-flow users. During scratch lowering,
+    `iree_codegen.alloc_scratch` ops are replaced with subviews of this result,
+    giving it users at that point.
+
+    The op serves two purposes:
+
+    1. Ties the readwrite scratch binding to the workload ordinals, providing a
+       defined root for the backwards program slice that computes scratch size.
+    2. Marks this binding as "scratch" so the lowering pass can identify it.
+
+    The workload arguments must be `dispatch.workload.ordinal` values, provided
+    in ordinal order. The dynamic size of the scratch tensor is determined
+    implicitly by the `scratch_size` region on the export — it is not tracked
+    by this op. This means `source_dims` is typically empty even though the
+    underlying tensor type has a dynamic dimension.
+  }];
+
+  let arguments = (ins
+    IREETensorExt_DispatchTensor:$source,
+    IREETensorExt_ShapeDynamicDims:$source_dims,
+    Variadic<Index>:$workload
+  );
+  let results = (outs IREETensorExt_DispatchTensor:$result);
+
+  let assemblyFormat = [{
+    $source (`(` $workload^ `)`)? `:` type($source) (`{` $source_dims^ `}`)?
+    `->` type($result) attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===---------------------------------------------------------------------===//
 // Barrier Ops
 //===---------------------------------------------------------------------===//
 

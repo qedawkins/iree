@@ -296,6 +296,20 @@ bool DispatchTensorLoadOp::isLoadOfWholeSource() {
 }
 
 //===----------------------------------------------------------------------===//
+// iree_tensor_ext.dispatch.tensor.scratch
+//===----------------------------------------------------------------------===//
+
+LogicalResult DispatchTensorScratchOp::verify() {
+  // The scratch tensor's dynamic dimension (its byte size) is determined
+  // implicitly by the scratch_size region on the export op. source_dims is
+  // intentionally empty — we do not validate dim counts here.
+  if (getSource().getType() != getResult().getType()) {
+    return emitOpError("result type must match source type");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // iree_tensor_ext.dispatch.tensor.store
 //===----------------------------------------------------------------------===//
 

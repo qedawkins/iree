@@ -2,10 +2,11 @@
 
 // Tests that a matmul-like dispatch gets a scratch_size region and scratch
 // buffer argument added. Verifies:
-// 1. scratch_size region is added to the export with placeholder computation
+// 1. scratch_size region contains dispatch.scratch_size_from_slice placeholder
 // 2. flow.executable.scratch_size op is created before the dispatch
 // 3. flow.tensor.empty creates the scratch tensor with dynamic size
 // 4. Scratch binding is inserted between input and output args in the function
+// 5. dispatch.tensor.scratch retain op anchors the scratch binding in func body
 
 flow.executable private @matmul_dispatch {
   flow.executable.export public @matmul_dispatch workgroups(%arg0: index, %arg1: index) -> (index, index, index) {
@@ -44,15 +45,18 @@ flow.executable private @matmul_dispatch {
 //       CHECK:   flow.executable.export public @matmul_dispatch
 //  CHECK-SAME:     workgroups
 //       CHECK:     scratch_size(%{{.+}}: index, %{{.+}}: index) -> index
-//       CHECK:       %[[C4096:.+]] = arith.constant 4096 : index
-//       CHECK:       flow.return %[[C4096]]
+//       CHECK:       iree_tensor_ext.dispatch.scratch_size_from_slice
+//       CHECK:       flow.return
 
 // Verify scratch binding inserted between inputs (readonly) and output (writeonly).
 //       CHECK:   func.func @matmul_dispatch(
 //  CHECK-SAME:     %{{.+}}: !iree_tensor_ext.dispatch.tensor<readonly:tensor<64x128xf32>>,
 //  CHECK-SAME:     %{{.+}}: !iree_tensor_ext.dispatch.tensor<readonly:tensor<128x256xf32>>,
-//  CHECK-SAME:     %{{.+}}: !iree_tensor_ext.dispatch.tensor<readwrite:tensor<?xi8>>,
+//  CHECK-SAME:     %[[SCRATCH_ARG:.+]]: !iree_tensor_ext.dispatch.tensor<readwrite:tensor<?xi8>>,
 //  CHECK-SAME:     %{{.+}}: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<64x256xf32>>)
+
+// Verify dispatch.tensor.scratch retain op anchors the scratch binding.
+//       CHECK:     iree_tensor_ext.dispatch.tensor.scratch %[[SCRATCH_ARG]]
 
 // CHECK-LABEL: util.func public @main
 util.func public @main(
@@ -68,6 +72,85 @@ util.func public @main(
   %0 = flow.dispatch @matmul_dispatch::@matmul_dispatch[%c1, %c2](%arg0, %arg1) :
       (tensor<64x128xf32>, tensor<128x256xf32>) -> tensor<64x256xf32>
   util.return %0 : tensor<64x256xf32>
+}
+
+// -----
+
+// Tests that a dynamic-shape matmul dispatch collects workload ordinals and
+// threads them through to the dispatch.tensor.scratch op.
+
+flow.executable private @matmul_dynamic {
+  flow.executable.export public @matmul_dynamic workgroups(%arg0: index, %arg1: index, %arg2: index) -> (index, index, index) {
+    %c1 = arith.constant 1 : index
+    flow.return %c1, %c1, %c1 : index, index, index
+  }
+  builtin.module {
+    func.func @matmul_dynamic(
+        %arg0: !iree_tensor_ext.dispatch.tensor<readonly:tensor<?x128xf32>>,
+        %arg1: !iree_tensor_ext.dispatch.tensor<readonly:tensor<128x?xf32>>,
+        %m: index, %n: index, %extra: index,
+        %arg2: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x?xf32>>) {
+      %ord0 = iree_tensor_ext.dispatch.workload.ordinal %m, 0 : index
+      %ord1 = iree_tensor_ext.dispatch.workload.ordinal %n, 1 : index
+      %ord2 = iree_tensor_ext.dispatch.workload.ordinal %extra, 2 : index
+      %cst = arith.constant 0.0 : f32
+      %lhs = flow.dispatch.tie_shape %arg0 : !iree_tensor_ext.dispatch.tensor<readonly:tensor<?x128xf32>>{%ord0}
+      %rhs = flow.dispatch.tie_shape %arg1 : !iree_tensor_ext.dispatch.tensor<readonly:tensor<128x?xf32>>{%ord1}
+      %out = flow.dispatch.tie_shape %arg2 : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x?xf32>>{%ord0, %ord1}
+      %0 = iree_tensor_ext.dispatch.tensor.load %lhs,
+          offsets = [0, 0], sizes = [%ord0, 128], strides = [1, 1]
+          : !iree_tensor_ext.dispatch.tensor<readonly:tensor<?x128xf32>>{%ord0}
+          -> tensor<?x128xf32>
+      %1 = iree_tensor_ext.dispatch.tensor.load %rhs,
+          offsets = [0, 0], sizes = [128, %ord1], strides = [1, 1]
+          : !iree_tensor_ext.dispatch.tensor<readonly:tensor<128x?xf32>>{%ord1}
+          -> tensor<128x?xf32>
+      %2 = tensor.empty(%ord0, %ord1) : tensor<?x?xf32>
+      %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<?x?xf32>) -> tensor<?x?xf32>
+      %4 = linalg.matmul ins(%0, %1 : tensor<?x128xf32>, tensor<128x?xf32>)
+          outs(%3 : tensor<?x?xf32>) -> tensor<?x?xf32>
+      iree_tensor_ext.dispatch.tensor.store %4, %out,
+          offsets = [0, 0], sizes = [%ord0, %ord1], strides = [1, 1]
+          : tensor<?x?xf32>
+          -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x?xf32>>{%ord0, %ord1}
+      return
+    }
+  }
+}
+
+// CHECK-LABEL: flow.executable private @matmul_dynamic
+
+//       CHECK:   flow.executable.export public @matmul_dynamic
+//  CHECK-SAME:     workgroups
+//       CHECK:     scratch_size(%{{.+}}: index, %{{.+}}: index, %{{.+}}: index) -> index
+//       CHECK:       iree_tensor_ext.dispatch.scratch_size_from_slice
+//       CHECK:       flow.return
+
+// Verify scratch binding inserted (readwrite tensor<?xi8>) in the function.
+//       CHECK:   func.func @matmul_dynamic(
+//       CHECK:     %[[SCRATCH_DYN:[a-zA-Z0-9]+]]: !iree_tensor_ext.dispatch.tensor<readwrite:tensor<?xi8>>,
+//  CHECK-SAME:     %{{.+}}: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x?xf32>>)
+
+// Verify ordinals are collected and passed to the scratch op.
+//       CHECK:     %[[ORD0:[a-zA-Z0-9]+]] = iree_tensor_ext.dispatch.workload.ordinal %{{.+}}, 0
+//       CHECK:     %[[ORD1:[a-zA-Z0-9]+]] = iree_tensor_ext.dispatch.workload.ordinal %{{.+}}, 1
+//       CHECK:     %[[ORD2:[a-zA-Z0-9]+]] = iree_tensor_ext.dispatch.workload.ordinal %{{.+}}, 2
+//       CHECK:     iree_tensor_ext.dispatch.tensor.scratch %[[SCRATCH_DYN]](%[[ORD0]], %[[ORD1]], %[[ORD2]])
+
+// CHECK-LABEL: util.func public @dynamic_main
+util.func public @dynamic_main(
+    %arg0: tensor<?x128xf32>,
+    %arg1: tensor<128x?xf32>,
+    %m: index, %n: index, %extra: index) -> tensor<?x?xf32>
+{
+  %c1 = arith.constant 1 : index
+  // CHECK: %[[DSIZE:.+]] = flow.executable.scratch_size @matmul_dynamic::@matmul_dynamic
+  // CHECK: %[[DSCRATCH:.+]] = flow.tensor.empty : tensor<?xi8>{%[[DSIZE]]}
+  // CHECK: flow.dispatch @matmul_dynamic::@matmul_dynamic
+  // CHECK-SAME: %[[DSCRATCH]]
+  %0 = flow.dispatch @matmul_dynamic::@matmul_dynamic[%m, %n, %extra](%arg0, %arg1, %m, %n, %extra) :
+      (tensor<?x128xf32>{%m}, tensor<128x?xf32>{%n}, index, index, index) -> tensor<?x?xf32>{%m, %n}
+  util.return %0 : tensor<?x?xf32>
 }
 
 // -----
