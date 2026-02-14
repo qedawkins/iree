@@ -83,9 +83,16 @@ def FuseConsumersPass : Pass<"iree-pcf-fuse-consumers", ""> {
 
     The underlying fusion patterns are exposed via `matchTilableConsumer()` and
     `fuseTilableConsumer()` for use in custom pipelines.
+
+    Additionally decomposes `pcf.stream_k_recombine` into distributed control
+    flow with scratch writes, barriers, atomics, and recombination.
   }];
   let dependentDialects = ["::mlir::arith::ArithDialect",
                            "::mlir::affine::AffineDialect",
+                           "::mlir::gpu::GPUDialect",
+                           "::mlir::linalg::LinalgDialect",
+                           "::mlir::memref::MemRefDialect",
+                           "::mlir::scf::SCFDialect",
                            "::mlir::iree_compiler::IREE::PCF::PCFDialect"];
 }
 

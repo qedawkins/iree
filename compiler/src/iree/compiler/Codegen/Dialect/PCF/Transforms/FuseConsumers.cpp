@@ -12,6 +12,9 @@
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -184,6 +187,107 @@ struct FuseExtractSliceIntoGenericOp
   }
 };
 
+/// Clones the body of the writeback region into the current insertion point.
+/// The writeback region takes a single block argument (the final tile) and
+/// ends with pcf.yield. This helper clones everything except the terminator,
+/// replacing the block argument with |tileValue|.
+static void cloneWritebackBody(OpBuilder &b, Location loc,
+                               Region &writebackRegion, Value tileValue) {
+  Block &srcBlock = writebackRegion.front();
+  IRMapping mapping;
+  mapping.map(srcBlock.getArgument(0), tileValue);
+  for (Operation &op : srcBlock.without_terminator()) {
+    b.clone(op, mapping);
+  }
+}
+
+/// Decomposes `pcf.stream_k_recombine` into distributed control flow:
+///
+/// 1. Conditional scratch write (if tile is split among workgroups).
+/// 2. Workgroup barrier for scratch visibility.
+/// 3. Conditional atomic counter + recombine (only for split tiles):
+///    a. Thread-0 predication for atomic.
+///    b. Release fence, atomic increment, last-contributor check.
+///    c. Acquire fence, read partial tiles, accumulate via combiner.
+///    d. First copy of writeback.
+/// 4. Else branch: second copy of writeback (non-split path).
+/// 5. Final workgroup barrier.
+/// Builds the accumulation loop for stream-k recombination.
+/// Uses a plain OpBuilder to avoid greedy driver listener issues when
+/// building ops inside newly-created regions.
+static Value buildAccumulationLoop(
+    OpBuilder &b, Location loc, Value c1, Value numInGroup, Value scratch,
+    Value accInit, RankedTensorType partialTileType, int64_t rank,
+    ArrayRef<int64_t> tileShape, ArrayRef<OpFoldResult> readSizes,
+    ArrayRef<OpFoldResult> readStrides, Region &combinerRegion) {
+  Value tileHeight = arith::ConstantIndexOp::create(b, loc, tileShape[0]);
+
+  // Create the for op without a body builder to avoid listener issues.
+  auto accLoop = scf::ForOp::create(
+      b, loc, /*lowerBound=*/c1,
+      /*upperBound=*/numInGroup,
+      /*step=*/c1,
+      /*iterArgs=*/ValueRange{accInit});
+
+  // Manually build the loop body.
+  {
+    OpBuilder::InsertionGuard g(b);
+    b.setInsertionPointToStart(accLoop.getBody());
+    Value loopIdx = accLoop.getInductionVar();
+    Value loopAcc = accLoop.getRegionIterArg(0);
+
+    // Compute scratch offset for contributor i.
+    Value offset = arith::MulIOp::create(b, loc, loopIdx, tileHeight);
+
+    SmallVector<OpFoldResult> loopReadOffsets(rank, b.getIndexAttr(0));
+    loopReadOffsets[0] = offset;
+
+    Value partialRead = PCF::ReadSliceOp::create(
+        b, loc, partialTileType, scratch, loopReadOffsets, readSizes,
+        readStrides);
+
+    // Build affine maps for the element-wise combiner.
+    SmallVector<AffineMap> indexingMaps;
+    AffineMap identityMap = b.getMultiDimIdentityMap(rank);
+    indexingMaps.push_back(identityMap); // ins: partial.
+    indexingMaps.push_back(identityMap); // outs: accumulator.
+
+    SmallVector<utils::IteratorType> iteratorTypes(
+        rank, utils::IteratorType::parallel);
+
+    // Apply combiner via linalg.generic.  Pass a body builder so that the
+    // region is created with the correct block arguments.  Without a body
+    // builder, GenericOp::create leaves the region empty, and accessing
+    // getRegion().front() is undefined behaviour (the root cause of the
+    // SEGV-during-print crash).
+    Block &combinerBlock = combinerRegion.front();
+    auto genericOp = linalg::GenericOp::create(
+        b, loc, /*resultTypes=*/partialTileType,
+        /*inputs=*/ValueRange{partialRead},
+        /*outputs=*/ValueRange{loopAcc}, indexingMaps, iteratorTypes,
+        [&](OpBuilder &bodyBuilder, Location bodyLoc,
+            ValueRange blockArgs) {
+          // blockArgs = {in_arg (partial), out_arg (accumulator)}.
+          IRMapping combinerMapping;
+          combinerMapping.map(combinerBlock.getArgument(0), blockArgs[0]);
+          combinerMapping.map(combinerBlock.getArgument(1), blockArgs[1]);
+          for (Operation &op : combinerBlock.without_terminator()) {
+            bodyBuilder.clone(op, combinerMapping);
+          }
+          auto combinerYield =
+              cast<PCF::YieldOp>(combinerBlock.getTerminator());
+          Value yieldVal =
+              combinerMapping.lookupOrDefault(combinerYield.getOperand(0));
+          linalg::YieldOp::create(bodyBuilder, bodyLoc, yieldVal);
+        });
+
+    Value combined = genericOp.getResult(0);
+    scf::YieldOp::create(b, loc, ValueRange{combined});
+  }
+
+  return accLoop.getResult(0);
+}
+
 WalkResult verifyOperationLegality(Operation *op) {
   if (isa<UnrealizedConversionCastOp>(op)) {
     return WalkResult::interrupt();
@@ -191,7 +295,185 @@ WalkResult verifyOperationLegality(Operation *op) {
   return WalkResult::advance();
 }
 
+/// Decomposes all `pcf.stream_k_recombine` ops in |op| into distributed
+/// control flow. Runs as a pre-pass before greedy fusion to avoid listener
+/// issues with the PatternRewriter creating ops inside newly-built regions.
+static LogicalResult decomposeStreamKRecombineOps(Operation *rootOp) {
+  SmallVector<StreamKRecombineOp> recombineOps;
+  rootOp->walk([&](StreamKRecombineOp op) { recombineOps.push_back(op); });
+
+  for (StreamKRecombineOp recombineOp : recombineOps) {
+    Location loc = recombineOp.getLoc();
+    Value partialTile = recombineOp.getPartialTile();
+    Value scratch = recombineOp.getScratch();
+    Value counter = recombineOp.getCounter();
+    Value counterIndex = recombineOp.getCounterIndex();
+    Value numInGroup = recombineOp.getNumInGroup();
+    Value contributorOrdinal = recombineOp.getContributorOrdinal();
+
+    RankedTensorType partialTileType =
+        cast<RankedTensorType>(partialTile.getType());
+    int64_t rank = partialTileType.getRank();
+    ArrayRef<int64_t> tileShape = partialTileType.getShape();
+
+    PCF::ShapedRefType counterType = recombineOp.getCounterType();
+
+    OpBuilder b(recombineOp);
+
+    // Constants.
+    Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
+    Value c1 = arith::ConstantIndexOp::create(b, loc, 1);
+
+    // Step 1: Compute split condition.
+    Value isSplit = arith::CmpIOp::create(
+        b, loc, arith::CmpIPredicate::ne, numInGroup, c1);
+
+    // Step 2: Conditional scratch write / else writeback.
+    auto outerIf = scf::IfOp::create(b, loc, /*resultTypes=*/TypeRange{},
+                                     isSplit, /*withElseRegion=*/true);
+
+    // Then branch: split path -- write partial tile to scratch.
+    {
+      b.setInsertionPointToStart(&outerIf.getThenRegion().front());
+
+      Value tileHeight =
+          arith::ConstantIndexOp::create(b, loc, tileShape[0]);
+      Value scratchOffset =
+          arith::MulIOp::create(b, loc, contributorOrdinal, tileHeight);
+
+      SmallVector<OpFoldResult> scratchOffsets(rank, b.getIndexAttr(0));
+      scratchOffsets[0] = scratchOffset;
+      SmallVector<OpFoldResult> scratchSizes;
+      for (int64_t i = 0; i < rank; ++i) {
+        scratchSizes.push_back(b.getIndexAttr(tileShape[i]));
+      }
+      SmallVector<OpFoldResult> scratchStrides(rank, b.getIndexAttr(1));
+
+      PCF::WriteSliceOp::create(b, loc, partialTile, scratch, scratchOffsets,
+                                scratchSizes, scratchStrides);
+    }
+
+    // Else branch: non-split path (sole contributor, write directly).
+    {
+      b.setInsertionPointToStart(&outerIf.getElseRegion().front());
+      cloneWritebackBody(b, loc, recombineOp.getWriteback(), partialTile);
+    }
+
+    // Step 3: Workgroup barrier after scratch writes.
+    b.setInsertionPointAfter(outerIf);
+    gpu::BarrierOp::create(b, loc, gpu::AddressSpace::Workgroup);
+
+    // Step 4: Conditional atomic + recombine (only for split tiles).
+    auto recombineIf = scf::IfOp::create(
+        b, loc, /*resultTypes=*/TypeRange{}, isSplit,
+        /*withElseRegion=*/false);
+
+    {
+      b.setInsertionPointToStart(&recombineIf.getThenRegion().front());
+
+      IndexType indexType = b.getIndexType();
+      Value threadId =
+          gpu::ThreadIdOp::create(b, loc, indexType, gpu::Dimension::x);
+      Value isThread0 = arith::CmpIOp::create(
+          b, loc, arith::CmpIPredicate::eq, threadId, c0);
+
+      auto thread0If = scf::IfOp::create(
+          b, loc, /*resultTypes=*/TypeRange{}, isThread0,
+          /*withElseRegion=*/false);
+
+      {
+        b.setInsertionPointToStart(&thread0If.getThenRegion().front());
+
+        // Release fence before atomic.
+        PCF::FenceOp::create(b, loc, /*is_release=*/true,
+                             ValueRange{scratch});
+
+        // Get memref view of counter for atomic operation.
+        int64_t counterSize = counterType.getShape()[0];
+        auto counterMemrefType = MemRefType::get(
+            {counterSize}, b.getI32Type(),
+            StridedLayoutAttr::get(b.getContext(), ShapedType::kDynamic,
+                                   {ShapedType::kDynamic}));
+
+        SmallVector<OpFoldResult> counterOffsets = {b.getIndexAttr(0)};
+        SmallVector<OpFoldResult> counterSizes = {
+            b.getIndexAttr(counterSize)};
+        SmallVector<OpFoldResult> counterStrides = {b.getIndexAttr(1)};
+
+        Value counterMemref = PCF::GetMemrefOp::create(
+            b, loc, counterMemrefType, counter, counterOffsets, counterSizes,
+            counterStrides);
+
+        // Atomic increment.
+        Value c1I32 =
+            arith::ConstantOp::create(b, loc, b.getI32IntegerAttr(1));
+        Value oldVal = memref::AtomicRMWOp::create(
+            b, loc, arith::AtomicRMWKind::addi, c1I32, counterMemref,
+            ValueRange{counterIndex});
+
+        // Check if we are the last contributor.
+        Value oldIdx =
+            arith::IndexCastOp::create(b, loc, indexType, oldVal);
+        Value expectedLast = arith::SubIOp::create(b, loc, numInGroup, c1);
+        Value isLast = arith::CmpIOp::create(
+            b, loc, arith::CmpIPredicate::eq, oldIdx, expectedLast);
+
+        // If last contributor: recombine and write back.
+        auto lastContribIf = scf::IfOp::create(
+            b, loc, /*resultTypes=*/TypeRange{}, isLast,
+            /*withElseRegion=*/false);
+
+        {
+          b.setInsertionPointToStart(
+              &lastContribIf.getThenRegion().front());
+
+          // Acquire fence.
+          PCF::FenceOp::create(b, loc, /*is_release=*/false,
+                               ValueRange{scratch});
+
+          // Read the first partial tile from scratch (ordinal 0).
+          SmallVector<OpFoldResult> readOffsets(rank, b.getIndexAttr(0));
+          SmallVector<OpFoldResult> readSizes;
+          for (int64_t i = 0; i < rank; ++i) {
+            readSizes.push_back(b.getIndexAttr(tileShape[i]));
+          }
+          SmallVector<OpFoldResult> readStrides(rank, b.getIndexAttr(1));
+
+          Value accInit = PCF::ReadSliceOp::create(
+              b, loc, partialTileType, scratch, readOffsets, readSizes,
+              readStrides);
+
+          // Build the accumulation loop.
+          Value accumulated = buildAccumulationLoop(
+              b, loc, c1, numInGroup, scratch, accInit, partialTileType,
+              rank, tileShape, readSizes, readStrides,
+              recombineOp.getCombiner());
+
+          // Clone writeback body with accumulated result (first copy).
+          cloneWritebackBody(b, loc, recombineOp.getWriteback(),
+                             accumulated);
+        }
+      }
+    }
+
+    // Step 5: Final workgroup barrier.
+    b.setInsertionPointAfter(recombineIf);
+    gpu::BarrierOp::create(b, loc, gpu::AddressSpace::Workgroup);
+
+    // Erase the original op.
+    recombineOp->erase();
+  }
+
+  return success();
+}
+
 void FuseConsumersPass::runOnOperation() {
+  // Decompose stream_k_recombine ops first, before greedy fusion.
+  // This runs as a simple walk to avoid PatternRewriter listener issues.
+  if (failed(decomposeStreamKRecombineOps(getOperation()))) {
+    return signalPassFailure();
+  }
+
   RewritePatternSet patterns(&getContext());
   patterns.add<FuseIntoGenericOp, FuseIntoLoopOp>(&getContext());
   patterns.add<FuseExtractSliceIntoLoopOp, FuseExtractSliceIntoGenericOp>(
