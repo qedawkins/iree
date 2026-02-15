@@ -234,11 +234,13 @@ static void cloneWritebackBody(OpBuilder &b, Location loc,
 ///
 /// 1. Conditional scratch write (if tile is split among workgroups).
 /// 2. Workgroup barrier for scratch visibility.
-/// 3. Conditional atomic counter + recombine (only for split tiles):
-///    a. Thread-0 predication for atomic.
-///    b. Release fence, atomic increment, last-contributor check.
-///    c. Acquire fence, read partial tiles, accumulate via combiner.
-///    d. First copy of writeback.
+/// 3. Conditional control flow (only for split tiles):
+///    a. Thread-0 only: release fence, atomic increment, store result to
+///       broadcast dword (workgroup shared memory).
+///    b. Workgroup barrier for broadcast dword visibility.
+///    c. ALL threads: load broadcast dword, check last-contributor.
+///    d. ALL threads (if last): acquire fence, read partial tiles,
+///       accumulate via combiner, first copy of writeback.
 /// 4. Else branch: second copy of writeback (non-split path).
 /// 5. Final workgroup barrier.
 /// Builds the accumulation loop for stream-k recombination.
@@ -320,6 +322,31 @@ static Value buildAccumulationLoop(
   return accLoop.getResult(0);
 }
 
+/// Recursively hoist |op| (and its transitive operand-defining ops) before
+/// |before| if they do not already dominate it.  Block arguments always
+/// dominate everything in the block, so they are safe leaves.  Returns
+/// failure if any leaf operation cannot be hoisted (e.g. it has side effects
+/// that prevent movement, or its own operands do not dominate |before|).
+static LogicalResult hoistBeforeIfNeeded(Operation *op, Operation *before,
+                                         DominanceInfo &domInfo) {
+  if (domInfo.properlyDominates(op, before)) {
+    return success();
+  }
+  // Recursively hoist all operand-defining ops first.
+  for (Value operand : op->getOperands()) {
+    Operation *defOp = operand.getDefiningOp();
+    if (!defOp) {
+      // Block argument -- always dominates everything in the block.
+      continue;
+    }
+    if (failed(hoistBeforeIfNeeded(defOp, before, domInfo))) {
+      return failure();
+    }
+  }
+  op->moveBefore(before);
+  return success();
+}
+
 WalkResult verifyOperationLegality(Operation *op) {
   if (isa<UnrealizedConversionCastOp>(op)) {
     return WalkResult::interrupt();
@@ -363,15 +390,23 @@ struct FuseStreamKRecombineIntoGeneric final
     Value numInGroup = recombineOp.getNumInGroup();
     Value contributorOrdinal = recombineOp.getContributorOrdinal();
 
-    // Verify that operands used inside the producer body dominate it.
-    // These are captured by the producer's region (no IsolatedFromAbove).
+    // Hoist recombine operands (and their transitive dependencies) before
+    // the producer if they do not already dominate it.  In the real
+    // pipeline, numInGroup and contributorOrdinal are computed after the
+    // producer pcf.generic, but their transitive leaves (constants, block
+    // args, etc.) always dominate the producer.
     DominanceInfo dominanceInfo(producerOp->getParentOp());
     for (Value operand :
          {scratch, counterIndex, numInGroup, contributorOrdinal}) {
-      if (!dominanceInfo.properlyDominates(operand, producerOp)) {
+      Operation *defOp = operand.getDefiningOp();
+      if (!defOp) {
+        // Block argument -- always dominates.
+        continue;
+      }
+      if (failed(hoistBeforeIfNeeded(defOp, producerOp, dominanceInfo))) {
         return rewriter.notifyMatchFailure(
             recombineOp,
-            "recombine operand does not dominate producer generic");
+            "recombine operand cannot be hoisted before producer");
       }
     }
 
@@ -464,16 +499,41 @@ struct FuseStreamKRecombineIntoGeneric final
     // location.  Use plain OpBuilder for all newly-created regions.
     b.setInsertionPoint(recombineOp);
 
+    // Allocate a broadcast dword in workgroup shared memory.  Thread-0
+    // stores the atomic result here; all threads load it after the
+    // barrier to determine if this workgroup is the last contributor.
+    auto broadcastSrefType = PCF::ShapedRefType::get(
+        b.getContext(), {1}, b.getI32Type(), producerOp.getScope());
+    Value broadcastSref =
+        PCF::AllocOp::create(b, loc, broadcastSrefType, ValueRange{});
+
     auto outerIf = scf::IfOp::create(
         b, loc, TypeRange{}, isSplit, /*withElseRegion=*/true);
 
-    // Then branch: split path (atomic + recombine + writeback).
+    // Then branch: split path.
+    // The atomic is single-invocation (thread-0 only) but the recombine
+    // accumulation and writeback are evaluated by ALL threads.  The atomic
+    // result is broadcast via shared memory dword + barrier.
     {
       OpBuilder thenB(b.getContext());
       thenB.setInsertionPointToStart(
           &outerIf.getThenRegion().front());
 
       IndexType indexType = thenB.getIndexType();
+
+      // Get memref view of broadcast dword for store/load.
+      auto broadcastMemrefType = MemRefType::get(
+          {1}, thenB.getI32Type(),
+          StridedLayoutAttr::get(thenB.getContext(),
+                                 ShapedType::kDynamic,
+                                 {ShapedType::kDynamic}));
+      Value broadcastMemref = PCF::GetMemrefOp::create(
+          thenB, loc, broadcastMemrefType, broadcastSref,
+          SmallVector<OpFoldResult>{thenB.getIndexAttr(0)},
+          SmallVector<OpFoldResult>{thenB.getIndexAttr(1)},
+          SmallVector<OpFoldResult>{thenB.getIndexAttr(1)});
+
+      // Thread-0 does the atomic and stores result to broadcast dword.
       Value threadId = gpu::ThreadIdOp::create(
           thenB, loc, indexType, gpu::Dimension::x);
       Value isThread0 = arith::CmpIOp::create(
@@ -484,6 +544,7 @@ struct FuseStreamKRecombineIntoGeneric final
           /*withElseRegion=*/false);
 
       {
+        OpBuilder::InsertionGuard thread0Guard(thenB);
         thenB.setInsertionPointToStart(
             &thread0If.getThenRegion().front());
 
@@ -517,52 +578,64 @@ struct FuseStreamKRecombineIntoGeneric final
             thenB, loc, arith::AtomicRMWKind::addi, c1I32,
             counterMemref, ValueRange{counterIndex});
 
-        // Check if we are the last contributor.
-        Value oldIdx = arith::IndexCastOp::create(
-            thenB, loc, indexType, oldVal);
-        Value expectedLast =
-            arith::SubIOp::create(thenB, loc, numInGroup, c1);
-        Value isLast = arith::CmpIOp::create(
-            thenB, loc, arith::CmpIPredicate::eq, oldIdx, expectedLast);
+        // Store atomic result to broadcast dword.
+        memref::StoreOp::create(thenB, loc, oldVal, broadcastMemref,
+                                ValueRange{c0});
+      }
+      // InsertionGuard restores thenB to after thread0If.
 
-        // If last contributor: recombine and write back.
-        auto lastContribIf = scf::IfOp::create(
-            thenB, loc, TypeRange{}, isLast,
-            /*withElseRegion=*/false);
+      // Barrier: all threads sync after thread-0 writes broadcast dword.
+      gpu::BarrierOp::create(thenB, loc, gpu::AddressSpace::Workgroup);
 
-        {
-          thenB.setInsertionPointToStart(
-              &lastContribIf.getThenRegion().front());
+      // ALL threads load the broadcast result.
+      Value broadcastedOld = memref::LoadOp::create(
+          thenB, loc, broadcastMemref, ValueRange{c0});
 
-          // Acquire fence.
-          PCF::FenceOp::create(thenB, loc, /*is_release=*/false,
-                               ValueRange{scratch});
+      // ALL threads check if this workgroup is the last contributor.
+      Value oldIdx = arith::IndexCastOp::create(
+          thenB, loc, indexType, broadcastedOld);
+      Value expectedLast =
+          arith::SubIOp::create(thenB, loc, numInGroup, c1);
+      Value isLast = arith::CmpIOp::create(
+          thenB, loc, arith::CmpIPredicate::eq, oldIdx, expectedLast);
 
-          // Read the first partial tile from scratch (ordinal 0).
-          SmallVector<OpFoldResult> readOffsets(rank,
-                                               thenB.getIndexAttr(0));
-          readOffsets[0] = tileBaseOffset;
-          SmallVector<OpFoldResult> readSizes;
-          for (int64_t i = 0; i < rank; ++i) {
-            readSizes.push_back(thenB.getIndexAttr(tileShape[i]));
-          }
-          SmallVector<OpFoldResult> readStrides(rank,
-                                                thenB.getIndexAttr(1));
+      // If last contributor: ALL threads do recombine and write back.
+      auto lastContribIf = scf::IfOp::create(
+          thenB, loc, TypeRange{}, isLast,
+          /*withElseRegion=*/false);
 
-          Value accInit = PCF::ReadSliceOp::create(
-              thenB, loc, partialTileType, scratch, readOffsets,
-              readSizes, readStrides);
+      {
+        thenB.setInsertionPointToStart(
+            &lastContribIf.getThenRegion().front());
 
-          // Build the accumulation loop.
-          Value accumulated = buildAccumulationLoop(
-              thenB, loc, c1, numInGroup, scratch, accInit,
-              tileBaseOffset, partialTileType, rank, tileShape,
-              readSizes, readStrides, recombineOp.getCombiner());
+        // Acquire fence.
+        PCF::FenceOp::create(thenB, loc, /*is_release=*/false,
+                             ValueRange{scratch});
 
-          // Clone writeback body (first copy).
-          cloneWritebackBody(thenB, loc,
-                             recombineOp.getWriteback(), accumulated);
+        // Read the first partial tile from scratch (ordinal 0).
+        SmallVector<OpFoldResult> readOffsets(rank,
+                                             thenB.getIndexAttr(0));
+        readOffsets[0] = tileBaseOffset;
+        SmallVector<OpFoldResult> readSizes;
+        for (int64_t i = 0; i < rank; ++i) {
+          readSizes.push_back(thenB.getIndexAttr(tileShape[i]));
         }
+        SmallVector<OpFoldResult> readStrides(rank,
+                                              thenB.getIndexAttr(1));
+
+        Value accInit = PCF::ReadSliceOp::create(
+            thenB, loc, partialTileType, scratch, readOffsets,
+            readSizes, readStrides);
+
+        // Build the accumulation loop.
+        Value accumulated = buildAccumulationLoop(
+            thenB, loc, c1, numInGroup, scratch, accInit,
+            tileBaseOffset, partialTileType, rank, tileShape,
+            readSizes, readStrides, recombineOp.getCombiner());
+
+        // Clone writeback body (first copy).
+        cloneWritebackBody(thenB, loc,
+                           recombineOp.getWriteback(), accumulated);
       }
     }
 

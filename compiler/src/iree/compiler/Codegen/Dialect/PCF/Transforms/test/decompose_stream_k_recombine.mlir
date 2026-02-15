@@ -76,8 +76,16 @@ func.func @fuse_stream_k_recombine(
 //      CHECK: pcf.write_slice %{{.*}} into %{{.*}}
 //      CHECK: pcf.return
 
+// Broadcast dword allocation for atomic result broadcast.
+//      CHECK: pcf.alloc() : !pcf.sref<1xi32
+
 // Step 3: Post-producer conditional.
 //      CHECK: scf.if %[[IS_SPLIT]] {
+
+// Get memref view of broadcast dword.
+//      CHECK:   pcf.get_memref
+
+// Thread-0 does the atomic and stores result to broadcast dword.
 //      CHECK:   %[[TID:.*]] = gpu.thread_id x
 //      CHECK:   %[[IS_T0:.*]] = arith.cmpi eq, %[[TID]]
 //      CHECK:   scf.if %[[IS_T0]] {
@@ -86,24 +94,33 @@ func.func @fuse_stream_k_recombine(
 // Atomic increment.
 //      CHECK:     pcf.get_memref
 //      CHECK:     %[[OLD:.*]] = memref.atomic_rmw addi
-// Last contributor check.
-//      CHECK:     %[[OLD_IDX:.*]] = arith.index_cast %[[OLD]]
-//      CHECK:     arith.cmpi eq, %[[OLD_IDX]]
-//      CHECK:     scf.if
+// Store to broadcast dword.
+//      CHECK:     memref.store %[[OLD]]
+//      CHECK:   }
+
+// Barrier: all threads sync after thread-0 writes broadcast dword.
+//      CHECK:   gpu.barrier memfence [#gpu.address_space<workgroup>]
+
+// ALL threads load broadcast result and check last contributor.
+//      CHECK:   %[[BCAST:.*]] = memref.load
+//      CHECK:   %[[OLD_IDX:.*]] = arith.index_cast %[[BCAST]]
+//      CHECK:   arith.cmpi eq, %[[OLD_IDX]]
+//      CHECK:   scf.if
+
+// ALL threads: acquire fence + recombine + writeback.
 // Acquire fence.
-//      CHECK:       pcf.fence acquire %{{.*}}
+//      CHECK:     pcf.fence acquire %{{.*}}
 // Read first partial tile.
-//      CHECK:       pcf.read_slice
+//      CHECK:     pcf.read_slice
 // Accumulation loop.
-//      CHECK:       scf.for
-//      CHECK:         pcf.read_slice
-//      CHECK:         linalg.generic
-//      CHECK:           arith.addf
-//      CHECK:           linalg.yield
-//      CHECK:         scf.yield
+//      CHECK:     scf.for
+//      CHECK:       pcf.read_slice
+//      CHECK:       linalg.generic
+//      CHECK:         arith.addf
+//      CHECK:         linalg.yield
+//      CHECK:       scf.yield
 // First writeback.
-//      CHECK:       pcf.write_slice
-//      CHECK:     }
+//      CHECK:     pcf.write_slice
 //      CHECK:   }
 //      CHECK: } else {
 // Second writeback (non-split path).
