@@ -2,7 +2,7 @@
 
 // Test: Fuse tensor.collapse_shape into pcf.generic with tied init.
 // The 2D result is collapsed to 1D, and the write_slice offsets/sizes are
-// linearized accordingly.
+// linearized accordingly. The constant source also gets collapsed.
 
 func.func @fuse_collapse_shape_into_generic(%arg0: tensor<8x10xi32>) -> tensor<80xi32> {
   %0 = pcf.generic scope(#pcf.test_scope)
@@ -20,14 +20,14 @@ func.func @fuse_collapse_shape_into_generic(%arg0: tensor<8x10xi32>) -> tensor<8
 // CHECK-LABEL: @fuse_collapse_shape_into_generic
 //  CHECK-SAME:   %[[ARG0:[A-Za-z0-9_]+]]: tensor<8x10xi32>
 
-//       CHECK:  %[[CST:.+]] = arith.constant dense<5> : tensor<4x10xi32>
+// The constant gets collapsed by canonicalization.
+//       CHECK:  %[[CST:.+]] = arith.constant dense<5> : tensor<40xi32>
 //       CHECK:  %[[INIT:.+]] = tensor.collapse_shape %[[ARG0]] {{\[}}[0, 1]{{\]}} : tensor<8x10xi32> into tensor<80xi32>
 //       CHECK:  %[[GENERIC:.+]] = pcf.generic scope(#pcf.test_scope)
 //  CHECK-NEXT:    execute(%[[REF:.+]] = %[[INIT]])[%[[ID0:[A-Za-z0-9_]+]]: index
 //       CHECK:    -> (tensor<80xi32>)
-//       CHECK:    %[[COLLAPSED_SRC:.+]] = tensor.collapse_shape %[[CST]] {{\[}}[0, 1]{{\]}} : tensor<4x10xi32> into tensor<40xi32>
 //       CHECK:    %[[FLAT_OFF:.+]] = affine.apply
-//       CHECK:    pcf.write_slice %[[COLLAPSED_SRC]] into %[[REF]][%[[FLAT_OFF]]] [40] [1]
+//       CHECK:    pcf.write_slice %[[CST]] into %[[REF]][%[[FLAT_OFF]]] [40] [1]
 //       CHECK:    pcf.return
 //       CHECK:  return %[[GENERIC]]
 
@@ -51,14 +51,13 @@ func.func @fuse_collapse_shape_into_loop(%arg0: tensor<8x10xi32>, %n0: index, %n
 // CHECK-LABEL: @fuse_collapse_shape_into_loop
 //  CHECK-SAME:   %[[ARG0:[A-Za-z0-9_]+]]: tensor<8x10xi32>
 
-//       CHECK:  %[[CST:.+]] = arith.constant dense<5> : tensor<4x10xi32>
+//       CHECK:  %[[CST:.+]] = arith.constant dense<5> : tensor<40xi32>
 //       CHECK:  %[[INIT:.+]] = tensor.collapse_shape %[[ARG0]] {{\[}}[0, 1]{{\]}} : tensor<8x10xi32> into tensor<80xi32>
 //       CHECK:  %[[LOOP:.+]] = pcf.loop scope(#pcf.test_scope)
 //  CHECK-NEXT:    execute(%[[REF:.+]] = %[[INIT]])[%[[ID0:[A-Za-z0-9_]+]]: index
 //       CHECK:    -> (tensor<80xi32>)
-//       CHECK:    %[[COLLAPSED_SRC:.+]] = tensor.collapse_shape %[[CST]] {{\[}}[0, 1]{{\]}}
 //       CHECK:    %[[FLAT_OFF:.+]] = affine.apply
-//       CHECK:    pcf.write_slice %[[COLLAPSED_SRC]] into %[[REF]][%[[FLAT_OFF]]] [40] [1]
+//       CHECK:    pcf.write_slice %[[CST]] into %[[REF]][%[[FLAT_OFF]]] [40] [1]
 //       CHECK:    pcf.return
 //       CHECK:  return %[[LOOP]]
 
@@ -84,24 +83,25 @@ func.func @fuse_collapse_shape_multiple_write_slices(%arg0: tensor<8x10xi32>) ->
 // CHECK-LABEL: @fuse_collapse_shape_multiple_write_slices
 //  CHECK-SAME:   %[[ARG0:[A-Za-z0-9_]+]]: tensor<8x10xi32>
 
-//   CHECK-DAG:  %[[CST1:.+]] = arith.constant dense<5> : tensor<3x10xi32>
-//   CHECK-DAG:  %[[CST2:.+]] = arith.constant dense<7> : tensor<5x10xi32>
+// Constants are collapsed by canonicalization.
+//   CHECK-DAG:  %[[CST1:.+]] = arith.constant dense<5> : tensor<30xi32>
+//   CHECK-DAG:  %[[CST2:.+]] = arith.constant dense<7> : tensor<50xi32>
 //       CHECK:  %[[INIT:.+]] = tensor.collapse_shape %[[ARG0]] {{\[}}[0, 1]{{\]}}
 //       CHECK:  %[[GENERIC:.+]] = pcf.generic scope(#pcf.test_scope)
 //  CHECK-NEXT:    execute(%[[REF:.+]] = %[[INIT]])
 //       CHECK:    -> (tensor<80xi32>)
-//       CHECK:    tensor.collapse_shape %[[CST1]] {{\[}}[0, 1]{{\]}} : tensor<3x10xi32> into tensor<30xi32>
-//       CHECK:    pcf.write_slice {{.*}} into %[[REF]]{{.*}} [30] [1]
-//       CHECK:    tensor.collapse_shape %[[CST2]] {{\[}}[0, 1]{{\]}} : tensor<5x10xi32> into tensor<50xi32>
-//       CHECK:    pcf.write_slice {{.*}} into %[[REF]]{{.*}} [50] [1]
+//       CHECK:    pcf.write_slice %[[CST1]] into %[[REF]]{{.*}} [30] [1]
+//       CHECK:    pcf.write_slice %[[CST2]] into %[[REF]]{{.*}} [50] [1]
 //       CHECK:    pcf.return
 //       CHECK:  return %[[GENERIC]]
 
 // -----
 
-// Negative test: producer result has multiple uses.
+// Negative test: producer result is directly returned (multiple uses prevent
+// fusion). Using a direct return of %0 ensures the second use cannot be fused
+// by other patterns.
 
-func.func @no_fuse_collapse_shape_multiple_uses(%arg0: tensor<8x10xi32>, %dest: tensor<8x10xi32>) -> (tensor<80xi32>, tensor<8x10xi32>) {
+func.func @no_fuse_collapse_shape_multiple_uses(%arg0: tensor<8x10xi32>) -> (tensor<80xi32>, tensor<8x10xi32>) {
   %0 = pcf.generic scope(#pcf.test_scope)
     execute(%ref = %arg0)[%id0: index, %id1: index, %n0: index, %n1: index]
          : (!pcf.sref<8x10xi32, sync(#pcf.test_scope)>)
@@ -111,15 +111,14 @@ func.func @no_fuse_collapse_shape_multiple_uses(%arg0: tensor<8x10xi32>, %dest: 
     pcf.return
   }
   %1 = tensor.collapse_shape %0 [[0, 1]] : tensor<8x10xi32> into tensor<80xi32>
-  %2 = linalg.copy ins(%0 : tensor<8x10xi32>) outs(%dest : tensor<8x10xi32>) -> tensor<8x10xi32>
-  return %1, %2 : tensor<80xi32>, tensor<8x10xi32>
+  return %1, %0 : tensor<80xi32>, tensor<8x10xi32>
 }
 
 // CHECK-LABEL: @no_fuse_collapse_shape_multiple_uses
 
 //       CHECK:  %[[GENERIC:.+]] = pcf.generic scope(#pcf.test_scope)
 //       CHECK:  %[[COLLAPSE:.+]] = tensor.collapse_shape %[[GENERIC]] {{\[}}[0, 1]{{\]}}
-//       CHECK:  return %[[COLLAPSE]]
+//       CHECK:  return %[[COLLAPSE]], %[[GENERIC]]
 
 // -----
 

@@ -65,7 +65,7 @@ func.func @fuse_stream_k_recombine(
 //      CHECK: %[[IS_SPLIT:.*]] = arith.cmpi ne, %{{.*}}, %[[C1]] : index
 
 // Step 2: Producer generic has sync_on_return=true.
-//      CHECK: pcf.generic sync scope
+//      CHECK: pcf.generic sync true scope
 
 // Step 2b: Inside producer, conditional scratch write.
 //      CHECK: scf.if %[[IS_SPLIT]] {
