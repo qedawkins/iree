@@ -56,6 +56,7 @@ iree_lit_test_suite(
     "rocdl_pipeline_test.mlir"
     "sort_pipeline_test.mlir"
     "aggregate_scratch_allocations.mlir"
+    "stream_k_full_pipeline.mlir"
     "stream_k_integration.mlir"
     "stream_k_tiling.mlir"
     "tensorcore_vectorization.mlir"
