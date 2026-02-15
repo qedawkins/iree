@@ -591,7 +591,7 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(
       IREE::GPU::createConvertForallToGenericNestGPUPass());
   // Greedy consumer fusion for pcf.generic/loop ops.
-  funcPassManager.addPass(IREE::PCF::createFuseConsumersPass());
+  funcPassManager.addPass(createGPUFuseConsumersPass());
 
   // Step 6.5. Lower stream-K recombination AFTER thread/MMA tiling but
   // BEFORE bufferization. ResolveTokens lowers pcf.token operations.

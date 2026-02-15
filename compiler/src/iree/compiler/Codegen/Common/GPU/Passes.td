@@ -151,6 +151,30 @@ def GPUFuseAndHoistParallelLoopsPass :
   ];
 }
 
+def GPUFuseConsumersPass :
+    InterfacePass<"iree-codegen-gpu-fuse-consumers", "mlir::FunctionOpInterface"> {
+  let summary = "Fuses consumers into pcf.generic/loop ops.";
+  let description = [{
+    Applies greedy consumer fusion patterns for pcf.generic and pcf.loop ops.
+    This includes tilable consumer fusion (linalg ops), tensor.extract_slice
+    fusion, tensor.collapse_shape fusion, pcf.stream_k_recombine fusion,
+    and cleanup of unused results.
+
+    This pass is the pipeline-facing entry point for consumer fusion. The
+    underlying patterns are implemented in the PCF dialect and exposed via
+    `populateConsumerFusionPatterns()`.
+  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::gpu::GPUDialect",
+    "::mlir::linalg::LinalgDialect",
+    "::mlir::memref::MemRefDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+  ];
+}
+
 def GPUGeneralizeNamedOpsPass :
     InterfacePass<"iree-codegen-gpu-generalize-named-ops", "mlir::FunctionOpInterface"> {
   let summary = "Convert named Linalg ops to linalg.generic ops";

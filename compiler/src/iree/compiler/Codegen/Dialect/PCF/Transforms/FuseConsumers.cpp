@@ -588,13 +588,7 @@ struct FuseStreamKRecombineIntoGeneric final
 
 void FuseConsumersPass::runOnOperation() {
   RewritePatternSet patterns(&getContext());
-  patterns.add<FuseIntoGenericOp, FuseIntoLoopOp>(&getContext());
-  patterns.add<FuseExtractSliceIntoLoopOp, FuseExtractSliceIntoGenericOp>(
-      &getContext());
-  patterns.add<FuseStreamKRecombineIntoGeneric>(&getContext());
-  patterns.add<FuseCollapseShapeIntoGenericOp, FuseCollapseShapeIntoLoopOp>(
-      &getContext());
-  populatePCFDropUnusedResultPatterns(patterns);
+  populateConsumerFusionPatterns(patterns);
   if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
     return signalPassFailure();
   }
@@ -1712,6 +1706,16 @@ void fuseTilableConsumer(RewriterBase &rewriter, PCF::LoopOp producerOp,
 
 void populateStreamKRecombineFusionPatterns(RewritePatternSet &patterns) {
   patterns.add<FuseStreamKRecombineIntoGeneric>(patterns.getContext());
+}
+
+void populateConsumerFusionPatterns(RewritePatternSet &patterns) {
+  MLIRContext *ctx = patterns.getContext();
+  patterns.add<FuseIntoGenericOp, FuseIntoLoopOp>(ctx);
+  patterns.add<FuseExtractSliceIntoLoopOp, FuseExtractSliceIntoGenericOp>(ctx);
+  patterns.add<FuseStreamKRecombineIntoGeneric>(ctx);
+  patterns.add<FuseCollapseShapeIntoGenericOp, FuseCollapseShapeIntoLoopOp>(
+      ctx);
+  populatePCFDropUnusedResultPatterns(patterns);
 }
 
 } // namespace mlir::iree_compiler::IREE::PCF

@@ -210,6 +210,11 @@ composeWriteSliceWithParallelInsert(RewriterBase &rewriter,
 // atomic/recombine/writeback control flow after the producer.
 void populateStreamKRecombineFusionPatterns(RewritePatternSet &patterns);
 
+// Populates all consumer fusion patterns: tilable consumers (linalg ops),
+// tensor.extract_slice, tensor.collapse_shape, pcf.stream_k_recombine,
+// and the drop-unused-results cleanup pattern.
+void populateConsumerFusionPatterns(RewritePatternSet &patterns);
+
 /// Folds an scf.forall containing a pcf.loop into a single pcf.generic.
 ///
 /// Validates structural requirements:
