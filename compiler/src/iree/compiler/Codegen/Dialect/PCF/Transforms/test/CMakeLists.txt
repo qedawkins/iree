@@ -18,9 +18,12 @@ iree_lit_test_suite(
     "convert_forall_to_loops.mlir"
     "convert_sref_to_memref.mlir"
     "decompose_stream_k_recombine.mlir"
+    "fold_forall_into_pcf_loop.mlir"
+    "fuse_collapse_shape.mlir"
     "fuse_consumers.mlir"
     "fuse_pcf_writes.mlir"
     "fuse_producers.mlir"
+    "fuse_stream_k_recombine.mlir"
     "lower_structural_pcf.mlir"
     "resolve_tokens.mlir"
   TOOLS
