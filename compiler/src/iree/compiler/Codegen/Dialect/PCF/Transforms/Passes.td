@@ -196,6 +196,24 @@ def ConvertSRefToMemRefPass : Pass<"iree-pcf-convert-sref-to-memref", ""> {
                            "::mlir::vector::VectorDialect"];
 }
 
+def RedirectCapturedReadsPass : Pass<"iree-pcf-redirect-captured-reads", ""> {
+  let summary = "Redirects captured init reads in pcf.generic bodies through srefs.";
+  let description = [{
+    Replaces direct uses of `pcf.generic` init operands inside the body region
+    with `pcf.read_slice` from the corresponding sref block argument.
+
+    Without this pass, the bufferization analysis sees the init operand as both
+    written (by the pcf.generic) and read (by captured uses inside the body),
+    creating a read-after-write conflict that prevents in-place bufferization.
+    This causes `scf.for` yield equivalence verification to fail.
+
+    After this pass, the init operand is only referenced as an init (write),
+    while all reads go through the sref via `pcf.read_slice`. This allows
+    in-place bufferization and correct equivalence analysis.
+  }];
+  let dependentDialects = ["::mlir::iree_compiler::IREE::PCF::PCFDialect"];
+}
+
 def ResolveTokensPass : Pass<"iree-pcf-resolve-tokens", ""> {
   let summary = "Resolves synchronization scopes on `pcf.sref` types.";
   let description = [{

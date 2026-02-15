@@ -35,6 +35,7 @@ iree_cc_library(
     "FusePCFWrites.cpp"
     "LowerStructuralPCF.cpp"
     "Passes.cpp"
+    "RedirectCapturedReads.cpp"
     "ResolveTokens.cpp"
     "Transforms.cpp"
   DEPS

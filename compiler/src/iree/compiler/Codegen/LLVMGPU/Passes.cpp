@@ -599,6 +599,13 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   // lowering pass.
   funcPassManager.addPass(IREE::PCF::createResolveTokensPass());
 
+  // Redirect captured init reads inside pcf.generic bodies to use
+  // pcf.read_slice from the sref block arg. Without this, the bufferization
+  // analysis sees a read-after-write conflict (the init operand is written by
+  // pcf.generic and read via captured uses inside the body) and marks the
+  // operand out-of-place, which prevents scf.for yield equivalence.
+  funcPassManager.addPass(IREE::PCF::createRedirectCapturedReadsPass());
+
   // Step 6.6. Promote stream-K accumulator to workgroup memory.
   // In stream-K, the k-loop wraps the thread forall (opposite of normal
   // matmul). This causes GPUInferMemorySpace to mark the WMMA accumulator
