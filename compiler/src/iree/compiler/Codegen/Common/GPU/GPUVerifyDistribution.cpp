@@ -44,60 +44,71 @@ struct GPUVerifyDistributionPass final
     auto privateAddressSpace = gpu::AddressSpaceAttr::get(
         &getContext(), gpu::GPUDialect::getPrivateAddressSpace());
 
-    WalkResult res = funcOp.walk([&](Operation *op) {
-      if (auto forallOp = dyn_cast<scf::ForallOp>(op)) {
-        std::optional<ArrayAttr> mapping = forallOp.getMapping();
-        if (!mapping || mapping.value().empty()) {
-          forallOp->emitOpError("requires a mapping attribute.");
-          return WalkResult::interrupt();
-        }
-
-        if (isa<IREE::GPU::LaneIdAttr>(*mapping.value().begin()) &&
-            !operationHasParentForallOfMappingType<
-                mlir::gpu::GPUWarpMappingAttr>(forallOp)) {
-          forallOp->emitOpError("lane distributed scf.forall must have a "
-                                "parent subgroup distributed loop.");
-          return WalkResult::interrupt();
-        }
-        return WalkResult::advance();
-      }
-      if (auto memoryEffectOp = dyn_cast<MemoryEffectOpInterface>(op)) {
-        if (!operationHasParentForallOfMappingType<
-                mlir::gpu::GPUThreadMappingAttr, IREE::GPU::LaneIdAttr>(op)) {
-          for (Value operand : memoryEffectOp->getOperands()) {
-            auto type = dyn_cast<MemRefType>(operand.getType());
-            if (!type || !memoryEffectOp.getEffectOnValue<MemoryEffects::Write>(
-                             operand)) {
-              continue;
-            }
-
-            // Writes to private memory are fine.
-            if (type.getMemorySpace() == privateAddressSpace) {
-              continue;
-            }
-
-            // Skip memrefs without explicit address space annotation.
-            // These are intermediates from bufferization or PCF lowering
-            // that will be assigned proper address spaces later.
-            if (!type.getMemorySpace()) {
-              continue;
-            }
-
-            // Allow DMA copies.
-            if (isa<linalg::CopyOp>(op) &&
-                getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(op)) {
-              continue;
-            }
-
-            op->emitOpError(
-                "write affecting operations on shared resources are restricted "
-                "to lane or thread distributed contexts.");
-            return WalkResult::interrupt();
+    WalkResult res =
+        funcOp->walk<WalkOrder::PreOrder>([&](Operation *op) -> WalkResult {
+          // PCF generic ops manage their own distribution internally.
+          // Skip verification of operations nested within their bodies.
+          if (op->getName().getStringRef() == "pcf.generic") {
+            return WalkResult::skip();
           }
-        }
-      }
-      return WalkResult::advance();
-    });
+
+          if (auto forallOp = dyn_cast<scf::ForallOp>(op)) {
+            std::optional<ArrayAttr> mapping = forallOp.getMapping();
+            if (!mapping || mapping.value().empty()) {
+              forallOp->emitOpError("requires a mapping attribute.");
+              return WalkResult::interrupt();
+            }
+
+            if (isa<IREE::GPU::LaneIdAttr>(*mapping.value().begin()) &&
+                !operationHasParentForallOfMappingType<
+                    mlir::gpu::GPUWarpMappingAttr>(forallOp)) {
+              forallOp->emitOpError(
+                  "lane distributed scf.forall must have a "
+                  "parent subgroup distributed loop.");
+              return WalkResult::interrupt();
+            }
+            return WalkResult::advance();
+          }
+          if (auto memoryEffectOp =
+                  dyn_cast<MemoryEffectOpInterface>(op)) {
+            if (!operationHasParentForallOfMappingType<
+                    mlir::gpu::GPUThreadMappingAttr,
+                    IREE::GPU::LaneIdAttr>(op)) {
+              for (Value operand : memoryEffectOp->getOperands()) {
+                MemRefType type = dyn_cast<MemRefType>(operand.getType());
+                if (!type ||
+                    !memoryEffectOp
+                         .getEffectOnValue<MemoryEffects::Write>(operand)) {
+                  continue;
+                }
+
+                // Writes to private memory are fine.
+                if (type.getMemorySpace() == privateAddressSpace) {
+                  continue;
+                }
+
+                // Skip memrefs without explicit address space annotation.
+                // These are intermediates from bufferization or PCF lowering
+                // that will be assigned proper address spaces later.
+                if (!type.getMemorySpace()) {
+                  continue;
+                }
+
+                // Allow DMA copies.
+                if (isa<linalg::CopyOp>(op) &&
+                    getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(op)) {
+                  continue;
+                }
+
+                op->emitOpError(
+                    "write affecting operations on shared resources are "
+                    "restricted to lane or thread distributed contexts.");
+                return WalkResult::interrupt();
+              }
+            }
+          }
+          return WalkResult::advance();
+        });
 
     if (res.wasInterrupted()) {
       return signalPassFailure();
