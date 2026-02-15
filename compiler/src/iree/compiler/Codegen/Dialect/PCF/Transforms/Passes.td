@@ -231,4 +231,89 @@ def TestConvertForallToGenericNestPass :
   ];
 }
 
+def PartitionAndSpecializePass
+    : Pass<"iree-pcf-partition-and-specialize", ""> {
+  let summary = "Partition workers into bundles and specialize execution.";
+  let description = [{
+    Transforms a pcf.shared_executor region containing collective operations
+    into one containing pcf.form_bundles with pcf.execute_as regions. Analyzes
+    computation phases, decides bundle membership, and produces structured
+    bundle regions.
+
+    This pass fuses the original Stages 4 (PartitionIntoBundles) and 5
+    (SpecializeSharedExecutor) because MLIR attributes cannot reference SSA
+    values, making a separate annotation intermediate form impossible.
+
+    Analysis steps:
+    1. Phase identification: partition ops by barrier boundaries.
+    2. Partitioning decision: classify ops (load/compute/shared) and assign
+       to bundles using target heuristics.
+    3. Dependency analysis: verify no cross-bundle SSA deps within a phase.
+    4. Shared op classification: determine which ops are bundle-local vs
+       shared across all workers.
+
+    Transformation steps:
+    1. Create pcf.form_bundles with scope and sizes.
+    2. Create pcf.execute_as regions for each bundle per phase.
+    3. Move ops into appropriate execute_as regions.
+    4. Handle bundle_data for vertical specialization.
+    5. Verify well-formedness of output.
+
+    With partitioning-strategy=none, the pass is a no-op (no bundles created).
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+  ];
+  let options = [
+    Option<"producerConsumerRatio", "producer-consumer-ratio",
+           "std::string", /*default=*/"\"auto\"",
+           "Producer-to-consumer split ratio (e.g., \"1:3\") or \"auto\".">,
+    Option<"partitioningStrategy", "partitioning-strategy",
+           "std::string", /*default=*/"\"auto\"",
+           "Strategy: \"auto\", \"producer-consumer\", \"pingpong\", \"none\".">,
+  ];
+}
+
+def DistributeSharedExecutorPass
+    : Pass<"iree-pcf-distribute-shared-executor", ""> {
+  let summary = "Distribute shared_executor collective ops to per-thread code.";
+  let description = [{
+    Converts the collective execution model of pcf.shared_executor into the
+    per-thread execution model of pcf.generic. Runs iterative layout analysis
+    using NestedLayoutAttr constraints, computes per-thread slices, and
+    generates distributed code with thread IDs.
+
+    Algorithm phases:
+    1. SEED: Collect explicit constraints (pcf.constrain_layout,
+       pcf.constrain_mma).
+    2. PROPAGATE: Iterative forward/backward constraint propagation to fixed
+       point.
+    3. FILL UNCONSTRAINED: Assign greedy coalesced defaults.
+    4. RESOLVE CONFLICTS: Insert pcf.redistribute where layouts conflict.
+    5. Generate distributed code: replace shared_executor with pcf.generic,
+       distribute collective ops to per-thread slices.
+    6. Handle multi-scope distribution via nested pcf.generic ops.
+
+    Handles pcf.form_bundles regions by generating scf.if/scf.switch based
+    on thread ID membership. Supports multi-scope distribution via nested
+    pcf.generic ops.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::affine::AffineDialect",
+  ];
+  let options = [
+    Option<"preferNestedGeneric", "prefer-nested-generic",
+           "bool", /*default=*/"true",
+           "Prefer nested pcf.generic for multi-scope distribution.">,
+    Option<"strictLayoutChecking", "strict-layout-checking",
+           "bool", /*default=*/"false",
+           "Error on conflicting constraints instead of inserting redistribution.">,
+  ];
+}
+
 #endif // IREE_CODEGEN_DIALECT_PCF_TRANSFORMS_PASSES

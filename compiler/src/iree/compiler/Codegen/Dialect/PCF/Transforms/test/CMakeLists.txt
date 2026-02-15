@@ -14,13 +14,14 @@ iree_lit_test_suite(
   NAME
     lit
   SRCS
-    "convert_forall_to_generic_nest.mlir"
     "convert_forall_to_loops.mlir"
     "convert_sref_to_memref.mlir"
+    "distribute_shared_executor.mlir"
     "fuse_consumers.mlir"
     "fuse_pcf_writes.mlir"
     "fuse_producers.mlir"
     "lower_structural_pcf.mlir"
+    "partition_and_specialize.mlir"
     "resolve_tokens.mlir"
   TOOLS
     FileCheck

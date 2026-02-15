@@ -24,16 +24,20 @@ iree_cc_library(
     Transforms
   HDRS
     "ConversionDialectInterface.h"
+    "DistributionAnalysis.h"
     "Passes.h"
     "Passes.h.inc"
     "Transforms.h"
   SRCS
     "ConvertForallToPCF.cpp"
     "ConvertSRefToMemRef.cpp"
+    "DistributeSharedExecutor.cpp"
+    "DistributionAnalysis.cpp"
     "FuseConsumers.cpp"
-    "FuseProducers.cpp"
     "FusePCFWrites.cpp"
+    "FuseProducers.cpp"
     "LowerStructuralPCF.cpp"
+    "PartitionAndSpecialize.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"
     "Transforms.cpp"
@@ -52,6 +56,7 @@ iree_cc_library(
     MLIRFunctionInterfaces
     MLIRIR
     MLIRInferTypeOpInterface
+    MLIRLinalgDialect
     MLIRMemRefDialect
     MLIRPass
     MLIRSCFDialect
