@@ -168,12 +168,14 @@ struct FormDispatchScratchAllocationsPass final
       // the scratch binding in the inner function (before result bindings).
       unsigned numOriginalArgs = dispatchOp.getArguments().size();
 
-      // Rebuild the dispatch op with the scratch tensor as an additional
-      // argument. We need to reconstruct the op because
-      // AttrSizedOperandSegments requires careful handling.
+      // Rebuild the dispatch op with the scratch tensor and its dynamic
+      // dimension as additional arguments. The scratch size is passed as a
+      // regular index argument so it becomes a block argument in the inner
+      // function, where it can be used by flow.dispatch.tie_shape.
       SmallVector<Value> newArguments =
           llvm::to_vector(dispatchOp.getArguments());
       newArguments.push_back(scratchTensor);
+      newArguments.push_back(scratchSize);
 
       SmallVector<Value> newArgumentDims =
           llvm::to_vector(dispatchOp.getArgumentDims());
@@ -210,6 +212,12 @@ struct FormDispatchScratchAllocationsPass final
       BlockArgument scratchArg =
           entryBlock.insertArgument(numOriginalArgs, scratchBindingType, loc);
 
+      // Add an index argument for the scratch tensor's dynamic dimension.
+      // This corresponds to the scratchSize passed as an argument on the
+      // dispatch op caller side.
+      BlockArgument scratchDimArg = entryBlock.insertArgument(
+          numOriginalArgs + 1, IndexType::get(funcOp.getContext()), loc);
+
       // Collect existing workload ordinal ops from the function body, sorted
       // by ordinal index. These are created by
       // MaterializeDefaultWorkgroupCountRegion in DispatchCreation (before the
@@ -230,11 +238,8 @@ struct FormDispatchScratchAllocationsPass final
         workloadOrdinals.push_back(val);
       }
 
-      // Insert a dispatch.tensor.scratch op to anchor the scratch binding.
-      // This ties the scratch argument to the workload ordinals, providing
-      // the root for the backwards program slice that will later populate
-      // the scratch_size region. Must be inserted after ordinal ops to
-      // maintain SSA dominance.
+      // Insert ops after the last ordinal (or at block start) to maintain
+      // SSA dominance.
       OpBuilder funcBuilder(funcOp.getContext());
       if (lastOrdinal) {
         funcBuilder.setInsertionPointAfter(lastOrdinal);
@@ -242,11 +247,24 @@ struct FormDispatchScratchAllocationsPass final
         funcBuilder.setInsertionPointToStart(&entryBlock);
       }
 
+      // Create a flow.dispatch.tie_shape to associate the dynamic dimension
+      // with the scratch binding. The Flow->Stream conversion requires this
+      // for every dynamic DispatchTensorType argument.
+      IREE::Flow::DispatchTieShapeOp tieShapeOp =
+          IREE::Flow::DispatchTieShapeOp::create(
+              funcBuilder, loc, scratchBindingType, scratchArg,
+              ValueRange{scratchDimArg});
+      scratchArg.replaceAllUsesExcept(tieShapeOp.getResult(), tieShapeOp);
+
+      // Insert a dispatch.tensor.scratch op to anchor the scratch binding.
+      // This ties the scratch argument to the workload ordinals, providing
+      // the root for the backwards program slice that will later populate
+      // the scratch_size region.
       IREE::TensorExt::DispatchTensorScratchOp::create(
-          funcBuilder, loc, scratchBindingType, scratchArg,
+          funcBuilder, loc, scratchBindingType, tieShapeOp.getResult(),
           /*source_dims=*/ValueRange{}, workloadOrdinals);
 
-      // Update the function type to include the new argument.
+      // Update the function type to include the new arguments.
       SmallVector<Type> argTypes;
       for (BlockArgument arg : entryBlock.getArguments()) {
         argTypes.push_back(arg.getType());
