@@ -42,6 +42,7 @@ iree_compiler_cc_library(
         "PCFAttrs.cpp",
         "PCFAttrs.cpp.inc",
         "PCFDialect.cpp",
+        "PCFEnums.cpp.inc",
         "PCFInterfaces.cpp",
         "PCFOpInterfaces.cpp.inc",
         "PCFOps.cpp",
@@ -55,6 +56,8 @@ iree_compiler_cc_library(
         "PCFAttrs.h",
         "PCFAttrs.h.inc",
         "PCFDialect.h",
+        "PCFEnums.h",
+        "PCFEnums.h.inc",
         "PCFInterfaces.h",
         "PCFOpInterfaces.h.inc",
         "PCFOps.h",
@@ -80,6 +83,11 @@ iree_compiler_cc_library(
         "@llvm-project//mlir:TransformUtils",
         "@llvm-project//mlir:ViewLikeInterface",
     ],
+)
+
+alias(
+    name = "PCFDialect",
+    actual = ":IR",
 )
 
 iree_gentbl_cc_library(
@@ -154,6 +162,20 @@ iree_gentbl_cc_library(
                 "--typedefs-dialect=pcf",
             ],
             "PCFTypes.cpp.inc",
+        ),
+        (
+            [
+                "--gen-enum-decls",
+                "--dialect=pcf",
+            ],
+            "PCFEnums.h.inc",
+        ),
+        (
+            [
+                "--gen-enum-defs",
+                "--dialect=pcf",
+            ],
+            "PCFEnums.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",

@@ -383,6 +383,80 @@ def LoopOp : PCF_Op<"loop", [
 
 } // OpGroupParallelOps
 
+//===----------------------------------------------------------------------===//
+// Bundle Ops
+//===----------------------------------------------------------------------===//
+
+def OpGroupBundleOps : OpDocGroup {
+  let summary = "Bundle ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupBundleOps in {
+
+//===----------------------------------------------------------------------===//
+// FormBundlesOp
+//===----------------------------------------------------------------------===//
+
+def PCF_FormBundlesOp : PCF_Op<"form_bundles", [
+    SingleBlock,
+    RecursiveMemoryEffects,
+    ParentOneOf<["IREE::PCF::GenericOp", "IREE::PCF::SharedExecutorOp"]>,
+]> {
+  let summary = [{Region-based bundle formation.}];
+  let description = [{
+    Creates worker bundles by partitioning the worker group at a given scope.
+    The region body contains the instruction streams for all bundles, organized
+    using `pcf.execute_as` ops.
+
+    The `sizes` array specifies how many workers each bundle gets. The number
+    of block arguments equals the number of entries in `sizes`, and each has
+    type `!pcf.bundle<scope, i>` where `i` is its 0-based index.
+  }];
+
+  let arguments = (ins
+      PCF_ScopeAttrInterface:$scope,
+      DenseI64ArrayAttr:$sizes);
+
+  let regions = (region MinSizedRegion<1>:$body);
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns the number of bundles.
+    int64_t getNumBundles() { return getSizes().size(); }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// ExecuteAsOp
+//===----------------------------------------------------------------------===//
+
+def PCF_ExecuteAsOp : PCF_Op<"execute_as", [
+    SingleBlock,
+    RecursiveMemoryEffects,
+    HasParent<"FormBundlesOp">,
+]> {
+  let summary = [{Execute a region using specific bundles.}];
+  let description = [{
+    Runs a region using the workers from the listed bundles. All listed
+    bundles' workers execute the region collectively.
+
+    This op is NOT IsolatedFromAbove -- it freely captures values from the
+    enclosing `shared_executor` and `form_bundles` regions.
+  }];
+
+  let arguments = (ins
+      Variadic<PCF_AnyBundle>:$bundles);
+
+  let regions = (region MinSizedRegion<1>:$body);
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+}
+
+} // OpGroupBundleOps
 
 //===----------------------------------------------------------------------===//
 // Control Flow Ops
@@ -582,6 +656,7 @@ let opDocGroup = OpGroupWriteOps in {
             CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>];
 
     let hasFolder = 1;
+    let hasVerifier = 1;
   }
 
 } // OpGroupWriteOps
@@ -784,10 +859,94 @@ def PCF_GetMemrefOp : PCF_Op<"get_memref", [
 } // OpGroupReadOps
 
 //===----------------------------------------------------------------------===//
+// SharedExecutorOp
+//===----------------------------------------------------------------------===//
+
+def PCF_SharedExecutorOp : PCF_Op<"shared_executor", [
+    IsolatedFromAbove,
+    AttrSizedOperandSegments,
+    AutomaticAllocationScope,
+    RecursiveMemoryEffects,
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmBlockArgumentNames"]>,
+]> {
+  let summary = [{Execute a region collectively across a group of workers.}];
+  let description = [{
+    Executes a region collectively across a group of workers at one or more
+    scopes. Unlike `pcf.generic`, this op does NOT provide thread IDs -- only
+    worker counts. The region is semantically executed "in the aggregate."
+
+    Sref block arguments carry accessor modes: `readwrite` for tied outputs,
+    `readonly` for captures. The `count_dims_per_scope` attribute records how
+    many count dimensions each scope contributes.
+
+    Example:
+    ```mlir
+    %result = pcf.shared_executor scope(#pcf.sequential)
+        execute(%ref = %init)[%count: index]
+            : (!pcf.sref<128x128xf32, #pcf.sequential, readwrite>)
+            -> (tensor<128x128xf32>) {
+          pcf.return
+        }
+    ```
+  }];
+
+  let arguments = (ins
+      Variadic<AnyRankedTensorOrMemRef>:$inits,
+      Variadic<AnyRankedTensorOrMemRef>:$captures,
+      Variadic<Index>:$dynamic_sizes,
+      ArrayAttr:$scopes,
+      ArrayProp<BoolProp>:$is_capture,
+      DenseI64ArrayAttr:$count_dims_per_scope,
+      IntProp<"int64_t">:$num_leading_args);
+
+  let results = (outs Variadic<AnyRankedTensorOrMemRef>:$results);
+
+  let regions = (region
+      MaxSizedRegion<1>:$initializer,
+      MinSizedRegion<1>:$body);
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+  let skipDefaultBuilders = 1;
+
+  let builders = [
+    OpBuilder<(ins "ArrayAttr":$scopes, "ValueRange":$inits,
+        "ValueRange":$captures, "DenseI64ArrayAttr":$countDimsPerScope,
+        "ArrayRef<bool>":$isCapture, "TypeRange":$resultTypes,
+        "int64_t":$numCountArgs)>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns the number of scopes.
+    int64_t getNumScopes() {
+      return getScopesAttr().size();
+    }
+
+    /// Returns the total number of count block arguments across all scopes.
+    int64_t getTotalCountDims() {
+      int64_t total = 0;
+      for (int64_t d : getCountDimsPerScope()) {
+        total += d;
+      }
+      return total;
+    }
+
+    /// Returns the number of ref block arguments (captures + tied results).
+    int64_t getNumRefArgs() {
+      return getIsCapture().size();
+    }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // Misc
 //===----------------------------------------------------------------------===//
 
-def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp"]>, Pure,
+def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<[
+                                     "IREE::PCF::GenericOp",
+                                     "IREE::PCF::SharedExecutorOp",
+                                     "IREE::PCF::FormBundlesOp",
+                                   ]>, Pure,
                                    ReturnLike, Terminator,
 ]> {
   let summary = [{Yields results from a region.}];
@@ -801,7 +960,7 @@ def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp"]>, Pure,
 
   let assemblyFormat = [{
     attr-dict
-    $operands `:` type($operands)
+    ($operands^ `:` type($operands))?
   }];
 }
 
@@ -809,6 +968,8 @@ def PCF_ReturnOp : PCF_Op<"return", [
   ParentOneOf<[
     "IREE::PCF::GenericOp",
     "IREE::PCF::LoopOp",
+    "IREE::PCF::ExecuteAsOp",
+    "IREE::PCF::SharedExecutorOp",
   ]>,
   Pure,
   Terminator,

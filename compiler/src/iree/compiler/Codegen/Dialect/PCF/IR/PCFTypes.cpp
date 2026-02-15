@@ -12,6 +12,10 @@
 #define GET_TYPEDEF_CLASSES
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.cpp.inc" // IWYU pragma: keep
 
+// clang-format off
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFEnums.cpp.inc" // IWYU pragma: keep
+// clang-format on
+
 namespace mlir::iree_compiler::IREE::PCF {
 
 //===----------------------------------------------------------------------===//
@@ -76,12 +80,48 @@ Type ShapedRefType::parse(AsmParser &parser) {
     }
 
     if (succeeded(parser.parseOptionalComma())) {
-      SMLoc syncLoc = parser.getCurrentLocation();
+      // Could be accessor mode keyword (readwrite/readonly) or sync_scope
+      // attribute. Try specific accessor mode keywords first -- these do
+      // not consume the token when they don't match.
+      std::optional<AccessorMode> earlyAccessorMode;
+      if (succeeded(parser.parseOptionalKeyword("readwrite"))) {
+        earlyAccessorMode = AccessorMode::ReadWrite;
+      } else if (succeeded(parser.parseOptionalKeyword("readonly"))) {
+        earlyAccessorMode = AccessorMode::ReadOnly;
+      }
+
+      if (earlyAccessorMode) {
+        // Accessor mode without sync scope.
+        if (parser.parseGreater()) {
+          return {};
+        }
+        MLIRContext *context = parser.getContext();
+        return ShapedRefType::get(context, shape, elementType,
+                                  cast<ScopeAttrInterface>(scope), Attribute(),
+                                  *earlyAccessorMode);
+      }
+
+      // Not an accessor mode. Parse as sync_scope attribute.
       if (failed(parser.parseAttribute(syncScope))) {
-        parser.emitError(syncLoc, "failed to parse parameter 'sync_scope'");
         return {};
       }
     }
+  }
+
+  // After scope and optional sync_scope, check for optional accessor mode.
+  std::optional<AccessorMode> accessorMode;
+  if (succeeded(parser.parseOptionalComma())) {
+    StringRef modeStr;
+    SMLoc modeLoc = parser.getCurrentLocation();
+    if (failed(parser.parseKeyword(&modeStr))) {
+      return {};
+    }
+    std::optional<AccessorMode> mode = symbolizeAccessorMode(modeStr);
+    if (!mode) {
+      parser.emitError(modeLoc, "invalid accessor mode '") << modeStr << "'";
+      return {};
+    }
+    accessorMode = *mode;
   }
 
   if (parser.parseGreater()) {
@@ -90,7 +130,8 @@ Type ShapedRefType::parse(AsmParser &parser) {
 
   MLIRContext *context = parser.getContext();
   return ShapedRefType::get(context, shape, elementType,
-                            cast<ScopeAttrInterface>(scope), syncScope);
+                            cast<ScopeAttrInterface>(scope), syncScope,
+                            accessorMode);
 }
 
 void ShapedRefType::print(AsmPrinter &printer) const {
@@ -116,16 +157,51 @@ void ShapedRefType::print(AsmPrinter &printer) const {
     // Default for other sync scopes.
     printer << getScope() << ", " << getSyncScope();
   } else {
-    // printer case with no sync scope.
+    // Printer case with no sync scope.
     printer << getScope();
+  }
+  // Print accessor mode if present.
+  if (hasAccessorMode()) {
+    printer << ", " << stringifyAccessorMode(*getAccessorMode());
   }
   printer << ">";
 }
 
 ShapedRefType ShapedRefType::get(MLIRContext *context, ArrayRef<int64_t> shape,
                                  Type elementType, ScopeAttrInterface scope) {
-  return ShapedRefType::get(context, shape, elementType, scope, Attribute());
+  return ShapedRefType::get(context, shape, elementType, scope, Attribute(),
+                            std::nullopt);
 }
+
+ShapedRefType ShapedRefType::get(MLIRContext *context, ArrayRef<int64_t> shape,
+                                 Type elementType, ScopeAttrInterface scope,
+                                 Attribute syncScope) {
+  return ShapedRefType::get(context, shape, elementType, scope, syncScope,
+                            std::nullopt);
+}
+
+ShapedRefType ShapedRefType::get(MLIRContext *context, ArrayRef<int64_t> shape,
+                                 Type elementType, ScopeAttrInterface scope,
+                                 AccessorMode accessorMode) {
+  return ShapedRefType::get(context, shape, elementType, scope, Attribute(),
+                            accessorMode);
+}
+
+//===----------------------------------------------------------------------===//
+// #pcf.bundle<...>
+//===----------------------------------------------------------------------===//
+
+LogicalResult BundleType::verify(function_ref<InFlightDiagnostic()> emitError,
+                                 ScopeAttrInterface scope, int64_t id) {
+  if (id < 0) {
+    return emitError() << "bundle ID must be non-negative, got " << id;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ShapedRefType helpers
+//===----------------------------------------------------------------------===//
 
 bool ShapedRefType::isReturnOnlySync() const {
   return isa_and_present<SyncOnReturnAttr>(getSyncScope());

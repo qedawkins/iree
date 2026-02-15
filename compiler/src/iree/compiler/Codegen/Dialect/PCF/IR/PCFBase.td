@@ -115,6 +115,22 @@ class PCF_Op<string mnemonic, list<Trait> traits = []>
     : Op<PCF_Dialect, mnemonic, traits> {}
 
 //===----------------------------------------------------------------------===//
+// Accessor mode for sref types
+//===----------------------------------------------------------------------===//
+
+def PCF_AM_ReadWrite : I32EnumAttrCase<"ReadWrite", 0, "readwrite">;
+def PCF_AM_ReadOnly  : I32EnumAttrCase<"ReadOnly",  1, "readonly">;
+
+def PCF_AccessorMode : I32EnumAttr<"AccessorMode",
+    "Accessor mode for shaped references", [
+      PCF_AM_ReadWrite,
+      PCF_AM_ReadOnly,
+    ]> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::PCF";
+  let genSpecializedAttr = 0;
+}
+
+//===----------------------------------------------------------------------===//
 // Base pcf types
 //===----------------------------------------------------------------------===//
 
@@ -153,22 +169,34 @@ def PCF_ShapedRef : TypeDef<PCF_Dialect, "ShapedRef", [
     !pcf.ref<?xi32, #pcf.test_scope, #pcf.sync_on_return>
     !pcf.ref<?xi32, sync(#pcf.test_scope)>
     ```
+
+    An optional accessor mode (`readwrite` or `readonly`) restricts how the
+    reference can be used. A `readonly` sref cannot be the target of
+    `pcf.write_slice`. When omitted, no accessor restriction is enforced.
   }];
 
   let parameters = (ins ArrayRefParameter<"int64_t">:$shape,
       "Type":$elementType, "PCF::ScopeAttrInterface":$scope,
-      "Attribute":$sync_scope);
+      "Attribute":$sync_scope,
+      OptionalParameter<"std::optional<PCF::AccessorMode>">:$accessorMode);
   let hasCustomAssemblyFormat = 1;
   let builders = [
-      // Builder with no sync scope.
+      // Builder with no sync scope and no accessor mode.
       AttrOrTypeBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$element_type,
           "PCF::ScopeAttrInterface":$scope)>,
+      // Builder with sync scope but no accessor mode (backward compat).
+      AttrOrTypeBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$element_type,
+          "PCF::ScopeAttrInterface":$scope, "Attribute":$sync_scope)>,
+      // Builder with accessor mode but no sync scope.
+      AttrOrTypeBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$element_type,
+          "PCF::ScopeAttrInterface":$scope,
+          "PCF::AccessorMode":$accessorMode)>,
   ];
 
   let extraClassDeclaration = [{
     ShapedRefType cloneWith(std::optional<llvm::ArrayRef<int64_t>> shape, Type elementType) const {
       return ShapedRefType::get(getContext(), shape.value_or(getShape()), elementType,
-        getScope(), getSyncScope());
+        getScope(), getSyncScope(), getAccessorMode());
     }
 
     bool hasRank() const {
@@ -178,8 +206,50 @@ def PCF_ShapedRef : TypeDef<PCF_Dialect, "ShapedRef", [
     // Helper to check whether the only way accesses to this sref are
     // synchronized is on return from the worker of the same scope.
     bool isReturnOnlySync() const;
+
+    /// Returns true if this sref has an explicit accessor mode.
+    bool hasAccessorMode() const {
+      return getAccessorMode().has_value();
+    }
+
+    /// Returns true if this sref is read-only.
+    bool isReadOnly() const {
+      return getAccessorMode() == PCF::AccessorMode::ReadOnly;
+    }
+
+    /// Returns true if this sref is read-write.
+    bool isReadWrite() const {
+      return getAccessorMode() == PCF::AccessorMode::ReadWrite;
+    }
   }];
 }
+
+//===----------------------------------------------------------------------===//
+// Bundle type
+//===----------------------------------------------------------------------===//
+
+def PCF_BundleType : TypeDef<PCF_Dialect, "Bundle", []> {
+  let mnemonic = "bundle";
+  let summary = [{A worker bundle representing a subset of workers at a scope.}];
+  let description = [{
+    Represents a named subset of workers at a specific scope level. Bundles
+    are created by `pcf.form_bundles` and consumed by `pcf.execute_as`.
+    The integer ID identifies which bundle this is (0-based) within the
+    parent `form_bundles` operation.
+  }];
+
+  let parameters = (ins
+      "PCF::ScopeAttrInterface":$scope,
+      "int64_t":$id);
+
+  let assemblyFormat = [{
+    `<` $scope `,` $id `>`
+  }];
+
+  let genVerifyDecl = 1;
+}
+
+def PCF_AnyBundle : AnyTypeOf<[PCF_BundleType]>;
 
 //===----------------------------------------------------------------------===//
 // Base pcf attributes

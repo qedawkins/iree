@@ -731,6 +731,664 @@ ValueRange LoopOp::getResultDims(int64_t i) {
 }
 
 //===----------------------------------------------------------------------===//
+// FormBundlesOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult FormBundlesOp::verify() {
+  // Check that the form_bundles scope matches the parent's scope.
+  Operation *parentOp = getOperation()->getParentOp();
+  if (auto genericOp = dyn_cast<GenericOp>(parentOp)) {
+    if (getScope() != genericOp.getScope()) {
+      return emitOpError("scope does not match parent generic scope");
+    }
+  } else if (auto sharedExecOp = dyn_cast<SharedExecutorOp>(parentOp)) {
+    bool found = llvm::any_of(sharedExecOp.getScopesAttr(),
+                              [&](Attribute a) { return a == getScope(); });
+    if (!found) {
+      return emitOpError("scope is not among parent shared_executor scopes");
+    }
+  }
+
+  ArrayRef<int64_t> sizes = getSizes();
+  if (sizes.empty()) {
+    return emitOpError("sizes must have at least one entry");
+  }
+  for (int64_t i = 0, e = sizes.size(); i < e; ++i) {
+    if (sizes[i] < 1) {
+      return emitOpError("bundle size at index ")
+             << i << " must be >= 1, got " << sizes[i];
+    }
+  }
+
+  Block &body = getBody().front();
+  int64_t numBundleArgs = static_cast<int64_t>(sizes.size());
+  if (static_cast<int64_t>(body.getNumArguments()) != numBundleArgs) {
+    return emitOpError("expected ")
+           << numBundleArgs << " block arguments (one per bundle) but got "
+           << body.getNumArguments();
+  }
+
+  ScopeAttrInterface scope = getScope();
+  for (int64_t i = 0, e = body.getNumArguments(); i < e; ++i) {
+    BundleType bundleTy = dyn_cast<BundleType>(body.getArgument(i).getType());
+    if (!bundleTy) {
+      return emitOpError("block argument ")
+             << i << " must have !pcf.bundle type";
+    }
+    if (bundleTy.getScope() != scope) {
+      return emitOpError("block argument ")
+             << i << " has bundle scope '" << bundleTy.getScope()
+             << "' but expected '" << scope << "'";
+    }
+    if (bundleTy.getId() != i) {
+      return emitOpError("block argument ")
+             << i << " has bundle ID " << bundleTy.getId() << " but expected "
+             << i;
+    }
+  }
+
+  return success();
+}
+
+ParseResult FormBundlesOp::parse(OpAsmParser &parser, OperationState &result) {
+  // Parse scope attribute.
+  Attribute scope;
+  if (parser.parseAttribute(scope)) {
+    return failure();
+  }
+  result.addAttribute("scope", scope);
+
+  // Parse "sizes" keyword and integer array.
+  if (parser.parseKeyword("sizes")) {
+    return failure();
+  }
+  SmallVector<int64_t> sizes;
+  if (parser.parseLSquare()) {
+    return failure();
+  }
+  if (parser.parseCommaSeparatedList([&]() -> ParseResult {
+        int64_t val;
+        if (parser.parseInteger(val)) {
+          return failure();
+        }
+        sizes.push_back(val);
+        return success();
+      })) {
+    return failure();
+  }
+  if (parser.parseRSquare()) {
+    return failure();
+  }
+  result.addAttribute("sizes",
+                      DenseI64ArrayAttr::get(parser.getContext(), sizes));
+
+  // Parse region.
+  Region *body = result.addRegion();
+  if (parser.parseRegion(*body)) {
+    return failure();
+  }
+
+  // Parse optional attribute dict.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  return success();
+}
+
+void FormBundlesOp::print(OpAsmPrinter &printer) {
+  printer << " " << getScope();
+  printer << " sizes [";
+  llvm::interleaveComma(getSizes(), printer.getStream());
+  printer << "] ";
+  printer.printRegion(getBody());
+  printer.printOptionalAttrDict((*this)->getAttrs(),
+                                /*elidedAttrs=*/{"scope", "sizes"});
+}
+
+//===----------------------------------------------------------------------===//
+// ExecuteAsOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ExecuteAsOp::verify() {
+  // Check that bundle operands are block arguments of the parent form_bundles.
+  auto *parentOp = getOperation()->getParentOp();
+  if (auto formBundles = dyn_cast<FormBundlesOp>(parentOp)) {
+    Block &parentBlock = formBundles.getBody().front();
+    for (auto [i, bundle] : llvm::enumerate(getBundles())) {
+      auto blockArg = dyn_cast<BlockArgument>(bundle);
+      if (!blockArg || blockArg.getOwner() != &parentBlock) {
+        return emitOpError("bundle operand at index ")
+               << i << " must be a block argument of the parent form_bundles";
+      }
+    }
+  }
+
+  // Check for duplicate bundle IDs.
+  DenseSet<int64_t> seenIds;
+  for (Value bundle : getBundles()) {
+    BundleType ty = cast<BundleType>(bundle.getType());
+    if (!seenIds.insert(ty.getId()).second) {
+      return emitOpError("duplicate bundle operand with ID ") << ty.getId();
+    }
+  }
+
+  return success();
+}
+
+ParseResult ExecuteAsOp::parse(OpAsmParser &parser, OperationState &result) {
+  // Parse "[" bundle_list "]".
+  if (parser.parseLSquare()) {
+    return failure();
+  }
+  SmallVector<OpAsmParser::UnresolvedOperand> bundles;
+  SmallVector<Type> bundleTypes;
+  if (failed(parser.parseOptionalRSquare())) {
+    do {
+      OpAsmParser::UnresolvedOperand bundle;
+      Type bundleType;
+      if (parser.parseOperand(bundle) || parser.parseColonType(bundleType)) {
+        return failure();
+      }
+      bundles.push_back(bundle);
+      bundleTypes.push_back(bundleType);
+    } while (succeeded(parser.parseOptionalComma()));
+    if (parser.parseRSquare()) {
+      return failure();
+    }
+  }
+
+  // Resolve bundle operands.
+  if (parser.resolveOperands(bundles, bundleTypes, parser.getNameLoc(),
+                             result.operands)) {
+    return failure();
+  }
+
+  // Parse region.
+  Region *body = result.addRegion();
+  if (parser.parseRegion(*body)) {
+    return failure();
+  }
+
+  // Parse optional attribute dict.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  return success();
+}
+
+void ExecuteAsOp::print(OpAsmPrinter &printer) {
+  printer << " [";
+  llvm::interleaveComma(getBundles(), printer, [&](Value bundle) {
+    printer << bundle << " : " << bundle.getType();
+  });
+  printer << "] ";
+  printer.printRegion(getBody());
+  printer.printOptionalAttrDict((*this)->getAttrs());
+}
+
+//===----------------------------------------------------------------------===//
+// SharedExecutorOp
+//===----------------------------------------------------------------------===//
+
+void SharedExecutorOp::build(OpBuilder &builder, OperationState &result,
+                             ArrayAttr scopes, ValueRange inits,
+                             ValueRange captures,
+                             DenseI64ArrayAttr countDimsPerScope,
+                             ArrayRef<bool> isCapture, TypeRange resultTypes,
+                             int64_t numCountArgs) {
+  result.addOperands(inits);
+  result.addOperands(captures);
+  result.addTypes(resultTypes);
+  result.addAttribute("scopes", scopes);
+  result.addAttribute("count_dims_per_scope", countDimsPerScope);
+  result.addAttribute(
+      "operandSegmentSizes",
+      builder.getDenseI32ArrayAttr({static_cast<int32_t>(inits.size()),
+                                    static_cast<int32_t>(captures.size()),
+                                    /*dynamic_sizes=*/0}));
+  auto &props = result.getOrAddProperties<SharedExecutorOp::Properties>();
+  props.is_capture = SmallVector<bool>(isCapture);
+  props.num_leading_args = 0;
+
+  // Add the initializer and body regions.
+  result.addRegion(); // Initializer (empty).
+  Region *body = result.addRegion();
+  Block *bodyBlock = &body->emplaceBlock();
+  // Add ref args with proper sref types.
+  ScopeAttrInterface firstScope = cast<ScopeAttrInterface>(scopes[0]);
+  int64_t captureIdx = 0;
+  int64_t tiedIdx = 0;
+  for (bool cap : isCapture) {
+    if (cap) {
+      ShapedType capType = cast<ShapedType>(captures[captureIdx].getType());
+      bodyBlock->addArgument(
+          ShapedRefType::get(builder.getContext(), capType.getShape(),
+                             capType.getElementType(), firstScope,
+                             AccessorMode::ReadOnly),
+          result.location);
+      ++captureIdx;
+    } else {
+      ShapedType resType = cast<ShapedType>(resultTypes[tiedIdx]);
+      bodyBlock->addArgument(
+          ShapedRefType::get(builder.getContext(), resType.getShape(),
+                             resType.getElementType(), firstScope,
+                             AccessorMode::ReadWrite),
+          result.location);
+      ++tiedIdx;
+    }
+  }
+  // Add count args.
+  for (int64_t i = 0; i < numCountArgs; ++i) {
+    bodyBlock->addArgument(builder.getIndexType(), result.location);
+  }
+}
+
+void SharedExecutorOp::getAsmBlockArgumentNames(Region &region,
+                                                OpAsmSetValueNameFn setNameFn) {
+  if (&region == &getInitializer()) {
+    return;
+  }
+  // Body region: [leading_args][ref_args][count_args].
+  int64_t numLeading = getNumLeadingArgs();
+  int64_t numRefs = getNumRefArgs();
+  int64_t numCounts = getTotalCountDims();
+  auto args = region.getArguments();
+  for (int64_t i = 0; i < numLeading; ++i) {
+    setNameFn(args[i], "init_arg");
+  }
+  for (int64_t i = 0; i < numRefs; ++i) {
+    setNameFn(args[numLeading + i], "ref");
+  }
+  for (int64_t i = 0; i < numCounts; ++i) {
+    setNameFn(args[numLeading + numRefs + i], "count");
+  }
+}
+
+LogicalResult SharedExecutorOp::verify() {
+  // Check at least one scope.
+  ArrayAttr scopesAttr = getScopesAttr();
+  if (scopesAttr.empty()) {
+    return emitOpError("expected at least one scope");
+  }
+
+  // Check count_dims_per_scope length matches number of scopes.
+  ArrayRef<int64_t> countDims = getCountDimsPerScope();
+  if (static_cast<int64_t>(countDims.size()) != getNumScopes()) {
+    return emitOpError("count_dims_per_scope length (")
+           << countDims.size() << ") must match number of scopes ("
+           << getNumScopes() << ")";
+  }
+
+  // Check each entry >= 1.
+  for (auto [i, d] : llvm::enumerate(countDims)) {
+    if (d < 1) {
+      return emitOpError("count_dims_per_scope[")
+             << i << "] must be >= 1, got " << d;
+    }
+  }
+
+  // Check total count dims matches count block args.
+  int64_t totalCountDims = getTotalCountDims();
+  int64_t numLeading = getNumLeadingArgs();
+  int64_t numRefs = getNumRefArgs();
+  int64_t expectedBodyArgs = numLeading + numRefs + totalCountDims;
+  int64_t actualBodyArgs = getBody().getNumArguments();
+  if (actualBodyArgs != expectedBodyArgs) {
+    return emitOpError("expected ")
+           << expectedBodyArgs << " body block arguments (" << numLeading
+           << " leading + " << numRefs << " refs + " << totalCountDims
+           << " counts), but got " << actualBodyArgs;
+  }
+
+  // Check capture sref args are readonly, tied args are readwrite.
+  ArrayRef<bool> isCapture = getIsCapture();
+  auto bodyArgs = getBody().getArguments();
+  for (auto [i, cap] : llvm::enumerate(isCapture)) {
+    BlockArgument arg = bodyArgs[numLeading + i];
+    ShapedRefType srefType = dyn_cast<ShapedRefType>(arg.getType());
+    if (!srefType) {
+      continue;
+    }
+    if (cap && srefType.hasAccessorMode() && !srefType.isReadOnly()) {
+      return emitOpError("capture ref arg at index ")
+             << i << " must have readonly accessor mode";
+    }
+    if (!cap && srefType.hasAccessorMode() && !srefType.isReadWrite()) {
+      return emitOpError("tied ref arg at index ")
+             << i << " must have readwrite accessor mode";
+    }
+  }
+
+  // Check number of results matches number of non-capture (tied) ref args.
+  int64_t numTied = llvm::count(isCapture, false);
+  if (static_cast<int64_t>(getResults().size()) != numTied) {
+    return emitOpError("expected ")
+           << numTied << " results (one per tied ref), got "
+           << getResults().size();
+  }
+
+  return success();
+}
+
+ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
+                                    OperationState &result) {
+  // Parse scope(s).
+  // Either: scope(#attr) or scopes(#attr, #attr, ...).
+  SmallVector<Attribute> scopes;
+  if (succeeded(parser.parseOptionalKeyword("scope"))) {
+    Attribute scope;
+    if (parser.parseLParen() || parser.parseAttribute(scope) ||
+        parser.parseRParen()) {
+      return failure();
+    }
+    scopes.push_back(scope);
+  } else if (succeeded(parser.parseOptionalKeyword("scopes"))) {
+    if (parser.parseLParen()) {
+      return failure();
+    }
+    if (parser.parseCommaSeparatedList([&]() -> ParseResult {
+          Attribute scope;
+          if (parser.parseAttribute(scope)) {
+            return failure();
+          }
+          scopes.push_back(scope);
+          return success();
+        })) {
+      return failure();
+    }
+    if (parser.parseRParen()) {
+      return failure();
+    }
+  } else {
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected 'scope' or 'scopes' keyword");
+  }
+  result.addAttribute("scopes", ArrayAttr::get(parser.getContext(), scopes));
+
+  // Parse optional initializer region.
+  Region *initializer = result.addRegion();
+  int64_t numLeadingArgs = 0;
+  SmallVector<OpAsmParser::Argument> leadingArgs;
+  if (succeeded(parser.parseOptionalKeyword("initialize"))) {
+    if (parser.parseRegion(*initializer)) {
+      return failure();
+    }
+    // Parse -> (arg_list) for leading args.
+    if (parser.parseArrow() || parser.parseLParen()) {
+      return failure();
+    }
+    if (parser.parseCommaSeparatedList([&]() -> ParseResult {
+          leadingArgs.emplace_back();
+          if (parser.parseArgument(leadingArgs.back(), /*allowType=*/false,
+                                   /*allowAttrs=*/false) ||
+              parser.parseColonType(leadingArgs.back().type)) {
+            return failure();
+          }
+          return success();
+        })) {
+      return failure();
+    }
+    if (parser.parseRParen()) {
+      return failure();
+    }
+    numLeadingArgs = leadingArgs.size();
+  }
+
+  // Parse "execute" keyword.
+  if (parser.parseKeyword("execute")) {
+    return failure();
+  }
+
+  // Parse ref arg list: (ref_arg from capture, ref_arg = init, ...).
+  SmallVector<OpAsmParser::Argument> refArgs;
+  SmallVector<OpAsmParser::UnresolvedOperand> captureOperands;
+  SmallVector<Type> captureTypes;
+  SmallVector<OpAsmParser::UnresolvedOperand> initOperands;
+  SmallVector<Type> initTypes;
+  SmallVector<bool> isCapture;
+
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (parser.parseCommaSeparatedList([&]() -> ParseResult {
+          refArgs.emplace_back();
+          if (parser.parseArgument(refArgs.back(), /*allowType=*/false,
+                                   /*allowAttrs=*/false)) {
+            return failure();
+          }
+          // Check for `from` (capture) or `=` (tied init).
+          if (succeeded(parser.parseOptionalKeyword("from"))) {
+            isCapture.push_back(true);
+            captureOperands.emplace_back();
+            if (parser.parseOperand(captureOperands.back())) {
+              return failure();
+            }
+          } else if (succeeded(parser.parseOptionalEqual())) {
+            isCapture.push_back(false);
+            initOperands.emplace_back();
+            if (parser.parseOperand(initOperands.back())) {
+              return failure();
+            }
+          } else {
+            return parser.emitError(
+                parser.getCurrentLocation(),
+                "expected 'from' or '=' after ref argument");
+          }
+          return success();
+        })) {
+      return failure();
+    }
+    if (parser.parseRParen()) {
+      return failure();
+    }
+  }
+
+  // Parse count arg groups: [args][args]... one per scope.
+  SmallVector<int64_t> countDimsPerScope;
+  SmallVector<OpAsmParser::Argument> countArgs;
+  for (size_t i = 0, e = scopes.size(); i < e; ++i) {
+    SmallVector<OpAsmParser::Argument> scopeCountArgs;
+    if (parser.parseArgumentList(scopeCountArgs,
+                                 /*delimiter=*/OpAsmParser::Delimiter::Square,
+                                 /*allowType=*/true, /*allowAttrs=*/false)) {
+      return failure();
+    }
+    countDimsPerScope.push_back(scopeCountArgs.size());
+    countArgs.append(scopeCountArgs);
+  }
+  result.addAttribute(
+      "count_dims_per_scope",
+      DenseI64ArrayAttr::get(parser.getContext(), countDimsPerScope));
+
+  // Parse ref arg types and result types if we have ref args.
+  SmallVector<Type> resultTypes;
+  if (!refArgs.empty()) {
+    if (parser.parseColon()) {
+      return failure();
+    }
+    // Parse (type_list) for ref arg types.
+    auto it = refArgs.begin();
+    if (parser.parseCommaSeparatedList(
+            OpAsmParser::Delimiter::Paren, [&]() -> ParseResult {
+              if (it == refArgs.end()) {
+                return failure();
+              }
+              ParseResult p = parser.parseType(it->type);
+              ++it;
+              return p;
+            })) {
+      return failure();
+    }
+
+    // Parse -> (result_types).
+    if (parser.parseArrow() || parser.parseLParen()) {
+      return failure();
+    }
+    // Count the number of tied (non-capture) refs to know how many results.
+    int64_t numTied = llvm::count(isCapture, false);
+    for (int64_t i = 0; i < numTied; ++i) {
+      Type ty;
+      if (parser.parseType(ty)) {
+        return failure();
+      }
+      resultTypes.push_back(ty);
+      if (i < numTied - 1 && parser.parseComma()) {
+        return failure();
+      }
+    }
+    if (parser.parseRParen()) {
+      return failure();
+    }
+  }
+  result.addTypes(resultTypes);
+
+  // Set up operand segment sizes.
+  // Resolve capture types from ref arg types for capture entries.
+  for (auto [i, cap] : llvm::enumerate(isCapture)) {
+    if (cap) {
+      ShapedRefType srefType = dyn_cast<ShapedRefType>(refArgs[i].type);
+      if (srefType) {
+        // The capture operand type is a tensor matching the sref shape.
+        captureTypes.push_back(RankedTensorType::get(
+            srefType.getShape(), srefType.getElementType()));
+      }
+    } else {
+      // Tied init type matches the corresponding result type.
+      initTypes.push_back(resultTypes[initTypes.size()]);
+    }
+  }
+
+  // Parse the body region.
+  Region *body = result.addRegion();
+  SmallVector<OpAsmParser::Argument> allBodyArgs;
+  allBodyArgs.append(leadingArgs);
+  allBodyArgs.append(refArgs);
+  allBodyArgs.append(countArgs);
+  if (parser.parseRegion(*body, allBodyArgs)) {
+    return failure();
+  }
+
+  // Parse optional attribute dict.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  // Resolve operands.
+  if (parser.resolveOperands(initOperands, initTypes, parser.getNameLoc(),
+                             result.operands) ||
+      parser.resolveOperands(captureOperands, captureTypes, parser.getNameLoc(),
+                             result.operands)) {
+    return failure();
+  }
+
+  // Set operand segment sizes: [inits, captures, dynamic_sizes].
+  result.addAttribute("operandSegmentSizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(initOperands.size()),
+                           static_cast<int32_t>(captureOperands.size()),
+                           /*dynamic_sizes=*/0}));
+
+  // Set properties.
+  SharedExecutorOp::Properties &props =
+      result.getOrAddProperties<SharedExecutorOp::Properties>();
+  props.is_capture = isCapture;
+  props.num_leading_args = numLeadingArgs;
+
+  return success();
+}
+
+void SharedExecutorOp::print(OpAsmPrinter &p) {
+  // Print scope(s).
+  ArrayAttr scopesAttr = getScopesAttr();
+  if (scopesAttr.size() == 1) {
+    p << " scope(" << scopesAttr[0] << ")";
+  } else {
+    p << " scopes(";
+    llvm::interleaveComma(scopesAttr, p);
+    p << ")";
+  }
+
+  // Print optional initializer.
+  if (!getInitializer().empty()) {
+    p.printNewline();
+    p << "    initialize ";
+    p.printRegion(getInitializer());
+    p << " -> (";
+    int64_t numLeading = getNumLeadingArgs();
+    auto bodyArgs = getBody().getArguments();
+    llvm::interleaveComma(
+        bodyArgs.take_front(numLeading), p,
+        [&](BlockArgument arg) { p.printRegionArgument(arg); });
+    p << ")";
+  }
+
+  p.printNewline();
+  p << "    execute";
+
+  // Print ref args.
+  int64_t numLeading = getNumLeadingArgs();
+  int64_t numRefs = getNumRefArgs();
+  ArrayRef<bool> isCapture = getIsCapture();
+  auto bodyArgs = getBody().getArguments();
+  auto refArgRange = bodyArgs.slice(numLeading, numRefs);
+
+  if (numRefs > 0) {
+    p << "(";
+    int64_t captureIdx = 0;
+    int64_t initIdx = 0;
+    for (int64_t i = 0; i < numRefs; ++i) {
+      p << refArgRange[i];
+      if (isCapture[i]) {
+        p << " from " << getCaptures()[captureIdx];
+        ++captureIdx;
+      } else {
+        p << " = " << getInits()[initIdx];
+        ++initIdx;
+      }
+      if (i < numRefs - 1) {
+        p << ", ";
+      }
+    }
+    p << ")";
+  }
+
+  // Print count args grouped by scope.
+  ArrayRef<int64_t> countDims = getCountDimsPerScope();
+  int64_t countOffset = numLeading + numRefs;
+  for (int64_t d : countDims) {
+    p << "[";
+    for (int64_t j = 0; j < d; ++j) {
+      if (j > 0) {
+        p << ", ";
+      }
+      p.printRegionArgument(bodyArgs[countOffset + j]);
+    }
+    p << "]";
+    countOffset += d;
+  }
+
+  // Print ref types and result types.
+  if (numRefs > 0) {
+    p.printNewline();
+    p << "        : (";
+    llvm::interleaveComma(refArgRange, p,
+                          [&](BlockArgument arg) { p << arg.getType(); });
+    p << ")";
+    p.printNewline();
+    p << "        -> (";
+    llvm::interleaveComma(getResultTypes(), p);
+    p << ")";
+  }
+
+  // Print body region.
+  p << " ";
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false);
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          /*elidedAttrs=*/{"scopes", "count_dims_per_scope",
+                                           "operandSegmentSizes"});
+}
+
+//===----------------------------------------------------------------------===//
 // Control Flow Ops
 //===----------------------------------------------------------------------===//
 
@@ -776,14 +1434,17 @@ ParseResult FenceOp::parse(OpAsmParser &parser, OperationState &result) {
 
   SmallVector<OpAsmParser::UnresolvedOperand> operands;
   SmallVector<Type> types;
-  if (failed(parser.parseOperandList(operands)))
+  if (failed(parser.parseOperandList(operands))) {
     return failure();
+  }
   if (!operands.empty()) {
-    if (failed(parser.parseColonTypeList(types)))
+    if (failed(parser.parseColonTypeList(types))) {
       return failure();
+    }
     if (failed(parser.resolveOperands(operands, types, parser.getNameLoc(),
-                                      result.operands)))
+                                      result.operands))) {
       return failure();
+    }
   }
   return parser.parseOptionalAttrDict(result.attributes);
 }
@@ -926,6 +1587,15 @@ void GetMemrefOp::build(OpBuilder &b, OperationState &result, Type resultType,
   auto strideValues =
       llvm::map_to_vector(strides, llvm::StaticCastTo<OpFoldResult>);
   build(b, result, resultType, source, offsetValues, sizeValues, strideValues);
+}
+
+LogicalResult WriteSliceOp::verify() {
+  // Check accessor mode on destination sref.
+  ShapedRefType destType = getDestType();
+  if (destType.hasAccessorMode() && destType.isReadOnly()) {
+    return emitOpError("cannot write to readonly sref");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

@@ -19,6 +19,8 @@ iree_cc_library(
     "PCFAttrs.h"
     "PCFAttrs.h.inc"
     "PCFDialect.h"
+    "PCFEnums.h"
+    "PCFEnums.h.inc"
     "PCFInterfaces.h"
     "PCFOpInterfaces.h.inc"
     "PCFOps.h"
@@ -30,6 +32,7 @@ iree_cc_library(
     "PCFAttrs.cpp"
     "PCFAttrs.cpp.inc"
     "PCFDialect.cpp"
+    "PCFEnums.cpp.inc"
     "PCFInterfaces.cpp"
     "PCFOpInterfaces.cpp.inc"
     "PCFOps.cpp"
@@ -85,6 +88,8 @@ iree_tablegen_library(
     --gen-attrdef-defs --attrdefs-dialect=pcf PCFAttrs.cpp.inc
     --gen-typedef-decls --typedefs-dialect=pcf PCFTypes.h.inc
     --gen-typedef-defs --typedefs-dialect=pcf PCFTypes.cpp.inc
+    --gen-enum-decls --dialect=pcf PCFEnums.h.inc
+    --gen-enum-defs --dialect=pcf PCFEnums.cpp.inc
 )
 
 iree_tablegen_doc(

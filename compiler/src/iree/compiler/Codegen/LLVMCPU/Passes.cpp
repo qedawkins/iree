@@ -8,10 +8,10 @@
 #include "iree/compiler/Codegen/Common/CPU/Passes.h"
 #include "iree/compiler/Codegen/Common/PassUtils.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
-#include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
+#include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Codegen/Utils/CodegenOptions.h"
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
@@ -825,13 +825,14 @@ void registerCodegenLLVMCPUPasses() {
   };
 
   static PassPipelineRegistration<LowerToLLVMPipelineOptions>
-      LLVMCPULowerToLLVMPipeline(
-          "iree-codegen-llvmcpu-lower-to-llvm-pipeline",
-          "Runs the lower to LLVM pipeline for CPU",
-          [](OpPassManager &modulePassManager,
-             LowerToLLVMPipelineOptions const &options) {
-            addLowerToLLVMPasses(modulePassManager, options.enableArmSME);
-          });
+      LLVMCPULowerToLLVMPipeline("iree-codegen-llvmcpu-lower-to-llvm-pipeline",
+                                 "Runs the lower to LLVM pipeline for CPU",
+                                 [](OpPassManager &modulePassManager,
+                                    LowerToLLVMPipelineOptions const &options) {
+                                   addLowerToLLVMPasses(modulePassManager,
+                                                        options.enableArmSME,
+                                                        CPUCodegenOptions{});
+                                 });
 }
 
 } // namespace mlir::iree_compiler
