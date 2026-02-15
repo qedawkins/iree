@@ -1170,8 +1170,72 @@ struct ConvertWhileOp final : OpConversionPattern<scf::WhileOp> {
   }
 };
 
+/// Promotes tied init allocations of sync-scoped pcf.generic ops to the
+/// scope's allocation memory space. After bufferization, cooperative copy
+/// buffers are allocated as memref.alloca in private memory, but they must
+/// be in shared (workgroup) memory for cross-thread visibility. Only promotes
+/// direct allocations (memref.alloca), not loop-carried values (block args)
+/// which may have per-lane access patterns.
+static void promoteSyncScopedCooperativeBuffers(Operation *rootOp) {
+  MLIRContext *context = rootOp->getContext();
+  rootOp->walk([&](PCF::GenericOp genericOp) {
+    if (!genericOp.getSyncOnReturn()) {
+      return;
+    }
+
+    FailureOr<Attribute> scopeMemSpace =
+        genericOp.getScope().getAllocMemSpace(context);
+    if (failed(scopeMemSpace)) {
+      return;
+    }
+
+    int64_t initIdx = 0;
+    ValueRange inits = genericOp.getInits();
+    for (auto [resultIdx, tied] : llvm::enumerate(genericOp.getIsTied())) {
+      if (!tied) {
+        continue;
+      }
+
+      Value init = inits[initIdx];
+      ++initIdx;
+
+      // Only promote direct allocations, not loop-carried values.
+      auto allocaOp = init.getDefiningOp<memref::AllocaOp>();
+      if (!allocaOp) {
+        continue;
+      }
+
+      MemRefType memrefType = allocaOp.getType();
+      if (memrefType.getMemorySpace() == scopeMemSpace.value()) {
+        continue;
+      }
+
+      // Create new allocation with the scope's memory space.
+      auto newType = MemRefType::get(
+          memrefType.getShape(), memrefType.getElementType(),
+          memrefType.getLayout(), scopeMemSpace.value());
+
+      OpBuilder builder(allocaOp);
+      IntegerAttr alignment =
+          genericOp.getScope().getPreferredAllocAlignment(context);
+      Value newAlloc = memref::AllocOp::create(
+          builder, allocaOp.getLoc(), newType, allocaOp.getDynamicSizes(),
+          /*symbolOperands=*/ValueRange{}, alignment);
+
+      // Replace all uses of the old alloca and update the result type.
+      allocaOp.replaceAllUsesWith(newAlloc);
+      allocaOp.erase();
+      genericOp.getResult(resultIdx).setType(newType);
+    }
+  });
+}
+
 void ConvertSRefToMemRefPass::runOnOperation() {
   MLIRContext *context = &getContext();
+
+  // Pre-processing: Promote cooperative copy buffers in sync-scoped
+  // pcf.generic ops from private to workgroup memory.
+  promoteSyncScopedCooperativeBuffers(getOperation());
 
   SRefLayoutAnalysis analysis(getOperation());
   if (failed(analysis.run())) {

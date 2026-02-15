@@ -217,9 +217,10 @@ static void cloneWritebackBody(OpBuilder &b, Location loc,
 /// building ops inside newly-created regions.
 static Value buildAccumulationLoop(
     OpBuilder &b, Location loc, Value c1, Value numInGroup, Value scratch,
-    Value accInit, RankedTensorType partialTileType, int64_t rank,
-    ArrayRef<int64_t> tileShape, ArrayRef<OpFoldResult> readSizes,
-    ArrayRef<OpFoldResult> readStrides, Region &combinerRegion) {
+    Value accInit, Value tileBaseOffset, RankedTensorType partialTileType,
+    int64_t rank, ArrayRef<int64_t> tileShape,
+    ArrayRef<OpFoldResult> readSizes, ArrayRef<OpFoldResult> readStrides,
+    Region &combinerRegion) {
   Value tileHeight = arith::ConstantIndexOp::create(b, loc, tileShape[0]);
 
   // Create the for op without a body builder to avoid listener issues.
@@ -236,8 +237,10 @@ static Value buildAccumulationLoop(
     Value loopIdx = accLoop.getInductionVar();
     Value loopAcc = accLoop.getRegionIterArg(0);
 
-    // Compute scratch offset for contributor i.
-    Value offset = arith::MulIOp::create(b, loc, loopIdx, tileHeight);
+    // Compute scratch offset for contributor i, including per-tile base.
+    Value localOffset = arith::MulIOp::create(b, loc, loopIdx, tileHeight);
+    Value offset =
+        arith::AddIOp::create(b, loc, tileBaseOffset, localOffset);
 
     SmallVector<OpFoldResult> loopReadOffsets(rank, b.getIndexAttr(0));
     loopReadOffsets[0] = offset;
@@ -324,6 +327,20 @@ static LogicalResult decomposeStreamKRecombineOps(Operation *rootOp) {
     Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
     Value c1 = arith::ConstantIndexOp::create(b, loc, 1);
 
+    // Compute per-tile base offset into the scratch buffer.
+    // The scratch is partitioned: each output tile gets
+    // (scratchTotalRows / numTiles) rows.  The tile index comes from
+    // the counter_index operand of the recombine op.
+    PCF::ShapedRefType scratchType =
+        cast<PCF::ShapedRefType>(scratch.getType());
+    int64_t scratchTotalRows = scratchType.getShape()[0];
+    int64_t numTiles = counterType.getShape()[0];
+    int64_t rowsPerTile = scratchTotalRows / numTiles;
+    Value cRowsPerTile =
+        arith::ConstantIndexOp::create(b, loc, rowsPerTile);
+    Value tileBaseOffset =
+        arith::MulIOp::create(b, loc, counterIndex, cRowsPerTile);
+
     // Step 1: Compute split condition.
     Value isSplit = arith::CmpIOp::create(
         b, loc, arith::CmpIPredicate::ne, numInGroup, c1);
@@ -338,8 +355,11 @@ static LogicalResult decomposeStreamKRecombineOps(Operation *rootOp) {
 
       Value tileHeight =
           arith::ConstantIndexOp::create(b, loc, tileShape[0]);
-      Value scratchOffset =
+      // Scratch offset = per-tile base + contributor ordinal * tile height.
+      Value localOffset =
           arith::MulIOp::create(b, loc, contributorOrdinal, tileHeight);
+      Value scratchOffset =
+          arith::AddIOp::create(b, loc, tileBaseOffset, localOffset);
 
       SmallVector<OpFoldResult> scratchOffsets(rank, b.getIndexAttr(0));
       scratchOffsets[0] = scratchOffset;
@@ -431,8 +451,10 @@ static LogicalResult decomposeStreamKRecombineOps(Operation *rootOp) {
           PCF::FenceOp::create(b, loc, /*is_release=*/false,
                                ValueRange{scratch});
 
-          // Read the first partial tile from scratch (ordinal 0).
+          // Read the first partial tile from scratch (ordinal 0),
+          // offset by the per-tile base.
           SmallVector<OpFoldResult> readOffsets(rank, b.getIndexAttr(0));
+          readOffsets[0] = tileBaseOffset;
           SmallVector<OpFoldResult> readSizes;
           for (int64_t i = 0; i < rank; ++i) {
             readSizes.push_back(b.getIndexAttr(tileShape[i]));
@@ -445,8 +467,8 @@ static LogicalResult decomposeStreamKRecombineOps(Operation *rootOp) {
 
           // Build the accumulation loop.
           Value accumulated = buildAccumulationLoop(
-              b, loc, c1, numInGroup, scratch, accInit, partialTileType,
-              rank, tileShape, readSizes, readStrides,
+              b, loc, c1, numInGroup, scratch, accInit, tileBaseOffset,
+              partialTileType, rank, tileShape, readSizes, readStrides,
               recombineOp.getCombiner());
 
           // Clone writeback body with accumulated result (first copy).
