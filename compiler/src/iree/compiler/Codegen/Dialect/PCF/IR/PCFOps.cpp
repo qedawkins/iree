@@ -1462,6 +1462,95 @@ void FenceOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
+// Layout Constraint Ops
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// ConstrainLayoutOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConstrainLayoutOp::verify() {
+  LayoutAttrInterface layout = getLayout();
+  RankedTensorType tensorType = cast<RankedTensorType>(getInput().getType());
+
+  // Delegate validation to the interface.
+  return layout.isValidLayout(tensorType, getLoc());
+}
+
+//===----------------------------------------------------------------------===//
+// ConstrainMmaOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConstrainMmaOp::verify() {
+  MMALayoutInterface kind = getKind();
+
+  // Check each operand shape and element type matches the MMA interface.
+  for (auto [role, operand, result] : llvm::zip(
+           ArrayRef<StringRef>{"lhs", "rhs", "acc"},
+           ArrayRef<Value>{getLhs(), getRhs(), getAcc()},
+           ArrayRef<Value>{getLhsResult(), getRhsResult(), getAccResult()})) {
+    RankedTensorType operandType = cast<RankedTensorType>(operand.getType());
+    RankedTensorType resultType = cast<RankedTensorType>(result.getType());
+
+    // Result type must match operand type.
+    if (operandType != resultType) {
+      return emitOpError("operand '")
+             << role << "' type " << operandType
+             << " does not match result type " << resultType;
+    }
+
+    SmallVector<int64_t> expectedShape = kind.getOperandShape(role);
+    if (operandType.getShape() != ArrayRef(expectedShape)) {
+      return emitOpError("operand '")
+             << role << "' shape mismatch: expected " << expectedShape
+             << " but got " << operandType.getShape();
+    }
+
+    Type expectedElemType = kind.getOperandElementType(getContext(), role);
+    if (operandType.getElementType() != expectedElemType) {
+      return emitOpError("operand '")
+             << role << "' element type mismatch: expected " << expectedElemType
+             << " but got " << operandType.getElementType();
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RedistributeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult RedistributeOp::verify() {
+  LayoutAttrInterface sourceLayout = getSourceLayout();
+  LayoutAttrInterface targetLayout = getTargetLayout();
+  RankedTensorType tensorType = cast<RankedTensorType>(getInput().getType());
+
+  if (failed(sourceLayout.isValidLayout(tensorType, getLoc()))) {
+    return failure();
+  }
+  if (failed(targetLayout.isValidLayout(tensorType, getLoc()))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConstrainSharedLayoutOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConstrainSharedLayoutOp::verify() {
+  ShapedRefType srefType = cast<ShapedRefType>(getInput().getType());
+  SharedLayoutAttr layout = getLayout();
+
+  if (layout.getStrides().size() != static_cast<size_t>(srefType.getRank())) {
+    return emitOpError("stride dimensions (")
+           << layout.getStrides().size() << ") must match sref rank ("
+           << srefType.getRank() << ")";
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // WriteOps
 //===----------------------------------------------------------------------===//
 

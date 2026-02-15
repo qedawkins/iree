@@ -40,6 +40,7 @@ iree_cc_library(
     "PCFTypes.cpp"
     "PCFTypes.cpp.inc"
   DEPS
+    ::PCFEnumsGen
     ::PCFInterfacesGen
     ::PCFOpsGen
     ::PCFTypesGen
@@ -54,6 +55,16 @@ iree_cc_library(
     MLIRTransformUtils
     MLIRViewLikeInterface
   PUBLIC
+)
+
+iree_tablegen_library(
+  NAME
+    PCFEnumsGen
+  TD_FILE
+    "PCFBase.td"
+  OUTS
+    --gen-enum-decls PCFEnums.h.inc
+    --gen-enum-defs PCFEnums.cpp.inc
 )
 
 iree_tablegen_library(

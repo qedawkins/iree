@@ -13,6 +13,10 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Attributes.h"
 
+// clang-format off
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFEnums.h.inc" // IWYU pragma: export
+// clang-format on
+
 #define GET_ATTRDEF_CLASSES
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h.inc" // IWYU pragma: keep
 

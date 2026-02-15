@@ -15,9 +15,11 @@ iree_lit_test_suite(
     lit
   SRCS
     "bundle_ops.mlir"
+    "constraint_ops.mlir"
     "control_flow_ops.mlir"
     "folders.mlir"
     "invalid.mlir"
+    "layout_integration.mlir"
     "shared_executor_ops.mlir"
     "types.mlir"
     "write_ops.mlir"

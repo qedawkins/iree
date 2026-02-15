@@ -7,6 +7,7 @@
 #ifndef IREE_COMPILER_CODEGEN_DIALECT_PCF_IR_PCFOPS_H_
 #define IREE_COMPILER_CODEGEN_DIALECT_PCF_IR_PCFOPS_H_
 
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFDialect.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"

@@ -145,6 +145,18 @@ util.func private @form_bundles_scope_mismatch() {
 
 // -----
 
+// Constraint op error: stride dimension mismatch.
+util.func private @constrain_shared_layout_rank_mismatch(
+    %input: !pcf.sref<128x32xf16, #pcf.test_scope>) {
+  // expected-error@+1 {{stride dimensions (3) must match sref rank (2)}}
+  %0 = pcf.constrain_shared_layout %input
+      layout(#pcf.shared_layout<{stride = [512, 36, 1]}>)
+      : !pcf.sref<128x32xf16, #pcf.test_scope>
+  util.return
+}
+
+// -----
+
 // Bundle ID mismatch.
 util.func private @form_bundles_id_mismatch() {
   pcf.generic scope(#pcf.sequential)
@@ -158,6 +170,25 @@ util.func private @form_bundles_id_mismatch() {
     pcf.return
   }
   util.return
+}
+
+// -----
+
+// Constraint op error: constrain_layout rank mismatch.
+func.func @constrain_layout_rank_mismatch(%input: tensor<128x128xf32>) {
+  // expected-error@+1 {{Rank of vector (2) does not match rank of layout (3).}}
+  %0 = pcf.constrain_layout %input
+      layout(#iree_vector_ext.nested_layout<
+        subgroup_tile = [1, 1, 1],
+        batch_tile    = [1, 1, 1],
+        outer_tile    = [1, 1, 1],
+        thread_tile   = [1, 1, 1],
+        element_tile  = [1, 1, 1],
+        subgroup_strides = [0, 0, 0],
+        thread_strides   = [0, 0, 0]
+      >)
+      : tensor<128x128xf32>
+  return
 }
 
 // -----
@@ -180,6 +211,35 @@ util.func private @form_bundles_wrong_arg_count() {
 
 // -----
 
+// Constraint op error: redistribute source layout rank mismatch.
+func.func @redistribute_layout_rank_mismatch(%input: tensor<128x128xf32>) {
+  // expected-error@+1 {{Rank of vector (2) does not match rank of layout (3).}}
+  %0 = pcf.redistribute %input
+      from layout(#iree_vector_ext.nested_layout<
+        subgroup_tile = [1, 1, 1],
+        batch_tile    = [1, 1, 1],
+        outer_tile    = [1, 1, 1],
+        thread_tile   = [1, 1, 1],
+        element_tile  = [1, 1, 1],
+        subgroup_strides = [0, 0, 0],
+        thread_strides   = [0, 0, 0]
+      >)
+      to layout(#iree_vector_ext.nested_layout<
+        subgroup_tile = [1, 1],
+        batch_tile    = [1, 1],
+        outer_tile    = [1, 1],
+        thread_tile   = [1, 1],
+        element_tile  = [128, 128],
+        subgroup_strides = [0, 0],
+        thread_strides   = [0, 0]
+      >)
+      via shared_memory
+      : tensor<128x128xf32>
+  return
+}
+
+// -----
+
 // execute_as with duplicate bundle IDs.
 util.func private @execute_as_duplicate_bundle() {
   pcf.generic scope(#pcf.sequential)
@@ -197,6 +257,23 @@ util.func private @execute_as_duplicate_bundle() {
     pcf.return
   }
   util.return
+}
+
+// -----
+
+// Constraint op error: MMA operand shape mismatch.
+func.func @constrain_mma_shape_mismatch(
+    %lhs: tensor<32x32xf16>,
+    %rhs: tensor<16x16xf16>,
+    %acc: tensor<16x16xf32>) {
+  // expected-error@+1 {{operand 'lhs' shape mismatch: expected [16, 16] but got [32, 32]}}
+  %lhs_c, %rhs_c, %acc_c = pcf.constrain_mma
+      kind(#iree_gpu.mma_layout<WMMAR4_F32_16x16x16_F16>)
+      lhs(%lhs : tensor<32x32xf16>)
+      rhs(%rhs : tensor<16x16xf16>)
+      acc(%acc : tensor<16x16xf32>)
+      : tensor<32x32xf16>, tensor<16x16xf16>, tensor<16x16xf32>
+  return
 }
 
 // -----
@@ -294,4 +371,21 @@ func.func @shared_executor_count_dims_zero(
     pcf.return
   }
   return %result : tensor<128x128xf32>
+}
+
+// -----
+
+// Constraint op error: MMA operand element type mismatch.
+func.func @constrain_mma_eltype_mismatch(
+    %lhs: tensor<16x16xf32>,
+    %rhs: tensor<16x16xf16>,
+    %acc: tensor<16x16xf32>) {
+  // expected-error@+1 {{operand 'lhs' element type mismatch: expected 'f16' but got 'f32'}}
+  %lhs_c, %rhs_c, %acc_c = pcf.constrain_mma
+      kind(#iree_gpu.mma_layout<WMMAR4_F32_16x16x16_F16>)
+      lhs(%lhs : tensor<16x16xf32>)
+      rhs(%rhs : tensor<16x16xf16>)
+      acc(%acc : tensor<16x16xf32>)
+      : tensor<16x16xf32>, tensor<16x16xf16>, tensor<16x16xf32>
+  return
 }

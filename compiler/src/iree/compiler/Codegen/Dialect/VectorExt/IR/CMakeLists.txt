@@ -47,6 +47,7 @@ iree_cc_library(
     MLIRTensorDialect
     MLIRVectorDialect
     MLIRVectorInterfaces
+    iree::compiler::Codegen::Dialect::PCF::IR
     iree::compiler::Codegen::Utils::VectorOpUtils
     iree::compiler::Utils
   PUBLIC

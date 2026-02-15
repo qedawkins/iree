@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include <numeric>
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtOps.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -36,6 +37,10 @@ struct IREEVectorExtDialectOpAsmInterface : public OpAsmDialectInterface {
 void IREEVectorExtDialect::initialize() {
   addInterfaces<IREEVectorExtDialectOpAsmInterface>();
   registerAttributes();
+
+  // Declare that NestedLayoutAttr will implement PCF::LayoutAttrInterface
+  // via an external model registered in PCFLayoutExternalModels.cpp.
+  declarePromisedInterface<PCF::LayoutAttrInterface, NestedLayoutAttr>();
 
 #define GET_OP_LIST
   addOperations<

@@ -7,11 +7,13 @@
 #include "iree/compiler/Codegen/Dialect/PCF/ExternalInterfaces/Interfaces.h"
 
 #include "iree/compiler/Codegen/Dialect/PCF/ExternalInterfaces/BufferizationExternalModels.h"
+#include "iree/compiler/Codegen/Dialect/PCF/ExternalInterfaces/PCFLayoutExternalModels.h"
 
 namespace mlir::iree_compiler {
 
 void registerPCFExternalInterfaces(DialectRegistry &registry) {
   IREE::PCF::registerBufferizationExternalModels(registry);
+  IREE::PCF::registerPCFLayoutExternalModels(registry);
 }
 
 } // namespace mlir::iree_compiler

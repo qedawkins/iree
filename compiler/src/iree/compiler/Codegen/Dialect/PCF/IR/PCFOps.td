@@ -964,6 +964,203 @@ def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<[
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// Layout Constraint Ops
+//===----------------------------------------------------------------------===//
+
+def OpGroupLayoutConstraintOps : OpDocGroup {
+  let summary = "Layout constraint ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupLayoutConstraintOps in {
+
+//===----------------------------------------------------------------------===//
+// ConstrainLayoutOp
+//===----------------------------------------------------------------------===//
+
+def PCF_ConstrainLayoutOp : PCF_Op<"constrain_layout", [
+    Pure,
+    SameOperandsAndResultType
+]> {
+  let summary = [{Attach a distribution layout constraint to a tensor value.}];
+  let description = [{
+    Constrains the distribution layout of a tensor value within a
+    `pcf.shared_executor` region. The constraint guides the distribution pass
+    in determining how to map tensor elements to workers. The op is
+    semantically a no-op -- the result is identical to the input.
+
+    The layout attribute must implement `PCF_LayoutAttrInterface`. In practice,
+    this is a `NestedLayoutAttr` from the VectorExt dialect, which describes
+    the full 5-level tiling hierarchy (subgroup, batch, outer, thread, element).
+
+    Layout rank must match the tensor rank, and tile sizes must multiply to the
+    tensor dimensions. These invariants are checked by the verifier.
+
+    Example:
+    ```mlir
+    %constrained = pcf.constrain_layout %tensor
+        layout(#iree_vector_ext.nested_layout<
+          subgroup_tile = [2, 2],
+          batch_tile    = [1, 1],
+          outer_tile    = [1, 1],
+          thread_tile   = [4, 16],
+          element_tile  = [1, 4],
+          subgroup_strides = [1, 2],
+          thread_strides   = [16, 1]
+        >)
+        : tensor<128x128xf32>
+    ```
+  }];
+
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      PCF_LayoutAttrInterface:$layout);
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    $input `layout` `(` $layout `)` attr-dict `:` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// ConstrainMmaOp
+//===----------------------------------------------------------------------===//
+
+def PCF_ConstrainMmaOp : PCF_Op<"constrain_mma", [Pure]> {
+  let summary = [{Constrain operand layouts to match an MMA instruction.}];
+  let description = [{
+    A convenience operation that constrains LHS, RHS, and accumulator layouts
+    to match a specific MMA instruction. The MMA kind attribute must implement
+    `PCF_MMALayoutInterface`, which provides the layout for each operand role.
+
+    This is equivalent to three separate `pcf.constrain_layout` ops, but
+    expressed as a single op for clarity and to ensure all three operands are
+    constrained consistently.
+
+    The MMA kind attribute is typically an `#iree_gpu.mma_*` attribute that
+    implements `PCF_MMALayoutInterface` as an external model.
+
+    Example:
+    ```mlir
+    %lhs_c, %rhs_c, %acc_c = pcf.constrain_mma
+        kind(#iree_gpu.mma_wmma_f16_16x16x16_f32)
+        lhs(%lhs : tensor<16x16xf16>)
+        rhs(%rhs : tensor<16x16xf16>)
+        acc(%acc : tensor<16x16xf32>)
+        : tensor<16x16xf16>, tensor<16x16xf16>, tensor<16x16xf32>
+    ```
+  }];
+
+  let arguments = (ins
+      PCF_MMALayoutInterface:$kind,
+      AnyRankedTensor:$lhs,
+      AnyRankedTensor:$rhs,
+      AnyRankedTensor:$acc);
+  let results = (outs
+      AnyRankedTensor:$lhs_result,
+      AnyRankedTensor:$rhs_result,
+      AnyRankedTensor:$acc_result);
+
+  let assemblyFormat = [{
+    `kind` `(` $kind `)`
+    `lhs` `(` $lhs `:` type($lhs) `)`
+    `rhs` `(` $rhs `:` type($rhs) `)`
+    `acc` `(` $acc `:` type($acc) `)`
+    attr-dict `:` type($lhs_result) `,` type($rhs_result) `,` type($acc_result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// RedistributeOp
+//===----------------------------------------------------------------------===//
+
+def PCF_RedistributeOp : PCF_Op<"redistribute", [
+    SameOperandsAndResultType
+]> {
+  let summary = [{Convert a tensor from one distribution layout to another.}];
+  let description = [{
+    Explicitly changes the distribution layout of a tensor. Inserted by the
+    distribution pass when layout conflicts are detected in the dataflow graph.
+
+    The redistribution mechanism is specified by `method`:
+    - `shared_memory`: Write to shared memory with source layout, barrier,
+      read with target layout. Most general but requires shared memory.
+    - `shuffle`: Use subgroup shuffle operations. Only valid for
+      within-subgroup redistribution.
+    - `registers`: Logical reinterpretation with no data movement. Only valid
+      when layouts are register-compatible (same physical mapping, different
+      logical tiling).
+
+    Both layouts must implement `PCF_LayoutAttrInterface` and must tile the
+    same tensor shape.
+  }];
+
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      PCF_LayoutAttrInterface:$source_layout,
+      PCF_LayoutAttrInterface:$target_layout,
+      PCF_RedistributeMethodAttr:$method);
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    $input
+    `from` `layout` `(` $source_layout `)`
+    `to` `layout` `(` $target_layout `)`
+    `via` $method
+    attr-dict `:` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// ConstrainSharedLayoutOp
+//===----------------------------------------------------------------------===//
+
+def PCF_ConstrainSharedLayoutOp : PCF_Op<"constrain_shared_layout", [
+    Pure,
+    SameOperandsAndResultType
+]> {
+  let summary = [{Constrain shared memory access layout.}];
+  let description = [{
+    Constrains the physical layout of a shared memory sref. This determines
+    the stride pattern and optional swizzle for bank conflict avoidance.
+
+    Unlike `pcf.constrain_layout` (which controls thread-to-element
+    distribution of tensors), this op controls the physical memory layout
+    of shared memory allocations.
+
+    Example:
+    ```mlir
+    %constrained_smem = pcf.constrain_shared_layout %smem
+        layout(#pcf.shared_layout<{stride = [36, 1], swizzle = none}>)
+        : !pcf.sref<128x32xf16, #iree_gpu.subgroup_scope>
+    ```
+  }];
+
+  let arguments = (ins
+      PCF_AnyShapedRef:$input,
+      PCF_SharedLayoutAttr:$layout);
+  let results = (outs PCF_AnyShapedRef:$result);
+
+  let assemblyFormat = [{
+    $input `layout` `(` $layout `)` attr-dict `:` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+} // OpGroupLayoutConstraintOps
+
+//===----------------------------------------------------------------------===//
+// Misc
+//===----------------------------------------------------------------------===//
+
 def PCF_ReturnOp : PCF_Op<"return", [
   ParentOneOf<[
     "IREE::PCF::GenericOp",

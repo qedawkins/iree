@@ -343,6 +343,54 @@ def PCF_SyncOnReturnAttr
 }
 
 //===----------------------------------------------------------------------===//
+// Layout constraint attributes
+//===----------------------------------------------------------------------===//
+
+def PCF_RedistributeMethod_SharedMemory
+    : I32EnumAttrCase<"SharedMemory", 0, "shared_memory">;
+def PCF_RedistributeMethod_Shuffle
+    : I32EnumAttrCase<"Shuffle", 1, "shuffle">;
+def PCF_RedistributeMethod_Registers
+    : I32EnumAttrCase<"Registers", 2, "registers">;
+
+def PCF_RedistributeMethodEnum
+    : I32EnumAttr<"RedistributeMethod",
+                  "Method for data redistribution between layouts.", [
+      PCF_RedistributeMethod_SharedMemory,
+      PCF_RedistributeMethod_Shuffle,
+      PCF_RedistributeMethod_Registers,
+    ]> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::PCF";
+  let genSpecializedAttr = 0;
+}
+
+def PCF_RedistributeMethodAttr
+    : EnumAttr<PCF_Dialect, PCF_RedistributeMethodEnum,
+               "redistribute_method">;
+
+def PCF_SharedLayoutAttr : AttrDef<PCF_Dialect, "SharedLayout"> {
+  let mnemonic = "shared_layout";
+  let summary = [{Shared memory access layout for bank conflict avoidance.}];
+  let description = [{
+    Describes the physical layout of shared memory, including stride padding
+    and swizzle patterns. Applied to `pcf.sref` values to control how threads
+    access shared memory.
+
+    Example:
+    ```mlir
+    #pcf.shared_layout<{stride = [36, 1], swizzle = none}>
+    ```
+  }];
+
+  let parameters = (ins
+      ArrayRefParameter<"int64_t">:$strides,
+      DefaultValuedParameter<"StringAttr", "{}">:$swizzle);
+
+  let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // Misc aliases
 //===----------------------------------------------------------------------===//
 

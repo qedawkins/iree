@@ -14,9 +14,11 @@ iree_cc_library(
   NAME
     ExternalModels
   HDRS
+    "GPUMMAExternalModels.h"
     "GPUScopeExternalModels.h"
     "Interfaces.h"
   SRCS
+    "GPUMMAExternalModels.cpp"
     "GPUScopeExternalModels.cpp"
     "Interfaces.cpp"
   DEPS
@@ -27,6 +29,7 @@ iree_cc_library(
     iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
     iree::compiler::Codegen::Dialect::PCF::IR
     iree::compiler::Codegen::Dialect::PCF::Transforms
+    iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect
   PUBLIC
 )
 
