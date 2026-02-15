@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
@@ -35,12 +36,25 @@ static bool hasCollapseShapeUser(memref::AllocOp allocOp) {
   return false;
 }
 
+/// Check if an alloc has any pcf.generic user with tied results. The type
+/// change from padding cannot propagate through tied pcf.generic results.
+static bool hasPCFGenericUser(memref::AllocOp allocOp) {
+  return llvm::any_of(allocOp->getUsers(), [](Operation *user) {
+    return isa<IREE::PCF::GenericOp>(user);
+  });
+}
+
 /// Pad out the inner dimension of the `memref.alloc` op in order reduce the
 /// chances to have bank conflicts when reading 2D shapes within shared memory.
 static void padAlloc(MLIRContext *context, memref::AllocOp allocOp,
                      unsigned paddingSizeBits) {
   auto allocOpShape = allocOp.getType().getShape();
   if (allocOpShape.empty()) {
+    return;
+  }
+  // Skip allocs used by pcf.generic — the stride change from padding cannot
+  // propagate through tied pcf.generic init/result pairs.
+  if (hasPCFGenericUser(allocOp)) {
     return;
   }
   int64_t innerDim = allocOpShape.back();

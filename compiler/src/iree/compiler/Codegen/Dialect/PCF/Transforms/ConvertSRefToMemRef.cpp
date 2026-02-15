@@ -649,8 +649,10 @@ struct ConvertGenericOp final : OpConversionPattern<PCF::GenericOp> {
     for (auto [resultType, isTied] :
          llvm::zip_equal(genericOp.getResultTypes(), genericOp.getIsTied())) {
       if (isTied) {
-        replacements.push_back(*currInit);
+        Value init = *currInit;
         ++currInit;
+
+        replacements.push_back(init);
       } else {
         int64_t numDynamicDims =
             cast<ShapedType>(resultType).getNumDynamicDims();

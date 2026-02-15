@@ -7,6 +7,7 @@
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -36,7 +37,8 @@ struct GPUInferMemorySpacePass final
 
 bool isDefinitelyShared(bufferization::AllocTensorOp alloc) {
   // An allocation can be inferred as shared if it is the destination of a
-  // thread distributed `scf.forall` op. All other shared allocations are
+  // thread distributed `scf.forall` op or a synchronized pcf.generic with a
+  // scope that allocates in workgroup memory. All other shared allocations are
   // expected to be properly indicated in advance.
   for (auto user : alloc->getUsers()) {
     if (isa<linalg::CopyOp>(user) &&
@@ -44,12 +46,32 @@ bool isDefinitelyShared(bufferization::AllocTensorOp alloc) {
       continue;
     }
 
-    auto forallOp = dyn_cast<scf::ForallOp>(user);
-    if (!forallOp ||
-        !forallOpHasMappingType<gpu::GPUThreadMappingAttr,
-                                gpu::GPUWarpMappingAttr>(forallOp)) {
-      return false;
+    if (auto forallOp = dyn_cast<scf::ForallOp>(user)) {
+      if (forallOpHasMappingType<gpu::GPUThreadMappingAttr,
+                                 gpu::GPUWarpMappingAttr>(forallOp)) {
+        continue;
+      }
     }
+
+    // A pcf.generic with sync=true and a scope that allocates in workgroup
+    // memory represents a cooperative operation where all threads in the scope
+    // collaborate to fill a shared buffer.
+    if (auto genericOp = dyn_cast<IREE::PCF::GenericOp>(user)) {
+      if (genericOp.getSyncOnReturn()) {
+        IREE::PCF::ScopeAttrInterface scope = genericOp.getScope();
+        FailureOr<Attribute> memSpace =
+            scope.getAllocMemSpace(genericOp->getContext());
+        if (succeeded(memSpace) &&
+            memSpace.value() ==
+                gpu::AddressSpaceAttr::get(
+                    genericOp->getContext(),
+                    gpu::GPUDialect::getWorkgroupAddressSpace())) {
+          continue;
+        }
+      }
+    }
+
+    return false;
   }
   return true;
 }
