@@ -1,81 +1,82 @@
 // RUN: iree-opt --split-input-file --iree-pcf-fuse-consumers %s | FileCheck %s
 
-// Tests that pcf.stream_k_recombine is decomposed into:
-//   1. Conditional scratch write (if split).
-//   2. Workgroup barrier.
-//   3. Conditional atomic + recombine (thread-0 predicated).
-//   4. Else: writeback for non-split path.
-//   5. Final workgroup barrier.
+// Tests that pcf.stream_k_recombine is fused into its producer pcf.generic:
+//   1. Producer gets sync_on_return=true.
+//   2. Conditional scratch write inside the producer body.
+//   3. Conditional atomic + recombine + writeback (then) / writeback (else).
+//   4. Final workgroup barrier.
 
 #wg = #iree_codegen.workgroup_scope<linearize>
 
-// Use function args for num_in_group/ordinal to prevent constant folding.
-func.func @decompose_stream_k_recombine(
-    %out: tensor<128x128xf32>,
-    %num_in_group_arg: index,
-    %ordinal_arg: index) -> tensor<128x128xf32> {
-  %result = pcf.generic scope(#wg) initialize {
-    %scratch = pcf.alloc() : !pcf.sref<1024x64xf32, #wg>
-    %counter = pcf.alloc() : !pcf.sref<4xi32, #wg>
-    pcf.yield %scratch, %counter
-        : !pcf.sref<1024x64xf32, #wg>, !pcf.sref<4xi32, #wg>
-  } -> (%arg0: !pcf.sref<1024x64xf32, #wg>,
-        %arg1: !pcf.sref<4xi32, #wg>)
-    execute(%ref = %out)[%id: index, %count: index]
-         : (!pcf.sref<128x128xf32, #wg>)
-        -> (tensor<128x128xf32>) {
+// Use function args for srefs so the recombine can sit outside the producer.
+func.func @fuse_stream_k_recombine(
+    %init: tensor<64x64xf32>,
+    %out_ref: !pcf.sref<128x128xf32, #wg>,
+    %scratch: !pcf.sref<1024x64xf32, #wg>,
+    %counter: !pcf.sref<4xi32, #wg>,
+    %num_in_group: index,
+    %ordinal: index) {
+  %c0 = arith.constant 0 : index
+
+  // Producer generic computing a partial tile.
+  %partial = pcf.generic scope(#wg)
+    execute(%tile_ref = %init)[%id: index, %count: index]
+         : (!pcf.sref<64x64xf32, sync(#wg)>)
+        -> (tensor<64x64xf32>) {
     %cst = arith.constant 0.000000e+00 : f32
-
-    // Compute a partial tile (fill for simplicity).
     %empty = tensor.empty() : tensor<64x64xf32>
-    %partial = linalg.fill ins(%cst : f32) outs(%empty : tensor<64x64xf32>)
-        -> tensor<64x64xf32>
-
-    %c0 = arith.constant 0 : index
-
-    pcf.stream_k_recombine %partial
-        into %ref [0, 0] [64, 64] [1, 1]
-        scratch %arg0 counter %arg1[%c0]
-        group(%num_in_group_arg)
-        ordinal(%ordinal_arg)
-        combiner {
-    ^bb0(%a: f32, %b: f32):
-      %sum = arith.addf %a, %b : f32
-      pcf.yield %sum : f32
-    } writeback {
-    ^bb0(%final: tensor<64x64xf32>):
-      pcf.write_slice %final into %ref[0, 0] [64, 64] [1, 1]
-          : tensor<64x64xf32>
-          into !pcf.sref<128x128xf32, #wg>
-      pcf.yield
-    }
+    %fill = linalg.fill ins(%cst : f32)
+        outs(%empty : tensor<64x64xf32>) -> tensor<64x64xf32>
+    pcf.write_slice %fill into %tile_ref[0, 0] [64, 64] [1, 1]
         : tensor<64x64xf32>
-        into !pcf.sref<128x128xf32, #wg>
-        scratch_type !pcf.sref<1024x64xf32, #wg>
-        counter_type !pcf.sref<4xi32, #wg>
-
+        into !pcf.sref<64x64xf32, sync(#wg)>
     pcf.return
   }
-  return %result : tensor<128x128xf32>
+
+  // Recombine consuming the producer's result.
+  pcf.stream_k_recombine %partial
+      into %out_ref [0, 0] [64, 64] [1, 1]
+      scratch %scratch counter %counter[%c0]
+      group(%num_in_group)
+      ordinal(%ordinal)
+      combiner {
+  ^bb0(%a: f32, %b: f32):
+    %sum = arith.addf %a, %b : f32
+    pcf.yield %sum : f32
+  } writeback {
+  ^bb0(%final: tensor<64x64xf32>):
+    pcf.write_slice %final into %out_ref[0, 0] [64, 64] [1, 1]
+        : tensor<64x64xf32>
+        into !pcf.sref<128x128xf32, #wg>
+    pcf.yield
+  }
+      : tensor<64x64xf32>
+      into !pcf.sref<128x128xf32, #wg>
+      scratch_type !pcf.sref<1024x64xf32, #wg>
+      counter_type !pcf.sref<4xi32, #wg>
+
+  return
 }
 
-// CHECK-LABEL: @decompose_stream_k_recombine
+// CHECK-LABEL: @fuse_stream_k_recombine
 
 // Step 1: Split condition (num_in_group != 1).
 //  CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
 //      CHECK: %[[IS_SPLIT:.*]] = arith.cmpi ne, %{{.*}}, %[[C1]] : index
 
-// Step 2: Conditional scratch write / else writeback.
+// Step 2: Producer generic has sync_on_return=true.
+//      CHECK: pcf.generic sync scope
+
+// Step 2b: Inside producer, conditional scratch write.
 //      CHECK: scf.if %[[IS_SPLIT]] {
-//      CHECK:   pcf.write_slice %{{.*}} into %{{.*}}
-//      CHECK: } else {
 //      CHECK:   pcf.write_slice %{{.*}} into %{{.*}}
 //      CHECK: }
 
-// Step 3: Workgroup barrier after scratch writes.
-//      CHECK: gpu.barrier memfence [#gpu.address_space<workgroup>]
+// Original write_slice to output ref unchanged.
+//      CHECK: pcf.write_slice %{{.*}} into %{{.*}}
+//      CHECK: pcf.return
 
-// Step 4: Conditional atomic + recombine for split tiles.
+// Step 3: Post-producer conditional.
 //      CHECK: scf.if %[[IS_SPLIT]] {
 //      CHECK:   %[[TID:.*]] = gpu.thread_id x
 //      CHECK:   %[[IS_T0:.*]] = arith.cmpi eq, %[[TID]]
@@ -100,13 +101,16 @@ func.func @decompose_stream_k_recombine(
 //      CHECK:           arith.addf
 //      CHECK:           linalg.yield
 //      CHECK:         scf.yield
-// Writeback of accumulated result.
+// First writeback.
 //      CHECK:       pcf.write_slice
 //      CHECK:     }
 //      CHECK:   }
+//      CHECK: } else {
+// Second writeback (non-split path).
+//      CHECK:   pcf.write_slice
 //      CHECK: }
 
-// Step 5: Final workgroup barrier.
+// Step 4: Final workgroup barrier.
 //      CHECK: gpu.barrier memfence [#gpu.address_space<workgroup>]
 
 // The stream_k_recombine op should be gone.

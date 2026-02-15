@@ -298,41 +298,84 @@ WalkResult verifyOperationLegality(Operation *op) {
   return WalkResult::advance();
 }
 
-/// Decomposes all `pcf.stream_k_recombine` ops in |op| into distributed
-/// control flow. Runs as a pre-pass before greedy fusion to avoid listener
-/// issues with the PatternRewriter creating ops inside newly-built regions.
-static LogicalResult decomposeStreamKRecombineOps(Operation *rootOp) {
-  SmallVector<StreamKRecombineOp> recombineOps;
-  rootOp->walk([&](StreamKRecombineOp op) { recombineOps.push_back(op); });
+/// Fuses a pcf.stream_k_recombine into its producer pcf.generic:
+///
+/// 1. Sets sync_on_return=true on the producer.
+/// 2. Inside the producer body, adds conditional scratch writes before
+///    each write_slice to the consumed result's ref arg.
+/// 3. Outside the producer (after sync), creates conditional control flow:
+///    - Split path: thread-0 predicated atomic + recombine + writeback.
+///    - Non-split path: direct writeback of the producer's result.
+/// 4. Final workgroup barrier.
+struct FuseStreamKRecombineIntoGeneric final
+    : public OpRewritePattern<StreamKRecombineOp> {
+  using Base::Base;
 
-  for (StreamKRecombineOp recombineOp : recombineOps) {
-    Location loc = recombineOp.getLoc();
+  LogicalResult matchAndRewrite(StreamKRecombineOp recombineOp,
+                                PatternRewriter &rewriter) const override {
+    // Match: partial_tile must come from a pcf.generic result.
     Value partialTile = recombineOp.getPartialTile();
+    auto genericResult = dyn_cast<OpResult>(partialTile);
+    if (!genericResult) {
+      return rewriter.notifyMatchFailure(
+          recombineOp, "partial_tile is not an op result");
+    }
+    auto producerOp =
+        dyn_cast<PCF::GenericOp>(genericResult.getOwner());
+    if (!producerOp) {
+      return rewriter.notifyMatchFailure(
+          recombineOp, "partial_tile not produced by pcf.generic");
+    }
+
+    // Gather recombine operands.
     Value scratch = recombineOp.getScratch();
     Value counter = recombineOp.getCounter();
     Value counterIndex = recombineOp.getCounterIndex();
     Value numInGroup = recombineOp.getNumInGroup();
     Value contributorOrdinal = recombineOp.getContributorOrdinal();
 
+    // Verify that operands used inside the producer body dominate it.
+    // These are captured by the producer's region (no IsolatedFromAbove).
+    DominanceInfo dominanceInfo(producerOp->getParentOp());
+    for (Value operand :
+         {scratch, counterIndex, numInGroup, contributorOrdinal}) {
+      if (!dominanceInfo.properlyDominates(operand, producerOp)) {
+        return rewriter.notifyMatchFailure(
+            recombineOp,
+            "recombine operand does not dominate producer generic");
+      }
+    }
+
+    Location loc = recombineOp.getLoc();
+    unsigned resultIdx = genericResult.getResultNumber();
+
     RankedTensorType partialTileType =
         cast<RankedTensorType>(partialTile.getType());
     int64_t rank = partialTileType.getRank();
     ArrayRef<int64_t> tileShape = partialTileType.getShape();
 
+    PCF::ShapedRefType scratchType =
+        cast<PCF::ShapedRefType>(scratch.getType());
     PCF::ShapedRefType counterType = recombineOp.getCounterType();
 
-    OpBuilder b(recombineOp);
+    // Step 1: Set sync_on_return=true on the producer generic.
+    rewriter.modifyOpInPlace(producerOp, [&]() {
+      producerOp.setSyncOnReturn(true);
+    });
 
-    // Constants.
+    // Step 2: Compute constants and conditions before the producer.
+    // Since pcf.generic does not have IsolatedFromAbove, these values
+    // are captured inside the producer body for the scratch write.
+    OpBuilder b(producerOp);
+
     Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
     Value c1 = arith::ConstantIndexOp::create(b, loc, 1);
 
-    // Compute per-tile base offset into the scratch buffer.
-    // The scratch is partitioned: each output tile gets
-    // (scratchTotalRows / numTiles) rows.  The tile index comes from
-    // the counter_index operand of the recombine op.
-    PCF::ShapedRefType scratchType =
-        cast<PCF::ShapedRefType>(scratch.getType());
+    // Split condition: tile is split across multiple workgroups.
+    Value isSplit = arith::CmpIOp::create(
+        b, loc, arith::CmpIPredicate::ne, numInGroup, c1);
+
+    // Per-tile base offset in scratch.
     int64_t scratchTotalRows = scratchType.getShape()[0];
     int64_t numTiles = counterType.getShape()[0];
     int64_t rowsPerTile = scratchTotalRows / numTiles;
@@ -341,165 +384,185 @@ static LogicalResult decomposeStreamKRecombineOps(Operation *rootOp) {
     Value tileBaseOffset =
         arith::MulIOp::create(b, loc, counterIndex, cRowsPerTile);
 
-    // Step 1: Compute split condition.
-    Value isSplit = arith::CmpIOp::create(
-        b, loc, arith::CmpIPredicate::ne, numInGroup, c1);
+    // Scratch write offset for this contributor.
+    Value tileHeight =
+        arith::ConstantIndexOp::create(b, loc, tileShape[0]);
+    Value localOffset =
+        arith::MulIOp::create(b, loc, contributorOrdinal, tileHeight);
+    Value scratchWriteOffset =
+        arith::AddIOp::create(b, loc, tileBaseOffset, localOffset);
 
-    // Step 2: Conditional scratch write / else writeback.
-    auto outerIf = scf::IfOp::create(b, loc, /*resultTypes=*/TypeRange{},
-                                     isSplit, /*withElseRegion=*/true);
-
-    // Then branch: split path -- write partial tile to scratch.
-    {
-      b.setInsertionPointToStart(&outerIf.getThenRegion().front());
-
-      Value tileHeight =
-          arith::ConstantIndexOp::create(b, loc, tileShape[0]);
-      // Scratch offset = per-tile base + contributor ordinal * tile height.
-      Value localOffset =
-          arith::MulIOp::create(b, loc, contributorOrdinal, tileHeight);
-      Value scratchOffset =
-          arith::AddIOp::create(b, loc, tileBaseOffset, localOffset);
-
-      SmallVector<OpFoldResult> scratchOffsets(rank, b.getIndexAttr(0));
-      scratchOffsets[0] = scratchOffset;
-      SmallVector<OpFoldResult> scratchSizes;
-      for (int64_t i = 0; i < rank; ++i) {
-        scratchSizes.push_back(b.getIndexAttr(tileShape[i]));
+    // Step 2b: Add conditional scratch write inside the producer body
+    // before each write_slice to the consumed result's ref arg.
+    Value resultRefArg = producerOp.getRegionRefArgs()[resultIdx];
+    SmallVector<PCF::WriteSliceOp> producerSlices;
+    for (Operation *user : resultRefArg.getUsers()) {
+      if (auto writeSlice = dyn_cast<PCF::WriteSliceOp>(user)) {
+        producerSlices.push_back(writeSlice);
       }
-      SmallVector<OpFoldResult> scratchStrides(rank, b.getIndexAttr(1));
-
-      PCF::WriteSliceOp::create(b, loc, partialTile, scratch, scratchOffsets,
-                                scratchSizes, scratchStrides);
     }
 
-    // Else branch: non-split path (sole contributor, write directly).
-    {
-      b.setInsertionPointToStart(&outerIf.getElseRegion().front());
-      cloneWritebackBody(b, loc, recombineOp.getWriteback(), partialTile);
-    }
-
-    // Step 3: Workgroup barrier after scratch writes.
-    b.setInsertionPointAfter(outerIf);
-    gpu::BarrierOp::create(b, loc, gpu::AddressSpace::Workgroup);
-
-    // Step 4: Conditional atomic + recombine (only for split tiles).
-    auto recombineIf = scf::IfOp::create(
-        b, loc, /*resultTypes=*/TypeRange{}, isSplit,
-        /*withElseRegion=*/false);
-
-    {
-      b.setInsertionPointToStart(&recombineIf.getThenRegion().front());
-
-      IndexType indexType = b.getIndexType();
-      Value threadId =
-          gpu::ThreadIdOp::create(b, loc, indexType, gpu::Dimension::x);
-      Value isThread0 = arith::CmpIOp::create(
-          b, loc, arith::CmpIPredicate::eq, threadId, c0);
-
-      auto thread0If = scf::IfOp::create(
-          b, loc, /*resultTypes=*/TypeRange{}, isThread0,
+    for (PCF::WriteSliceOp writeSlice : producerSlices) {
+      // Use plain OpBuilder inside the producer body to avoid greedy
+      // driver listener issues with ops in existing regions.
+      OpBuilder bInner(writeSlice);
+      auto scratchIf = scf::IfOp::create(
+          bInner, loc, TypeRange{}, isSplit,
           /*withElseRegion=*/false);
 
       {
-        b.setInsertionPointToStart(&thread0If.getThenRegion().front());
+        OpBuilder::InsertionGuard ifGuard(bInner);
+        bInner.setInsertionPointToStart(
+            &scratchIf.getThenRegion().front());
+
+        SmallVector<OpFoldResult> scratchOffsets(rank,
+                                                 bInner.getIndexAttr(0));
+        scratchOffsets[0] = scratchWriteOffset;
+        SmallVector<OpFoldResult> scratchSizes;
+        for (int64_t i = 0; i < rank; ++i) {
+          scratchSizes.push_back(bInner.getIndexAttr(tileShape[i]));
+        }
+        SmallVector<OpFoldResult> scratchStrides(rank,
+                                                 bInner.getIndexAttr(1));
+
+        PCF::WriteSliceOp::create(bInner, loc, writeSlice.getSource(),
+                                  scratch, scratchOffsets, scratchSizes,
+                                  scratchStrides);
+      }
+    }
+
+    // Step 3: Create post-producer control flow at the recombine's
+    // location.  Use plain OpBuilder for all newly-created regions.
+    b.setInsertionPoint(recombineOp);
+
+    auto outerIf = scf::IfOp::create(
+        b, loc, TypeRange{}, isSplit, /*withElseRegion=*/true);
+
+    // Then branch: split path (atomic + recombine + writeback).
+    {
+      OpBuilder thenB(b.getContext());
+      thenB.setInsertionPointToStart(
+          &outerIf.getThenRegion().front());
+
+      IndexType indexType = thenB.getIndexType();
+      Value threadId = gpu::ThreadIdOp::create(
+          thenB, loc, indexType, gpu::Dimension::x);
+      Value isThread0 = arith::CmpIOp::create(
+          thenB, loc, arith::CmpIPredicate::eq, threadId, c0);
+
+      auto thread0If = scf::IfOp::create(
+          thenB, loc, TypeRange{}, isThread0,
+          /*withElseRegion=*/false);
+
+      {
+        thenB.setInsertionPointToStart(
+            &thread0If.getThenRegion().front());
 
         // Release fence before atomic.
-        PCF::FenceOp::create(b, loc, /*is_release=*/true,
+        PCF::FenceOp::create(thenB, loc, /*is_release=*/true,
                              ValueRange{scratch});
 
         // Get memref view of counter for atomic operation.
         int64_t counterSize = counterType.getShape()[0];
         auto counterMemrefType = MemRefType::get(
-            {counterSize}, b.getI32Type(),
-            StridedLayoutAttr::get(b.getContext(), ShapedType::kDynamic,
+            {counterSize}, thenB.getI32Type(),
+            StridedLayoutAttr::get(thenB.getContext(),
+                                   ShapedType::kDynamic,
                                    {ShapedType::kDynamic}));
 
-        SmallVector<OpFoldResult> counterOffsets = {b.getIndexAttr(0)};
+        SmallVector<OpFoldResult> counterOffsets = {
+            thenB.getIndexAttr(0)};
         SmallVector<OpFoldResult> counterSizes = {
-            b.getIndexAttr(counterSize)};
-        SmallVector<OpFoldResult> counterStrides = {b.getIndexAttr(1)};
+            thenB.getIndexAttr(counterSize)};
+        SmallVector<OpFoldResult> counterStrides = {
+            thenB.getIndexAttr(1)};
 
         Value counterMemref = PCF::GetMemrefOp::create(
-            b, loc, counterMemrefType, counter, counterOffsets, counterSizes,
-            counterStrides);
+            thenB, loc, counterMemrefType, counter, counterOffsets,
+            counterSizes, counterStrides);
 
         // Atomic increment.
-        Value c1I32 =
-            arith::ConstantOp::create(b, loc, b.getI32IntegerAttr(1));
+        Value c1I32 = arith::ConstantOp::create(
+            thenB, loc, thenB.getI32IntegerAttr(1));
         Value oldVal = memref::AtomicRMWOp::create(
-            b, loc, arith::AtomicRMWKind::addi, c1I32, counterMemref,
-            ValueRange{counterIndex});
+            thenB, loc, arith::AtomicRMWKind::addi, c1I32,
+            counterMemref, ValueRange{counterIndex});
 
         // Check if we are the last contributor.
-        Value oldIdx =
-            arith::IndexCastOp::create(b, loc, indexType, oldVal);
-        Value expectedLast = arith::SubIOp::create(b, loc, numInGroup, c1);
+        Value oldIdx = arith::IndexCastOp::create(
+            thenB, loc, indexType, oldVal);
+        Value expectedLast =
+            arith::SubIOp::create(thenB, loc, numInGroup, c1);
         Value isLast = arith::CmpIOp::create(
-            b, loc, arith::CmpIPredicate::eq, oldIdx, expectedLast);
+            thenB, loc, arith::CmpIPredicate::eq, oldIdx, expectedLast);
 
         // If last contributor: recombine and write back.
         auto lastContribIf = scf::IfOp::create(
-            b, loc, /*resultTypes=*/TypeRange{}, isLast,
+            thenB, loc, TypeRange{}, isLast,
             /*withElseRegion=*/false);
 
         {
-          b.setInsertionPointToStart(
+          thenB.setInsertionPointToStart(
               &lastContribIf.getThenRegion().front());
 
           // Acquire fence.
-          PCF::FenceOp::create(b, loc, /*is_release=*/false,
+          PCF::FenceOp::create(thenB, loc, /*is_release=*/false,
                                ValueRange{scratch});
 
-          // Read the first partial tile from scratch (ordinal 0),
-          // offset by the per-tile base.
-          SmallVector<OpFoldResult> readOffsets(rank, b.getIndexAttr(0));
+          // Read the first partial tile from scratch (ordinal 0).
+          SmallVector<OpFoldResult> readOffsets(rank,
+                                               thenB.getIndexAttr(0));
           readOffsets[0] = tileBaseOffset;
           SmallVector<OpFoldResult> readSizes;
           for (int64_t i = 0; i < rank; ++i) {
-            readSizes.push_back(b.getIndexAttr(tileShape[i]));
+            readSizes.push_back(thenB.getIndexAttr(tileShape[i]));
           }
-          SmallVector<OpFoldResult> readStrides(rank, b.getIndexAttr(1));
+          SmallVector<OpFoldResult> readStrides(rank,
+                                                thenB.getIndexAttr(1));
 
           Value accInit = PCF::ReadSliceOp::create(
-              b, loc, partialTileType, scratch, readOffsets, readSizes,
-              readStrides);
+              thenB, loc, partialTileType, scratch, readOffsets,
+              readSizes, readStrides);
 
           // Build the accumulation loop.
           Value accumulated = buildAccumulationLoop(
-              b, loc, c1, numInGroup, scratch, accInit, tileBaseOffset,
-              partialTileType, rank, tileShape, readSizes, readStrides,
-              recombineOp.getCombiner());
+              thenB, loc, c1, numInGroup, scratch, accInit,
+              tileBaseOffset, partialTileType, rank, tileShape,
+              readSizes, readStrides, recombineOp.getCombiner());
 
-          // Clone writeback body with accumulated result (first copy).
-          cloneWritebackBody(b, loc, recombineOp.getWriteback(),
-                             accumulated);
+          // Clone writeback body (first copy).
+          cloneWritebackBody(thenB, loc,
+                             recombineOp.getWriteback(), accumulated);
         }
       }
     }
 
-    // Step 5: Final workgroup barrier.
-    b.setInsertionPointAfter(recombineIf);
+    // Else branch: non-split path (direct writeback).
+    {
+      OpBuilder elseB(b.getContext());
+      elseB.setInsertionPointToStart(
+          &outerIf.getElseRegion().front());
+      cloneWritebackBody(elseB, loc,
+                         recombineOp.getWriteback(), partialTile);
+    }
+
+    // Step 4: Final workgroup barrier.
+    b.setInsertionPointAfter(outerIf);
     gpu::BarrierOp::create(b, loc, gpu::AddressSpace::Workgroup);
 
-    // Erase the original op.
-    recombineOp->erase();
-  }
+    // Erase the original recombine op.
+    rewriter.eraseOp(recombineOp);
 
-  return success();
-}
+    return success();
+  }
+};
 
 void FuseConsumersPass::runOnOperation() {
-  // Decompose stream_k_recombine ops first, before greedy fusion.
-  // This runs as a simple walk to avoid PatternRewriter listener issues.
-  if (failed(decomposeStreamKRecombineOps(getOperation()))) {
-    return signalPassFailure();
-  }
-
   RewritePatternSet patterns(&getContext());
   patterns.add<FuseIntoGenericOp, FuseIntoLoopOp>(&getContext());
   patterns.add<FuseExtractSliceIntoLoopOp, FuseExtractSliceIntoGenericOp>(
       &getContext());
+  patterns.add<FuseStreamKRecombineIntoGeneric>(&getContext());
   populatePCFDropUnusedResultPatterns(patterns);
   if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
     return signalPassFailure();
@@ -1356,6 +1419,10 @@ void fuseTilableConsumer(RewriterBase &rewriter, PCF::LoopOp producerOp,
                          TilingInterface target,
                          const ConsumerFusionParams &params) {
   return fuseTilableConsumerImpl(rewriter, producerOp, target, params);
+}
+
+void populateStreamKRecombineFusionPatterns(RewritePatternSet &patterns) {
+  patterns.add<FuseStreamKRecombineIntoGeneric>(patterns.getContext());
 }
 
 } // namespace mlir::iree_compiler::IREE::PCF

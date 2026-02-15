@@ -186,6 +186,12 @@ FailureOr<PCF::WriteSliceOp>
 composeWriteSliceWithParallelInsert(RewriterBase &rewriter,
                                     PCF::WriteSliceOp writeSliceOp);
 
+// Populates patterns to fuse pcf.stream_k_recombine into its producer
+// pcf.generic.  The fusion sets sync_on_return on the producer, adds
+// conditional scratch writes inside the producer body, and emits the
+// atomic/recombine/writeback control flow after the producer.
+void populateStreamKRecombineFusionPatterns(RewritePatternSet &patterns);
+
 /// Folds an scf.forall containing a pcf.loop into a single pcf.generic.
 ///
 /// Validates structural requirements:
