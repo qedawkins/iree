@@ -85,6 +85,7 @@ iree_cc_library(
     "LLVMGPUPackSharedMemoryAlloc.cpp"
     "LLVMGPUPromoteAccumulatorToWorkgroup.cpp"
     "LLVMGPUAggregateScratchAllocations.cpp"
+    "LLVMGPUEraseScratchAnchors.cpp"
     "LLVMGPUSelectLoweringStrategy.cpp"
     "LLVMGPUStreamKTile.cpp"
     "LLVMGPUTensorCoreVectorization.cpp"

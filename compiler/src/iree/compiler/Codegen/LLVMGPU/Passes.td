@@ -172,6 +172,21 @@ def LLVMGPUAggregateScratchAllocationsPass :
   ];
 }
 
+def LLVMGPUEraseScratchAnchorsPass :
+    InterfacePass<"iree-llvmgpu-erase-scratch-anchors",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Erase dead dispatch.tensor.scratch anchor ops before bufferization.";
+  let description = [{
+    The host-side FormDispatchScratchAllocations pass inserts a
+    dispatch.tensor.scratch anchor op to retain the scratch binding. On the
+    device side, pcf.alloc() ops independently allocate scratch memory, and the
+    AggregateScratchAllocations pass creates the actual scratch binding later.
+    The anchor op has no data-flow users and must be erased (along with its
+    dead producer chain) before bufferization, which cannot handle the
+    dispatch.tensor type.
+  }];
+}
+
 //------------------------------------------------------------------------------
 // Test Passes
 //------------------------------------------------------------------------------

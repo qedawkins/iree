@@ -615,6 +615,11 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(
       createLLVMGPUPromoteAccumulatorToWorkgroupPass());
 
+  // Erase dead dispatch.tensor.scratch anchors before bufferization. The
+  // host-side inserts these to retain the scratch binding, but on the device
+  // side the actual scratch binding is created by AggregateScratchAllocations.
+  funcPassManager.addPass(createLLVMGPUEraseScratchAnchorsPass());
+
   // Step 7. Bufferize.
   addGPUBufferizePasses(funcPassManager);
 
