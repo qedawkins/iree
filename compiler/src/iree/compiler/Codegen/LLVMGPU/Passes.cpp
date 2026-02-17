@@ -576,6 +576,14 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
   funcPassManager.addPass(IREE::GPU::createCombineBarrierRegionsPass());
 
+  // Convert scf.forall with GPU thread mapping to nested pcf.generic
+  // ops so that consumer fusion patterns can target them.  This runs
+  // BEFORE vectorization so that stream-K decomposition produces
+  // tensor-level ops that subsequent vectorization can lower.
+  funcPassManager.addPass(IREE::GPU::createConvertForallToGenericNestGPUPass());
+  // Greedy consumer fusion for pcf.generic/loop ops.
+  funcPassManager.addPass(createGPUFuseConsumersPass());
+
   // Step 6. Lower special ops and vectorize.
   funcPassManager.addPass(
       IREE::LinalgExt::createVectorizeIREELinalgExtOpsPass());
@@ -585,13 +593,6 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
                             /*foldIdentitySlices=*/true);
   funcPassManager.addPass(createCleanupBufferAllocViewPass());
   funcPassManager.addPass(createGPUCombineValueBarriersPass());
-
-  // Convert scf.forall with GPU thread mapping to nested pcf.generic
-  // ops so that consumer fusion patterns can target them.
-  funcPassManager.addPass(
-      IREE::GPU::createConvertForallToGenericNestGPUPass());
-  // Greedy consumer fusion for pcf.generic/loop ops.
-  funcPassManager.addPass(createGPUFuseConsumersPass());
 
   // Step 6.5. Lower stream-K recombination AFTER thread/MMA tiling but
   // BEFORE bufferization. ResolveTokens lowers pcf.token operations.

@@ -1,8 +1,7 @@
-// RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx1150 \
+// RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx942 \
 // RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant( \
 // RUN:     builtin.module(func.func(iree-llvmgpu-lower-executable-target)))))" \
-// RUN:   --mlir-print-ir-after=iree-codegen-gpu-fuse-consumers %s 2>&1 | \
-// RUN: FileCheck %s
+// RUN:   %s | FileCheck %s
 
 // ============================================================================
 // Full pipeline test for Stream-K matmul: tiling -> forall-to-generic-nest
@@ -25,9 +24,12 @@
 ]>
 
 #stream_k_config = #iree_gpu.lowering_config<{
-  workgroup = [64, 64, 0],
-  streamed_reduction = [0, 0, 64],
-  thread = [8, 4]
+  mma_kind = #iree_gpu.mma_layout<MFMA_F32_16x16x4_F32>,
+  promote_operands = [0, 1],
+  reduction = [0, 0, 16],
+  streamed_reduction = [0, 0, 16],
+  subgroup = [2, 4, 0],
+  workgroup = [64, 128, 0]
 }>
 
 hal.executable public @matmul_stream_k_full_pipeline {
@@ -41,7 +43,7 @@ hal.executable public @matmul_stream_k_full_pipeline {
     builtin.module {
       func.func @matmul()
           attributes {translation_info = #iree_codegen.translation_info<
-              pipeline = LLVMGPUTileAndFuse workgroup_size = [128, 1, 1]
+              pipeline = LLVMGPUTileAndFuse workgroup_size = [256, 1, 1]
               subgroup_size = 64>} {
         %cst = arith.constant 0.000000e+00 : f32
         %c0 = arith.constant 0 : index
@@ -78,63 +80,66 @@ hal.executable public @matmul_stream_k_full_pipeline {
   }
 }
 
-// No pcf.stream_k_recombine should remain after fusion.
+// Verify the fully lowered pipeline output after bufferization.
 // CHECK-LABEL: func @matmul
 
 // Workgroup scope with scratch and counter allocations.
 //       CHECK:   pcf.generic scope(#iree_codegen.workgroup_scope<linearize>)
 //       CHECK:     initialize
-//       CHECK:       pcf.alloc() : !pcf.sref<{{.+}}, #iree_codegen.workgroup_scope
-//       CHECK:       pcf.alloc() : !pcf.sref<4xi32, #iree_codegen.workgroup_scope
+//       CHECK:       pcf.alloc() : !pcf.sref<2048x128xf32, #iree_codegen.workgroup_scope
+//       CHECK:       pcf.alloc() : !pcf.sref<2xi32, #iree_codegen.workgroup_scope
 //       CHECK:     execute
 
-// Producer generic with sync_on_return=true.
+// Producer generic with sync_on_return=true containing MFMA compute.
 //       CHECK:     pcf.generic sync true scope(#iree_gpu.subgroup_scope)
 //       CHECK:       pcf.generic scope(#iree_gpu.lane_scope)
 
-// Distributed compute (matmul via vector.contract).
-//       CHECK:           vector.contract
+// MFMA intrinsics (not vector.contract).
+//       CHECK:           amdgpu.mfma 16x16x4 {{.*}} : f32, f32, vector<4xf32>
+//   CHECK-NOT:           vector.contract
+//
+// Collapse decomposition inside producer: scf.for loops with collapse_shape
+// and TWO scf.if guards (isSplit -> scratch, isNotSplit -> output sref).
+//       CHECK:           scf.for
+//       CHECK:             scf.for
+//       CHECK:               memref.collapse_shape
+//       CHECK:               scf.if
+//       CHECK:                 pcf.write_slice {{.*}} into %arg0
+//       CHECK:               scf.if
+//       CHECK:                 pcf.write_slice {{.*}} into %ref
 
-// Distributed scratch write inside producer (conditional on isSplit).
-//       CHECK:           scf.if
-//       CHECK:             pcf.write_slice {{.*}} into %arg0
-//       CHECK:           pcf.write_slice {{.*}} into %ref
-
-// Broadcast dword allocation for atomic result.
-//       CHECK:     pcf.alloc() : !pcf.sref<1xi32
-
-// Outer split condition.
+// Outer split condition for post-k-loop phases.
 //       CHECK:     scf.if
-// Thread-0 only: atomic increment + store to broadcast dword.
+
+// ── Phase 2: Barrier + atomic + broadcast ──
+//       CHECK:       gpu.barrier memfence [#gpu.address_space<global>]
 //       CHECK:       gpu.thread_id x
-//       CHECK:       scf.if
-//       CHECK:         pcf.fence release
-//       CHECK:         memref.atomic_rmw addi
-//       CHECK:         memref.store
-//       CHECK:       }
-
-// Barrier: broadcast dword visible to all threads.
-//       CHECK:       gpu.barrier
-
-// All threads: load broadcast, check isLast.
-//       CHECK:       memref.load
-//       CHECK:       arith.index_cast
 //       CHECK:       arith.cmpi eq
-
-// All threads (if isLast): acquire fence + accumulate + writeback.
 //       CHECK:       scf.if
-//       CHECK:         pcf.fence acquire
-//  Accumulation loop: read partials from scratch and combine.
-//       CHECK:         scf.for
-//       CHECK:           linalg.generic
-//       CHECK:             arith.addf
-//  First writeback.
-//       CHECK:         pcf.write_slice {{.*}} into %ref
-//       CHECK:       }
+//       CHECK:         memref.generic_atomic_rmw
+//       CHECK:         arith.remui
+//       CHECK:         memref.store
+//       CHECK:       gpu.barrier memfence [#gpu.address_space<workgroup>, #gpu.address_space<global>]
+//       CHECK:       memref.load
 
-// Else: non-split direct writeback.
+// ── Phase 3: Distributed recombine (if last contributor) ──
+//       CHECK:       arith.cmpi eq
+//       CHECK:       scf.if
+//       CHECK:         pcf.generic scope(#iree_gpu.subgroup_scope)
+//       CHECK:           pcf.generic scope(#iree_gpu.lane_scope)
+//       CHECK:             scf.for
+//       CHECK:               pcf.get_memref %arg0
+//       CHECK:               scf.for
+//       CHECK:                 pcf.get_memref %arg0
+//       CHECK:                 arith.addf
+//       CHECK:               pcf.write_slice {{.*}} into %ref
+
+// ── Phase 4: Distributed non-split writeback (else branch) ──
 //       CHECK:     } else {
-//       CHECK:       pcf.write_slice {{.*}} into %ref
+//       CHECK:       pcf.generic scope(#iree_gpu.subgroup_scope)
+//       CHECK:         pcf.generic scope(#iree_gpu.lane_scope)
+//       CHECK:           scf.for
+//       CHECK:             pcf.write_slice {{.*}} into %ref
 //       CHECK:     }
 
 // Final barrier.

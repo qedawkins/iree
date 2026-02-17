@@ -76,55 +76,57 @@ func.func @fuse_stream_k_recombine(
 //      CHECK: pcf.write_slice %{{.*}} into %{{.*}}
 //      CHECK: pcf.return
 
-// Broadcast dword allocation for atomic result broadcast.
+// Broadcast dword allocation.
 //      CHECK: pcf.alloc() : !pcf.sref<1xi32
 
 // Step 3: Post-producer conditional.
 //      CHECK: scf.if %[[IS_SPLIT]] {
 
-// Get memref view of broadcast dword.
+// ── Phase 1: Distributed scratch write ──
+//      CHECK:   pcf.generic scope(#iree_gpu.subgroup_scope)
+//      CHECK:     pcf.generic scope(#iree_gpu.lane_scope)
+//      CHECK:       scf.for
+//      CHECK:         tensor.extract_slice
+//      CHECK:         pcf.write_slice {{.*}} into %arg2
+//      CHECK:       pcf.return
+//      CHECK:     pcf.return
+
+// ── Phase 2: Barrier + atomic + broadcast ──
+//      CHECK:   gpu.barrier memfence [#gpu.address_space<global>]
 //      CHECK:   pcf.get_memref
-
-// Thread-0 does the atomic and stores result to broadcast dword.
-//      CHECK:   %[[TID:.*]] = gpu.thread_id x
-//      CHECK:   %[[IS_T0:.*]] = arith.cmpi eq, %[[TID]]
-//      CHECK:   scf.if %[[IS_T0]] {
-// Release fence.
-//      CHECK:     pcf.fence release %{{.*}}
-// Atomic increment.
-//      CHECK:     pcf.get_memref
-//      CHECK:     %[[OLD:.*]] = memref.atomic_rmw addi
-// Store to broadcast dword.
-//      CHECK:     memref.store %[[OLD]]
-//      CHECK:   }
-
-// Barrier: all threads sync after thread-0 writes broadcast dword.
-//      CHECK:   gpu.barrier memfence [#gpu.address_space<workgroup>]
-
-// ALL threads load broadcast result and check last contributor.
-//      CHECK:   %[[BCAST:.*]] = memref.load
-//      CHECK:   %[[OLD_IDX:.*]] = arith.index_cast %[[BCAST]]
-//      CHECK:   arith.cmpi eq, %[[OLD_IDX]]
+//      CHECK:   gpu.thread_id x
+//      CHECK:   arith.cmpi eq
 //      CHECK:   scf.if
+//      CHECK:     memref.generic_atomic_rmw
+//      CHECK:     arith.remui
+//      CHECK:     memref.store
+//      CHECK:   gpu.barrier memfence [#gpu.address_space<workgroup>, #gpu.address_space<global>]
+//      CHECK:   memref.load
 
-// ALL threads: acquire fence + recombine + writeback.
-// Acquire fence.
-//      CHECK:     pcf.fence acquire %{{.*}}
-// Read first partial tile.
-//      CHECK:     pcf.read_slice
-// Accumulation loop.
-//      CHECK:     scf.for
-//      CHECK:       pcf.read_slice
-//      CHECK:       linalg.generic
-//      CHECK:         arith.addf
-//      CHECK:         linalg.yield
-//      CHECK:       scf.yield
-// First writeback.
-//      CHECK:     pcf.write_slice
-//      CHECK:   }
+// ── Phase 3: Distributed recombine (if last contributor) ──
+//      CHECK:   arith.cmpi eq
+//      CHECK:   scf.if
+//      CHECK:     pcf.generic scope(#iree_gpu.subgroup_scope)
+//      CHECK:       pcf.generic scope(#iree_gpu.lane_scope)
+//      CHECK:         scf.for
+//      CHECK:           pcf.read_slice {{.*}} : !pcf.sref<1024x64xf32
+//      CHECK:           scf.for
+//      CHECK:             pcf.read_slice
+//      CHECK:             arith.addf
+//      CHECK:             scf.yield
+//      CHECK:           pcf.write_slice {{.*}} into %arg1
+//      CHECK:         pcf.return
+//      CHECK:       pcf.return
+
+// ── Phase 4: Distributed non-split writeback (else branch) ──
 //      CHECK: } else {
-// Second writeback (non-split path).
-//      CHECK:   pcf.write_slice
+//      CHECK:   pcf.generic scope(#iree_gpu.subgroup_scope)
+//      CHECK:     pcf.generic scope(#iree_gpu.lane_scope)
+//      CHECK:       scf.for
+//      CHECK:         tensor.extract_slice
+//      CHECK:         pcf.write_slice {{.*}} into %arg1
+//      CHECK:       pcf.return
+//      CHECK:     pcf.return
 //      CHECK: }
 
 // Step 4: Final workgroup barrier.

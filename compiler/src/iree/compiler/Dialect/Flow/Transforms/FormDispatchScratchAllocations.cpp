@@ -155,13 +155,16 @@ struct FormDispatchScratchAllocationsPass final
                               entryPointRef, dispatchOp.getWorkload())
                               .getResult();
 
-      // Create a dynamic scratch tensor using flow.tensor.empty so that the
-      // Flow→Stream conversion can handle it (tensor.empty would be illegal).
+      // Create a zero-filled dynamic scratch tensor.  The scratch buffer
+      // contains atomic counters that must start at zero for correct
+      // last-contributor detection in stream-K recombination.  Using splat(0)
+      // instead of tensor.empty guarantees defined initial contents.
       RankedTensorType scratchTensorType =
           RankedTensorType::get({ShapedType::kDynamic}, builder.getI8Type());
+      Value zero = arith::ConstantIntOp::create(builder, loc, 0, 8);
       Value scratchTensor =
-          IREE::Flow::TensorEmptyOp::create(builder, loc, scratchTensorType,
-                                            ValueRange{scratchSize})
+          IREE::Flow::TensorSplatOp::create(builder, loc, scratchTensorType,
+                                            zero, ValueRange{scratchSize})
               .getResult();
 
       // The number of original dispatch arguments determines where to insert

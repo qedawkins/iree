@@ -1,12 +1,14 @@
 // RUN: iree-opt --split-input-file --iree-pcf-fuse-consumers %s | FileCheck %s
 
-// Tests that FuseStreamKRecombineIntoGeneric handles the case where
-// numInGroup and contributorOrdinal are computed AFTER the producer
-// pcf.generic.  The pattern must hoist these computations (and their
-// transitive dependencies) before the producer in order to fire.
+// Tests that FuseStreamKRecombineIntoGeneric decomposes stream_k_recombine
+// into a fully distributed 4-phase pattern:
+//   Phase 1: Distributed scratch write via pcf.generic scope nests.
+//   Phase 2: Barrier + thread-0 atomic + broadcast dword.
+//   Phase 3: Distributed recombine from scratch (if last contributor).
+//   Phase 4: Distributed writeback (non-split path).
 //
-// The key arithmetic uses function arguments (%tile_idx, %tiles_per_wg, %id)
-// to prevent constant folding from collapsing the hoisted ops.
+// Also verifies operand hoisting: numInGroup and contributorOrdinal are
+// computed AFTER the producer but must be hoisted before it.
 
 #wg = #iree_codegen.workgroup_scope<linearize>
 
@@ -35,10 +37,7 @@ func.func @fuse_recombine_with_hoisting(
     pcf.return
   }
 
-  // ---- Operands that are defined AFTER the producer ----
-  // These mimic the real pipeline where numInGroup and
-  // contributorOrdinal are computed from tile_idx after the
-  // inner pcf.generic returns.
+  // Operands defined AFTER the producer (must be hoisted).
   %hi = arith.addi %tile_idx, %c3 : index
   %first_wg = arith.divui %tile_idx, %tiles_per_wg : index
   %last_wg = arith.divui %hi, %tiles_per_wg : index
@@ -46,7 +45,6 @@ func.func @fuse_recombine_with_hoisting(
   %num_in_group = arith.addi %span, %c1 : index
   %ordinal = arith.subi %id, %first_wg : index
 
-  // Scratch offset for this tile (must also be hoisted).
   %c64 = arith.constant 64 : index
   %scratch_offset = arith.muli %ordinal, %c64 : index
 
@@ -75,20 +73,12 @@ func.func @fuse_recombine_with_hoisting(
   return
 }
 
-// Verify: hoisted arithmetic BEFORE the producer generic.
 // CHECK-LABEL: @fuse_recombine_with_hoisting
 
-// Hoisted numInGroup and ordinal computations.
-//       CHECK:   arith.addi %arg4
-//       CHECK:   arith.divui
-//       CHECK:   arith.divui
+// Hoisted operands and split condition.
 //       CHECK:   arith.subi
-//  CHECK-DAG:   %[[NIG:.*]] = arith.addi
-//  CHECK-DAG:   %[[ORD:.*]] = arith.subi %arg6
-
-// Split condition.
+//       CHECK:   %[[NIG:.*]] = arith.addi %{{.*}}, %c1
 //       CHECK:   %[[IS_SPLIT:.*]] = arith.cmpi ne, %[[NIG]]
-//       CHECK-SAME: : index
 
 // Producer generic has sync_on_return=true.
 //       CHECK:   pcf.generic sync true scope
@@ -102,44 +92,56 @@ func.func @fuse_recombine_with_hoisting(
 //       CHECK:     pcf.write_slice {{.*}} into %ref
 //       CHECK:     pcf.return
 
-// Broadcast dword allocation for atomic result broadcast.
+// Broadcast dword allocation.
 //       CHECK:   pcf.alloc() : !pcf.sref<1xi32
 
-// Post-producer conditional: split path.
+// Post-producer: split vs non-split branch.
 //       CHECK:   scf.if %[[IS_SPLIT]] {
 
-// Thread-0 predicated atomic with broadcast.
+// ── Phase 1: Distributed scratch write ──
+//       CHECK:     pcf.generic scope(#iree_gpu.subgroup_scope)
+//       CHECK:       pcf.generic scope(#iree_gpu.lane_scope)
+//       CHECK:         scf.for
+//       CHECK:           tensor.extract_slice
+//       CHECK:           pcf.write_slice {{.*}} into %arg2
+//       CHECK:         pcf.return
+//       CHECK:       pcf.return
+
+// ── Phase 2: Barrier + atomic + broadcast ──
+//       CHECK:     gpu.barrier memfence [#gpu.address_space<global>]
 //       CHECK:     gpu.thread_id x
 //       CHECK:     arith.cmpi eq
 //       CHECK:     scf.if
-//       CHECK:       pcf.fence release
-//       CHECK:       memref.atomic_rmw addi
+//       CHECK:       memref.generic_atomic_rmw
+//       CHECK:       arith.remui
 //       CHECK:       memref.store
-
-// Barrier: all threads sync after broadcast dword write.
-//       CHECK:     gpu.barrier memfence [#gpu.address_space<workgroup>]
-
-// ALL threads load broadcast result and check last contributor.
+//       CHECK:     gpu.barrier memfence [#gpu.address_space<workgroup>, #gpu.address_space<global>]
 //       CHECK:     memref.load
-//       CHECK:     arith.index_cast
+
+// ── Phase 3: Distributed recombine (if last contributor) ──
 //       CHECK:     arith.cmpi eq
-
-// ALL threads: if last, acquire fence + recombine + writeback.
 //       CHECK:     scf.if
-//       CHECK:       pcf.fence acquire
-//       CHECK:       pcf.read_slice
-//       CHECK:       scf.for
-//       CHECK:         pcf.read_slice
-//       CHECK:         linalg.generic
-//       CHECK:           arith.addf
-//       CHECK:         scf.yield
+//       CHECK:       pcf.generic scope(#iree_gpu.subgroup_scope)
+//       CHECK:         pcf.generic scope(#iree_gpu.lane_scope)
+//       CHECK:           scf.for
+//       CHECK:             pcf.read_slice {{.*}} : !pcf.sref<1024x64xf32
+//       CHECK:             scf.for
+//       CHECK:               pcf.read_slice
+//       CHECK:               arith.addf
+//       CHECK:               scf.yield
+//       CHECK:             pcf.write_slice {{.*}} into %arg1
+//       CHECK:           pcf.return
+//       CHECK:         pcf.return
 
-// Writeback.
-//       CHECK:       pcf.write_slice {{.*}} into %arg1
-
-// Else branch: non-split path (direct writeback).
+// ── Phase 4: Distributed non-split writeback (else branch) ──
 //       CHECK:   } else {
-//       CHECK:     pcf.write_slice {{.*}} into %arg1
+//       CHECK:     pcf.generic scope(#iree_gpu.subgroup_scope)
+//       CHECK:       pcf.generic scope(#iree_gpu.lane_scope)
+//       CHECK:         scf.for
+//       CHECK:           tensor.extract_slice
+//       CHECK:           pcf.write_slice {{.*}} into %arg1
+//       CHECK:         pcf.return
+//       CHECK:       pcf.return
 //       CHECK:   }
 
 // Final workgroup barrier.

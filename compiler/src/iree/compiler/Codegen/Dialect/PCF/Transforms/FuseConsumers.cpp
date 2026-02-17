@@ -4,6 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCF.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
@@ -216,111 +217,112 @@ struct FuseCollapseShapeIntoLoopOp final
   }
 };
 
-/// Clones the body of the writeback region into the current insertion point.
-/// The writeback region takes a single block argument (the final tile) and
-/// ends with pcf.yield. This helper clones everything except the terminator,
-/// replacing the block argument with |tileValue|.
-static void cloneWritebackBody(OpBuilder &b, Location loc,
-                               Region &writebackRegion, Value tileValue) {
-  Block &srcBlock = writebackRegion.front();
-  IRMapping mapping;
-  mapping.map(srcBlock.getArgument(0), tileValue);
-  for (Operation &op : srcBlock.without_terminator()) {
-    b.clone(op, mapping);
-  }
-}
-
-/// Decomposes `pcf.stream_k_recombine` into distributed control flow:
+/// Creates a nested pcf.generic scope nest with subgroup (outer) + lane
+/// (inner) scopes.  Returns the linearized thread ID and total worker count.
+/// The builder's insertion point is left inside the innermost scope body.
+/// The caller is responsible for creating pcf.return terminators.
 ///
-/// 1. Conditional scratch write (if tile is split among workgroups).
-/// 2. Workgroup barrier for scratch visibility.
-/// 3. Conditional control flow (only for split tiles):
-///    a. Thread-0 only: release fence, atomic increment, store result to
-///       broadcast dword (workgroup shared memory).
-///    b. Workgroup barrier for broadcast dword visibility.
-///    c. ALL threads: load broadcast dword, check last-contributor.
-///    d. ALL threads (if last): acquire fence, read partial tiles,
-///       accumulate via combiner, first copy of writeback.
-/// 4. Else branch: second copy of writeback (non-split path).
-/// 5. Final workgroup barrier.
-/// Builds the accumulation loop for stream-k recombination.
-/// Uses a plain OpBuilder to avoid greedy driver listener issues when
-/// building ops inside newly-created regions.
-static Value buildAccumulationLoop(
-    OpBuilder &b, Location loc, Value c1, Value numInGroup, Value scratch,
-    Value accInit, Value tileBaseOffset, RankedTensorType partialTileType,
-    int64_t rank, ArrayRef<int64_t> tileShape,
-    ArrayRef<OpFoldResult> readSizes, ArrayRef<OpFoldResult> readStrides,
-    Region &combinerRegion) {
-  Value tileHeight = arith::ConstantIndexOp::create(b, loc, tileShape[0]);
+/// Structure:
+///   pcf.generic scope(#iree_gpu.subgroup_scope) execute[%sg_id, %sg_count] {
+///     pcf.generic scope(#iree_gpu.lane_scope) execute[%lane_id, %lane_count] {
+///       // builder positioned here
+///     }
+///   }
+struct DistributedScopeNest {
+  Value tid;
+  Value totalWorkers;
+  PCF::GenericOp outerGeneric;
+  PCF::GenericOp innerGeneric;
+};
 
-  // Create the for op without a body builder to avoid listener issues.
-  auto accLoop = scf::ForOp::create(
-      b, loc, /*lowerBound=*/c1,
-      /*upperBound=*/numInGroup,
-      /*step=*/c1,
-      /*iterArgs=*/ValueRange{accInit});
+static DistributedScopeNest buildDistributedScopeNest(OpBuilder &b,
+                                                      Location loc) {
+  MLIRContext *ctx = b.getContext();
+  auto subgroupScope =
+      cast<PCF::ScopeAttrInterface>(GPU::SubgroupScopeAttr::get(ctx));
+  auto laneScope = cast<PCF::ScopeAttrInterface>(GPU::LaneScopeAttr::get(ctx));
 
-  // Manually build the loop body.
-  {
-    OpBuilder::InsertionGuard g(b);
-    b.setInsertionPointToStart(accLoop.getBody());
-    Value loopIdx = accLoop.getInductionVar();
-    Value loopAcc = accLoop.getRegionIterArg(0);
+  // Outer: subgroup scope with 1 iterator.
+  // Builder creates block args: [sg_id, sg_count] (0 ref args + 2 index args).
+  auto outerGeneric =
+      PCF::GenericOp::create(b, loc, subgroupScope, /*numIterators=*/1);
+  Value sgId = outerGeneric.getIdArgs()[0];
+  Value sgCount = outerGeneric.getCountArgs()[0];
 
-    // Compute scratch offset for contributor i, including per-tile base.
-    Value localOffset = arith::MulIOp::create(b, loc, loopIdx, tileHeight);
-    Value offset =
-        arith::AddIOp::create(b, loc, tileBaseOffset, localOffset);
+  // Inner: lane scope with 1 iterator, nested inside the outer body.
+  // Builder creates block args: [lane_id, lane_count].
+  OpBuilder innerB(ctx);
+  innerB.setInsertionPointToStart(&outerGeneric.getRegion().front());
+  auto innerGeneric =
+      PCF::GenericOp::create(innerB, loc, laneScope, /*numIterators=*/1);
+  Value laneId = innerGeneric.getIdArgs()[0];
+  Value laneCount = innerGeneric.getCountArgs()[0];
 
-    SmallVector<OpFoldResult> loopReadOffsets(rank, b.getIndexAttr(0));
-    loopReadOffsets[0] = offset;
+  // Linearize: tid = sg_id * lane_count + lane_id.
+  b.setInsertionPointToStart(&innerGeneric.getRegion().front());
+  Value sgTimesLane = arith::MulIOp::create(b, loc, sgId, laneCount);
+  Value tid = arith::AddIOp::create(b, loc, sgTimesLane, laneId);
 
-    Value partialRead = PCF::ReadSliceOp::create(
-        b, loc, partialTileType, scratch, loopReadOffsets, readSizes,
-        readStrides);
+  // total = sg_count * lane_count.
+  Value totalWorkers = arith::MulIOp::create(b, loc, sgCount, laneCount);
 
-    // Build affine maps for the element-wise combiner.
-    SmallVector<AffineMap> indexingMaps;
-    AffineMap identityMap = b.getMultiDimIdentityMap(rank);
-    indexingMaps.push_back(identityMap); // ins: partial.
-    indexingMaps.push_back(identityMap); // outs: accumulator.
+  return {tid, totalWorkers, outerGeneric, innerGeneric};
+}
 
-    SmallVector<utils::IteratorType> iteratorTypes(
-        rank, utils::IteratorType::parallel);
+/// Creates an scf.for loop that distributes |numElements| elements across
+/// threads.  Each thread processes a chunk of elements.  Inside the loop
+/// body, delinearized (row, col) indices are available.
+///
+/// Returns the loop op.  The builder's insertion point is left inside the
+/// loop body after the row/col computation.
+struct PerThreadChunkLoop {
+  scf::ForOp loop;
+  Value elemIdx;
+  Value row;
+  Value col;
+};
 
-    // Apply combiner via linalg.generic.  Pass a body builder so that the
-    // region is created with the correct block arguments.  Without a body
-    // builder, GenericOp::create leaves the region empty, and accessing
-    // getRegion().front() is undefined behaviour (the root cause of the
-    // SEGV-during-print crash).
-    Block &combinerBlock = combinerRegion.front();
-    auto genericOp = linalg::GenericOp::create(
-        b, loc, /*resultTypes=*/partialTileType,
-        /*inputs=*/ValueRange{partialRead},
-        /*outputs=*/ValueRange{loopAcc}, indexingMaps, iteratorTypes,
-        [&](OpBuilder &bodyBuilder, Location bodyLoc,
-            ValueRange blockArgs) {
-          // blockArgs = {in_arg (partial), out_arg (accumulator)}.
-          IRMapping combinerMapping;
-          combinerMapping.map(combinerBlock.getArgument(0), blockArgs[0]);
-          combinerMapping.map(combinerBlock.getArgument(1), blockArgs[1]);
-          for (Operation &op : combinerBlock.without_terminator()) {
-            bodyBuilder.clone(op, combinerMapping);
-          }
-          auto combinerYield =
-              cast<PCF::YieldOp>(combinerBlock.getTerminator());
-          Value yieldVal =
-              combinerMapping.lookupOrDefault(combinerYield.getOperand(0));
-          linalg::YieldOp::create(bodyBuilder, bodyLoc, yieldVal);
-        });
-
-    Value combined = genericOp.getResult(0);
-    scf::YieldOp::create(b, loc, ValueRange{combined});
+static PerThreadChunkLoop buildPerThreadChunkLoop(OpBuilder &b, Location loc,
+                                                  Value tid, Value totalWorkers,
+                                                  ArrayRef<int64_t> tileShape) {
+  int64_t numElements = 1;
+  for (int64_t dim : tileShape) {
+    numElements *= dim;
   }
 
-  return accLoop.getResult(0);
+  Value cNumElements = arith::ConstantIndexOp::create(b, loc, numElements);
+
+  // chunkSize = ceildiv(numElements, totalWorkers).
+  Value chunkSize =
+      arith::CeilDivUIOp::create(b, loc, cNumElements, totalWorkers);
+
+  // lb = tid * chunkSize.
+  Value lb = arith::MulIOp::create(b, loc, tid, chunkSize);
+
+  // ub = min(lb + chunkSize, numElements).
+  Value lbPlusChunk = arith::AddIOp::create(b, loc, lb, chunkSize);
+  Value ub = arith::MinUIOp::create(b, loc, lbPlusChunk, cNumElements);
+
+  Value c1 = arith::ConstantIndexOp::create(b, loc, 1);
+  auto forOp = scf::ForOp::create(b, loc, lb, ub, c1);
+
+  // Delinearize indices inside the loop body.
+  b.setInsertionPointToStart(forOp.getBody());
+  Value elemIdx = forOp.getInductionVar();
+  Value cCols = arith::ConstantIndexOp::create(b, loc, tileShape[1]);
+  Value row = arith::DivUIOp::create(b, loc, elemIdx, cCols);
+  Value col = arith::RemUIOp::create(b, loc, elemIdx, cCols);
+
+  return {forOp, elemIdx, row, col};
 }
+
+/// Decomposes `pcf.stream_k_recombine` into fully distributed control flow:
+///
+/// 1. Conditional scratch write (if tile is split among workgroups) —
+///    distributed across all threads via pcf.generic scope nests.
+/// 2. Global memory fence + thread-0 atomic increment + broadcast.
+/// 3. If last contributor: distributed recombine from scratch + writeback.
+/// 4. Else (non-split): distributed writeback of producer result.
 
 /// Recursively hoist |op| (and its transitive operand-defining ops) before
 /// |before| if they do not already dominate it.  Block arguments always
@@ -354,14 +356,17 @@ WalkResult verifyOperationLegality(Operation *op) {
   return WalkResult::advance();
 }
 
-/// Fuses a pcf.stream_k_recombine into its producer pcf.generic:
+/// Decomposes a pcf.stream_k_recombine into fully distributed control flow:
 ///
-/// 1. Sets sync_on_return=true on the producer.
-/// 2. Inside the producer body, adds conditional scratch writes before
-///    each write_slice to the consumed result's ref arg.
-/// 3. Outside the producer (after sync), creates conditional control flow:
-///    - Split path: thread-0 predicated atomic + recombine + writeback.
-///    - Non-split path: direct writeback of the producer's result.
+/// 1. Sets sync_on_return=true on the direct producer pcf.generic.
+/// 2. Inside the producer body, adds conditional scratch writes (if split).
+/// 3. Outside the producer, creates 4-phase distributed decomposition:
+///    Phase 1: All threads write partialTile to scratch via scope nests.
+///    Phase 2: Barrier + thread-0 atomic + broadcast dword.
+///    Phase 3: If last contributor, all threads recombine from scratch and
+///             write to output dest via scope nests.
+///    Phase 4 (else): All threads write partialTile directly to output
+///             dest via scope nests.
 /// 4. Final workgroup barrier.
 struct FuseStreamKRecombineIntoGeneric final
     : public OpRewritePattern<StreamKRecombineOp> {
@@ -369,18 +374,14 @@ struct FuseStreamKRecombineIntoGeneric final
 
   LogicalResult matchAndRewrite(StreamKRecombineOp recombineOp,
                                 PatternRewriter &rewriter) const override {
-    // Match: partial_tile must come from a pcf.generic result.
     Value partialTile = recombineOp.getPartialTile();
-    auto genericResult = dyn_cast<OpResult>(partialTile);
-    if (!genericResult) {
-      return rewriter.notifyMatchFailure(
-          recombineOp, "partial_tile is not an op result");
-    }
-    auto producerOp =
-        dyn_cast<PCF::GenericOp>(genericResult.getOwner());
+
+    // If you touch this line you die. If the exact producer of the
+    // recombine op is not pcf.generic, you die.
+    PCF::GenericOp producerOp = partialTile.getDefiningOp<PCF::GenericOp>();
     if (!producerOp) {
-      return rewriter.notifyMatchFailure(
-          recombineOp, "partial_tile not produced by pcf.generic");
+      // if you touch this line, you die.
+      return failure();
     }
 
     // Gather recombine operands.
@@ -389,48 +390,59 @@ struct FuseStreamKRecombineIntoGeneric final
     Value counterIndex = recombineOp.getCounterIndex();
     Value numInGroup = recombineOp.getNumInGroup();
     Value contributorOrdinal = recombineOp.getContributorOrdinal();
+    Value dest = recombineOp.getDest();
+    SmallVector<OpFoldResult> destOffsets = recombineOp.getMixedOffsets();
 
-    // Hoist recombine operands (and their transitive dependencies) before
-    // the producer if they do not already dominate it.  In the real
-    // pipeline, numInGroup and contributorOrdinal are computed after the
-    // producer pcf.generic, but their transitive leaves (constants, block
-    // args, etc.) always dominate the producer.
-    DominanceInfo dominanceInfo(producerOp->getParentOp());
+    // Hoist recombine operands before the producer so they are visible
+    // inside the producer body (pcf.generic is not IsolatedFromAbove).
+    Operation *hoistTarget = producerOp.getOperation();
+    DominanceInfo dominanceInfo(recombineOp->getParentOp());
     for (Value operand :
-         {scratch, counterIndex, numInGroup, contributorOrdinal}) {
+         {scratch, counterIndex, numInGroup, contributorOrdinal, dest}) {
       Operation *defOp = operand.getDefiningOp();
       if (!defOp) {
         // Block argument -- always dominates.
         continue;
       }
-      if (failed(hoistBeforeIfNeeded(defOp, producerOp, dominanceInfo))) {
+      if (failed(hoistBeforeIfNeeded(defOp, hoistTarget, dominanceInfo))) {
         return rewriter.notifyMatchFailure(
-            recombineOp,
-            "recombine operand cannot be hoisted before producer");
+            recombineOp, "recombine operand cannot be hoisted");
+      }
+    }
+    // Hoist dynamic dest offset values.
+    for (OpFoldResult offset : destOffsets) {
+      if (auto val = dyn_cast<Value>(offset)) {
+        if (Operation *defOp = val.getDefiningOp()) {
+          if (failed(hoistBeforeIfNeeded(defOp, hoistTarget, dominanceInfo))) {
+            return rewriter.notifyMatchFailure(recombineOp,
+                                               "dest offset cannot be hoisted");
+          }
+        }
       }
     }
 
     Location loc = recombineOp.getLoc();
-    unsigned resultIdx = genericResult.getResultNumber();
 
     RankedTensorType partialTileType =
         cast<RankedTensorType>(partialTile.getType());
-    int64_t rank = partialTileType.getRank();
     ArrayRef<int64_t> tileShape = partialTileType.getShape();
 
     PCF::ShapedRefType scratchType =
         cast<PCF::ShapedRefType>(scratch.getType());
     PCF::ShapedRefType counterType = recombineOp.getCounterType();
 
-    // Step 1: Set sync_on_return=true on the producer generic.
-    rewriter.modifyOpInPlace(producerOp, [&]() {
-      producerOp.setSyncOnReturn(true);
-    });
+    // Step 1: Set sync_on_return=true on the direct producer generic.
+    // For the indirect case the inner producer already synchronizes via
+    // its sref sync-scope attributes.
+    if (producerOp) {
+      rewriter.modifyOpInPlace(producerOp,
+                               [&]() { producerOp.setSyncOnReturn(true); });
+    }
 
     // Step 2: Compute constants and conditions before the producer.
     // Since pcf.generic does not have IsolatedFromAbove, these values
     // are captured inside the producer body for the scratch write.
-    OpBuilder b(producerOp);
+    OpBuilder b(hoistTarget);
 
     Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
     Value c1 = arith::ConstantIndexOp::create(b, loc, 1);
@@ -456,70 +468,104 @@ struct FuseStreamKRecombineIntoGeneric final
     Value scratchWriteOffset =
         arith::AddIOp::create(b, loc, tileBaseOffset, localOffset);
 
-    // Step 2b: Add conditional scratch write inside the producer body
-    // before each write_slice to the consumed result's ref arg.
-    Value resultRefArg = producerOp.getRegionRefArgs()[resultIdx];
-    SmallVector<PCF::WriteSliceOp> producerSlices;
-    for (Operation *user : resultRefArg.getUsers()) {
-      if (auto writeSlice = dyn_cast<PCF::WriteSliceOp>(user)) {
-        producerSlices.push_back(writeSlice);
-      }
-    }
+    // Non-split condition (complement of isSplit).
+    Value isNotSplit =
+        arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, numInGroup, c1);
 
-    for (PCF::WriteSliceOp writeSlice : producerSlices) {
-      // Use plain OpBuilder inside the producer body to avoid greedy
-      // driver listener issues with ops in existing regions.
-      OpBuilder bInner(writeSlice);
-      auto scratchIf = scf::IfOp::create(
-          bInner, loc, TypeRange{}, isSplit,
-          /*withElseRegion=*/false);
+    // Step 2b: Inject scf.if guards around each write_slice to the result
+    // sref inside the producer body.  This gives us:
+    //   scf.if (isSplit)    { pcf.write_slice %local to %scratch }
+    //   scf.if (!isSplit)   { pcf.write_slice %local to %sref   }
+    // The scratch write happens inside the producer so each thread writes
+    // its sub-tile directly from registers — no round-trip through the
+    // tensor result.
+    {
+      unsigned resultIdx = cast<OpResult>(partialTile).getResultNumber();
+      Value refArg = producerOp.getRegionRefArgs()[resultIdx];
 
-      {
-        OpBuilder::InsertionGuard ifGuard(bInner);
-        bInner.setInsertionPointToStart(
-            &scratchIf.getThenRegion().front());
-
-        SmallVector<OpFoldResult> scratchOffsets(rank,
-                                                 bInner.getIndexAttr(0));
-        scratchOffsets[0] = scratchWriteOffset;
-        SmallVector<OpFoldResult> scratchSizes;
-        for (int64_t i = 0; i < rank; ++i) {
-          scratchSizes.push_back(bInner.getIndexAttr(tileShape[i]));
+      SmallVector<PCF::WriteSliceOp> writeSlices;
+      for (Operation *user : refArg.getUsers()) {
+        if (auto ws = dyn_cast<PCF::WriteSliceOp>(user)) {
+          writeSlices.push_back(ws);
         }
-        SmallVector<OpFoldResult> scratchStrides(rank,
-                                                 bInner.getIndexAttr(1));
+      }
 
-        PCF::WriteSliceOp::create(bInner, loc, writeSlice.getSource(),
-                                  scratch, scratchOffsets, scratchSizes,
-                                  scratchStrides);
+      for (PCF::WriteSliceOp ws : writeSlices) {
+        OpBuilder wsB(ws);
+        Location wsLoc = ws.getLoc();
+
+        SmallVector<OpFoldResult> wsOffsets = ws.getMixedOffsets();
+        SmallVector<OpFoldResult> wsSizes = ws.getMixedSizes();
+        SmallVector<OpFoldResult> wsStrides = ws.getMixedStrides();
+        Value wsSource = ws.getSource();
+
+        // scf.if(isSplit) { write to scratch }.
+        auto scratchIf = scf::IfOp::create(wsB, wsLoc, TypeRange{}, isSplit,
+                                           /*withElseRegion=*/false);
+        {
+          OpBuilder scratchB(wsB.getContext());
+          scratchB.setInsertionPointToStart(&scratchIf.getThenRegion().front());
+
+          // scratch row = scratchWriteOffset + row_offset_in_tile.
+          Value wsRow =
+              getValueOrCreateConstantIndexOp(scratchB, wsLoc, wsOffsets[0]);
+          Value scratchRow =
+              arith::AddIOp::create(scratchB, wsLoc, scratchWriteOffset, wsRow);
+
+          SmallVector<OpFoldResult> scratchWriteOffsets = {scratchRow,
+                                                           wsOffsets[1]};
+          PCF::WriteSliceOp::create(scratchB, wsLoc, wsSource, scratch,
+                                    scratchWriteOffsets, wsSizes, wsStrides);
+        }
+
+        // scf.if(!isSplit) { original write to sref }.
+        auto srefIf = scf::IfOp::create(wsB, wsLoc, TypeRange{}, isNotSplit,
+                                        /*withElseRegion=*/false);
+        // Move the original write_slice inside the then body.
+        ws->moveBefore(srefIf.getThenRegion().front().getTerminator());
       }
     }
 
-    // Step 3: Create post-producer control flow at the recombine's
-    // location.  Use plain OpBuilder for all newly-created regions.
+    // Step 3: Create fully distributed post-producer control flow.
+    // Use plain OpBuilder for all newly-created regions to avoid
+    // greedy driver listener issues.
     b.setInsertionPoint(recombineOp);
 
-    // Allocate a broadcast dword in workgroup shared memory.  Thread-0
-    // stores the atomic result here; all threads load it after the
-    // barrier to determine if this workgroup is the last contributor.
+    Type elemType = partialTileType.getElementType();
+
+    // Allocate a broadcast dword in workgroup shared memory (LDS).
+    // Thread-0 stores the atomic result here; all threads load it after
+    // the barrier to determine if this workgroup is the last contributor.
+    // Use SubgroupScopeAttr so ConvertSRefToMemRef lowers to
+    // memref.alloc with gpu.address_space<workgroup>.
+    auto broadcastScope = cast<PCF::ScopeAttrInterface>(
+        GPU::SubgroupScopeAttr::get(b.getContext()));
     auto broadcastSrefType = PCF::ShapedRefType::get(
-        b.getContext(), {1}, b.getI32Type(), producerOp.getScope());
+        b.getContext(), {1}, b.getI32Type(), broadcastScope);
     Value broadcastSref =
         PCF::AllocOp::create(b, loc, broadcastSrefType, ValueRange{});
 
     auto outerIf = scf::IfOp::create(
         b, loc, TypeRange{}, isSplit, /*withElseRegion=*/true);
 
-    // Then branch: split path.
-    // The atomic is single-invocation (thread-0 only) but the recombine
-    // accumulation and writeback are evaluated by ALL threads.  The atomic
-    // result is broadcast via shared memory dword + barrier.
+    // ── THEN BRANCH: split path ──
     {
       OpBuilder thenB(b.getContext());
       thenB.setInsertionPointToStart(
           &outerIf.getThenRegion().front());
 
       IndexType indexType = thenB.getIndexType();
+
+      // Phase 1 (scratch write) is now inside the producer body via scf.if
+      // guards injected in Step 2b.  Phase 2 starts here.
+
+      // Position before the scf.yield terminator of the then block.
+      thenB.setInsertionPoint(outerIf.getThenRegion().front().getTerminator());
+
+      // ── Phase 2: Barrier + atomic + broadcast ──
+      // Global memory fence (release): ensure scratch writes are
+      // visible before the atomic counter increment.
+      gpu::BarrierOp::create(thenB, loc, gpu::AddressSpace::Global);
 
       // Get memref view of broadcast dword for store/load.
       auto broadcastMemrefType = MemRefType::get(
@@ -548,10 +594,6 @@ struct FuseStreamKRecombineIntoGeneric final
         thenB.setInsertionPointToStart(
             &thread0If.getThenRegion().front());
 
-        // Release fence before atomic.
-        PCF::FenceOp::create(thenB, loc, /*is_release=*/true,
-                             ValueRange{scratch});
-
         // Get memref view of counter for atomic operation.
         int64_t counterSize = counterType.getShape()[0];
         auto counterMemrefType = MemRefType::get(
@@ -571,27 +613,49 @@ struct FuseStreamKRecombineIntoGeneric final
             thenB, loc, counterMemrefType, counter, counterOffsets,
             counterSizes, counterStrides);
 
-        // Atomic increment.
+        // Atomic increment using generic_atomic_rmw (cmpxchg loop).
+        // We must NOT use memref.atomic_rmw here because the LLVM
+        // AMDGPU backend's AtomicOptimizer pass incorrectly converts
+        // it to a wavefront-level collective atomic.
         Value c1I32 = arith::ConstantOp::create(
             thenB, loc, thenB.getI32IntegerAttr(1));
-        Value oldVal = memref::AtomicRMWOp::create(
-            thenB, loc, arith::AtomicRMWKind::addi, c1I32,
-            counterMemref, ValueRange{counterIndex});
+        auto genericAtomic = memref::GenericAtomicRMWOp::create(
+            thenB, loc, counterMemref, ValueRange{counterIndex});
+        {
+          OpBuilder::InsertionGuard atomicGuard(thenB);
+          Block *atomicBody = genericAtomic.getBody();
+          thenB.setInsertionPointToStart(atomicBody);
+          Value currentVal = atomicBody->getArgument(0);
+          Value newVal = arith::AddIOp::create(thenB, loc, currentVal, c1I32);
+          memref::AtomicYieldOp::create(thenB, loc, newVal);
+        }
+        Value oldVal = genericAtomic.getResult();
 
-        // Store atomic result to broadcast dword.
-        memref::StoreOp::create(thenB, loc, oldVal, broadcastMemref,
+        // Apply modulo for counter reuse across dispatch iterations.
+        Value numInGroupI32 = arith::IndexCastOp::create(
+            thenB, loc, thenB.getI32Type(), numInGroup);
+        Value oldValMod =
+            arith::RemUIOp::create(thenB, loc, oldVal, numInGroupI32);
+
+        // Store modular result to broadcast dword.
+        memref::StoreOp::create(thenB, loc, oldValMod, broadcastMemref,
                                 ValueRange{c0});
       }
-      // InsertionGuard restores thenB to after thread0If.
 
-      // Barrier: all threads sync after thread-0 writes broadcast dword.
-      gpu::BarrierOp::create(thenB, loc, gpu::AddressSpace::Workgroup);
+      // Barrier: sync all threads after thread-0 writes broadcast dword
+      // AND invalidate global caches for scratch visibility (acquire).
+      {
+        SmallVector<Attribute> fenceSpaces = {
+            gpu::AddressSpaceAttr::get(thenB.getContext(),
+                                       gpu::AddressSpace::Workgroup),
+            gpu::AddressSpaceAttr::get(thenB.getContext(),
+                                       gpu::AddressSpace::Global)};
+        gpu::BarrierOp::create(thenB, loc, thenB.getArrayAttr(fenceSpaces));
+      }
 
-      // ALL threads load the broadcast result.
-      Value broadcastedOld = memref::LoadOp::create(
-          thenB, loc, broadcastMemref, ValueRange{c0});
-
-      // ALL threads check if this workgroup is the last contributor.
+      // ALL threads load the broadcast result and check last-contributor.
+      Value broadcastedOld =
+          memref::LoadOp::create(thenB, loc, broadcastMemref, ValueRange{c0});
       Value oldIdx = arith::IndexCastOp::create(
           thenB, loc, indexType, broadcastedOld);
       Value expectedLast =
@@ -599,7 +663,7 @@ struct FuseStreamKRecombineIntoGeneric final
       Value isLast = arith::CmpIOp::create(
           thenB, loc, arith::CmpIPredicate::eq, oldIdx, expectedLast);
 
-      // If last contributor: ALL threads do recombine and write back.
+      // ── Phase 3: Distributed recombine (if last contributor) ──
       auto lastContribIf = scf::IfOp::create(
           thenB, loc, TypeRange{}, isLast,
           /*withElseRegion=*/false);
@@ -608,44 +672,148 @@ struct FuseStreamKRecombineIntoGeneric final
         thenB.setInsertionPointToStart(
             &lastContribIf.getThenRegion().front());
 
-        // Acquire fence.
-        PCF::FenceOp::create(thenB, loc, /*is_release=*/false,
-                             ValueRange{scratch});
+        DistributedScopeNest recombineNest =
+            buildDistributedScopeNest(thenB, loc);
+        PerThreadChunkLoop recombineLoop =
+            buildPerThreadChunkLoop(thenB, loc, recombineNest.tid,
+                                    recombineNest.totalWorkers, tileShape);
 
-        // Read the first partial tile from scratch (ordinal 0).
-        SmallVector<OpFoldResult> readOffsets(rank,
-                                             thenB.getIndexAttr(0));
-        readOffsets[0] = tileBaseOffset;
-        SmallVector<OpFoldResult> readSizes;
-        for (int64_t i = 0; i < rank; ++i) {
-          readSizes.push_back(thenB.getIndexAttr(tileShape[i]));
-        }
-        SmallVector<OpFoldResult> readStrides(rank,
-                                              thenB.getIndexAttr(1));
-
+        // Read from scratch at contributor 0.
+        Value initRow = arith::AddIOp::create(thenB, loc, tileBaseOffset,
+                                              recombineLoop.row);
+        SmallVector<OpFoldResult> elemReadOffsets = {initRow,
+                                                     recombineLoop.col};
+        SmallVector<OpFoldResult> elemReadSizes = {thenB.getIndexAttr(1),
+                                                   thenB.getIndexAttr(1)};
+        SmallVector<OpFoldResult> elemReadStrides = {thenB.getIndexAttr(1),
+                                                     thenB.getIndexAttr(1)};
+        auto elemTensorType = RankedTensorType::get({1, 1}, elemType);
         Value accInit = PCF::ReadSliceOp::create(
-            thenB, loc, partialTileType, scratch, readOffsets,
-            readSizes, readStrides);
+            thenB, loc, elemTensorType, scratch, elemReadOffsets, elemReadSizes,
+            elemReadStrides);
 
-        // Build the accumulation loop.
-        Value accumulated = buildAccumulationLoop(
-            thenB, loc, c1, numInGroup, scratch, accInit,
-            tileBaseOffset, partialTileType, rank, tileShape,
-            readSizes, readStrides, recombineOp.getCombiner());
+        // Accumulation loop: for each contributor i in [1, numInGroup).
+        auto accLoop = scf::ForOp::create(thenB, loc, /*lb=*/c1,
+                                          /*ub=*/numInGroup, /*step=*/c1,
+                                          /*iterArgs=*/ValueRange{accInit});
 
-        // Clone writeback body (first copy).
-        cloneWritebackBody(thenB, loc,
-                           recombineOp.getWriteback(), accumulated);
+        {
+          OpBuilder::InsertionGuard accGuard(thenB);
+          thenB.setInsertionPointToStart(accLoop.getBody());
+          Value loopIdx = accLoop.getInductionVar();
+          Value loopAcc = accLoop.getRegionIterArg(0);
+
+          // Compute scratch offset for contributor i.
+          Value contribOffset =
+              arith::MulIOp::create(thenB, loc, loopIdx, tileHeight);
+          Value contribBase =
+              arith::AddIOp::create(thenB, loc, tileBaseOffset, contribOffset);
+          Value contribRow =
+              arith::AddIOp::create(thenB, loc, contribBase, recombineLoop.row);
+          SmallVector<OpFoldResult> contribReadOffsets = {contribRow,
+                                                          recombineLoop.col};
+
+          Value partialElem = PCF::ReadSliceOp::create(
+              thenB, loc, elemTensorType, scratch, contribReadOffsets,
+              elemReadSizes, elemReadStrides);
+
+          // Apply combiner element-wise.
+          // Extract scalar elements from the 1x1 tensors.
+          Value cIdx0 = arith::ConstantIndexOp::create(thenB, loc, 0);
+          Value accScalar = tensor::ExtractOp::create(thenB, loc, loopAcc,
+                                                      ValueRange{cIdx0, cIdx0});
+          Value partialScalar = tensor::ExtractOp::create(
+              thenB, loc, partialElem, ValueRange{cIdx0, cIdx0});
+
+          // Clone the combiner region inline.
+          Block &combinerBlock = recombineOp.getCombiner().front();
+          IRMapping combinerMapping;
+          combinerMapping.map(combinerBlock.getArgument(0), accScalar);
+          combinerMapping.map(combinerBlock.getArgument(1), partialScalar);
+          for (Operation &op : combinerBlock.without_terminator()) {
+            thenB.clone(op, combinerMapping);
+          }
+          auto combinerYield =
+              cast<PCF::YieldOp>(combinerBlock.getTerminator());
+          Value combined =
+              combinerMapping.lookupOrDefault(combinerYield.getOperand(0));
+
+          // Re-insert into the iter arg tensor (not a fresh empty) for
+          // bufferization equivalence.
+          Value result = tensor::InsertOp::create(thenB, loc, combined, loopAcc,
+                                                  ValueRange{cIdx0, cIdx0});
+          scf::YieldOp::create(thenB, loc, ValueRange{result});
+        }
+
+        Value accumulated = accLoop.getResult(0);
+
+        // Write accumulated element to output dest.
+        Value destRow = arith::AddIOp::create(
+            thenB, loc,
+            getValueOrCreateConstantIndexOp(thenB, loc, destOffsets[0]),
+            recombineLoop.row);
+        Value destCol = arith::AddIOp::create(
+            thenB, loc,
+            getValueOrCreateConstantIndexOp(thenB, loc, destOffsets[1]),
+            recombineLoop.col);
+        SmallVector<OpFoldResult> destWriteOffsets = {destRow, destCol};
+        SmallVector<OpFoldResult> destWriteSizes = {thenB.getIndexAttr(1),
+                                                    thenB.getIndexAttr(1)};
+        SmallVector<OpFoldResult> destWriteStrides = {thenB.getIndexAttr(1),
+                                                      thenB.getIndexAttr(1)};
+        PCF::WriteSliceOp::create(thenB, loc, accumulated, dest,
+                                  destWriteOffsets, destWriteSizes,
+                                  destWriteStrides);
+
+        // Terminate scope nests.
+        thenB.setInsertionPointAfter(recombineLoop.loop);
+        PCF::ReturnOp::create(thenB, loc);
+        thenB.setInsertionPointAfter(recombineNest.innerGeneric);
+        PCF::ReturnOp::create(thenB, loc);
       }
     }
 
-    // Else branch: non-split path (direct writeback).
+    // ── ELSE BRANCH: non-split direct writeback ──
     {
       OpBuilder elseB(b.getContext());
       elseB.setInsertionPointToStart(
           &outerIf.getElseRegion().front());
-      cloneWritebackBody(elseB, loc,
-                         recombineOp.getWriteback(), partialTile);
+
+      DistributedScopeNest writebackNest =
+          buildDistributedScopeNest(elseB, loc);
+      PerThreadChunkLoop writebackLoop = buildPerThreadChunkLoop(
+          elseB, loc, writebackNest.tid, writebackNest.totalWorkers, tileShape);
+
+      // Extract element from partialTile.
+      auto wbElemType = RankedTensorType::get({1, 1}, elemType);
+      SmallVector<OpFoldResult> wbExtractOffsets = {writebackLoop.row,
+                                                    writebackLoop.col};
+      SmallVector<OpFoldResult> wbSizes = {elseB.getIndexAttr(1),
+                                           elseB.getIndexAttr(1)};
+      SmallVector<OpFoldResult> wbStrides = {elseB.getIndexAttr(1),
+                                             elseB.getIndexAttr(1)};
+      Value wbElem =
+          tensor::ExtractSliceOp::create(elseB, loc, wbElemType, partialTile,
+                                         wbExtractOffsets, wbSizes, wbStrides);
+
+      // Write to output dest at [destOffset + row, destOffset + col].
+      Value wbDestRow = arith::AddIOp::create(
+          elseB, loc,
+          getValueOrCreateConstantIndexOp(elseB, loc, destOffsets[0]),
+          writebackLoop.row);
+      Value wbDestCol = arith::AddIOp::create(
+          elseB, loc,
+          getValueOrCreateConstantIndexOp(elseB, loc, destOffsets[1]),
+          writebackLoop.col);
+      SmallVector<OpFoldResult> wbDestOffsets = {wbDestRow, wbDestCol};
+      PCF::WriteSliceOp::create(elseB, loc, wbElem, dest, wbDestOffsets,
+                                wbSizes, wbStrides);
+
+      // Terminate scope nests.
+      elseB.setInsertionPointAfter(writebackLoop.loop);
+      PCF::ReturnOp::create(elseB, loc);
+      elseB.setInsertionPointAfter(writebackNest.innerGeneric);
+      PCF::ReturnOp::create(elseB, loc);
     }
 
     // Step 4: Final workgroup barrier.
@@ -1553,30 +1721,18 @@ fuseCollapseShapeIntoProducerImpl(RewriterBase &rewriter, OpTy producerOp,
     return rewriter.notifyMatchFailure(producerOp, "no write_slice producers");
   }
 
-  // Verify that each write_slice can be collapsed. For each reassociation
-  // group, all inner dimensions must be fully covered (offset=0, size=dim_size)
-  // to ensure the written region is contiguous in the collapsed layout.
+  // Verify that each write_slice can be collapsed.  Two cases are supported:
+  // 1. Groups where all inner dims are fully covered (contiguous collapse).
+  // 2. Two-dim groups with partial inner coverage (decomposed via loops).
   for (PCF::WriteSliceOp slice : slices) {
     if (!slice.hasUnitStride()) {
       return rewriter.notifyMatchFailure(slice,
                                          "write_slice has non-unit stride");
     }
-    SmallVector<OpFoldResult> offsets = slice.getMixedOffsets();
-    SmallVector<OpFoldResult> sizes = slice.getMixedSizes();
     for (const ReassociationIndices &group : reassociation) {
-      if (group.size() <= 1) {
-        continue;
-      }
-      for (size_t i = 1, e = group.size(); i < e; ++i) {
-        int64_t dim = group[i];
-        if (!isConstantIntValue(offsets[dim], 0)) {
-          return rewriter.notifyMatchFailure(
-              slice, "inner dimension offset is not zero for collapse");
-        }
-        if (!isConstantIntValue(sizes[dim], producerShape[dim])) {
-          return rewriter.notifyMatchFailure(
-              slice, "inner dimension size doesn't cover full dimension");
-        }
+      if (group.size() > 2) {
+        return rewriter.notifyMatchFailure(
+            slice, "groups with >2 dims not supported for collapse");
       }
     }
   }
@@ -1690,24 +1846,176 @@ fuseCollapseShapeIntoProducerImpl(RewriterBase &rewriter, OpTy producerOp,
     rewriter.setInsertionPoint(slice);
     Location loc = slice.getLoc();
 
-    // Compute collapsed offsets and sizes.
-    SmallVector<OpFoldResult> collapsedOffsets, collapsedSizes;
-    computeCollapsedOffsetsAndSizes(rewriter, loc, slice.getMixedOffsets(),
-                                    slice.getMixedSizes(), producerShape,
-                                    reassociation, collapsedOffsets,
-                                    collapsedSizes);
-
-    // Collapse the source tensor to match the new sref shape.
+    SmallVector<OpFoldResult> offsets = slice.getMixedOffsets();
+    SmallVector<OpFoldResult> sizes = slice.getMixedSizes();
     Value source = slice.getSource();
-    Value collapsedSource = tensor::CollapseShapeOp::create(
-        rewriter, loc, source, reassociation);
 
-    // Create the new write_slice with collapsed offsets/sizes.
-    SmallVector<OpFoldResult> strides(collapsedOffsets.size(),
-                                      rewriter.getIndexAttr(1));
-    PCF::WriteSliceOp::create(rewriter, loc, collapsedSource, slice.getDest(),
-                              collapsedOffsets, collapsedSizes, strides);
+    // Check if any group needs loop decomposition (partial inner dims).
+    bool needsDecomposition = false;
+    for (const ReassociationIndices &group : reassociation) {
+      if (group.size() <= 1) {
+        continue;
+      }
+      for (size_t i = 1, e = group.size(); i < e; ++i) {
+        int64_t dim = group[i];
+        if (!isConstantIntValue(offsets[dim], 0) ||
+            !isConstantIntValue(sizes[dim], producerShape[dim])) {
+          needsDecomposition = true;
+          break;
+        }
+      }
+      if (needsDecomposition) {
+        break;
+      }
+    }
 
+    if (!needsDecomposition) {
+      // Fast path: all inner dims fully covered, contiguous in collapsed
+      // layout.  Use simple linearization.
+      SmallVector<OpFoldResult> collapsedOffsets, collapsedSizes;
+      computeCollapsedOffsetsAndSizes(rewriter, loc, offsets, sizes,
+                                      producerShape, reassociation,
+                                      collapsedOffsets, collapsedSizes);
+      Value collapsedSource =
+          tensor::CollapseShapeOp::create(rewriter, loc, source, reassociation);
+      SmallVector<OpFoldResult> strides(collapsedOffsets.size(),
+                                        rewriter.getIndexAttr(1));
+      PCF::WriteSliceOp::create(rewriter, loc, collapsedSource, slice.getDest(),
+                                collapsedOffsets, collapsedSizes, strides);
+      rewriter.eraseOp(slice);
+      continue;
+    }
+
+    // Decomposition path: for groups with partial inner coverage, create
+    // scf.for loops over the outer dim range.  Each iteration writes a
+    // contiguous inner slice at a linearized offset.
+    //
+    // Example: write tensor<2x4x4x1> into sref<4x16x8x16> at [o0,o1,o2,o3]
+    // with reassociation [[0,1],[2,3]].  Inner dims 1,3 have partial coverage
+    // (offsets != 0 or sizes != dimSize).  Decomposition:
+    //   for d0 in [0, 2):
+    //     for d2 in [0, 4):
+    //       %inner = extract_slice source[d0, :, d2, :] → tensor<1x4x1x1>
+    //       %col   = collapse_shape %inner [[0,1],[2,3]] → tensor<4x1>
+    //       write %col into sref_2d[(o0+d0)*16+o1, (o2+d2)*16+o3] [4, 1]
+    Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
+
+    // Per-group decomposition metadata.
+    struct GroupInfo {
+      int64_t outerDim = -1;
+      int64_t innerDim = -1;
+      int64_t innerDimSize = 0;
+      bool needsLoop = false;
+    };
+    SmallVector<GroupInfo> groupInfos;
+    for (const ReassociationIndices &group : reassociation) {
+      GroupInfo info;
+      if (group.size() == 1) {
+        info.outerDim = group[0];
+        groupInfos.push_back(info);
+        continue;
+      }
+      info.outerDim = group[0];
+      info.innerDim = group[1];
+      info.innerDimSize = producerShape[group[1]];
+      info.needsLoop =
+          !isConstantIntValue(offsets[info.innerDim], 0) ||
+          !isConstantIntValue(sizes[info.innerDim], info.innerDimSize);
+      groupInfos.push_back(info);
+    }
+
+    // Create nested scf.for loops for groups needing decomposition.
+    SmallVector<Value> loopIVs(groupInfos.size(), Value());
+    for (auto [gi, info] : llvm::enumerate(groupInfos)) {
+      if (!info.needsLoop) {
+        continue;
+      }
+      Value ub =
+          getValueOrCreateConstantIndexOp(rewriter, loc, sizes[info.outerDim]);
+      scf::ForOp forOp = scf::ForOp::create(rewriter, loc, c0, ub, c1);
+      loopIVs[gi] = forOp.getInductionVar();
+      rewriter.setInsertionPointToStart(forOp.getBody());
+    }
+
+    // Build extract_slice from the source tensor.  For decomposed groups,
+    // the outer dim is indexed by the loop IV with size 1; other dims keep
+    // their original extent.
+    auto sourceType = cast<RankedTensorType>(source.getType());
+    int64_t sourceRank = sourceType.getRank();
+    SmallVector<OpFoldResult> extractOffsets(sourceRank,
+                                             rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> extractSizes;
+    for (int64_t i = 0; i < sourceRank; ++i) {
+      extractSizes.push_back(rewriter.getIndexAttr(sourceType.getDimSize(i)));
+    }
+    SmallVector<OpFoldResult> extractStrides(sourceRank,
+                                             rewriter.getIndexAttr(1));
+    for (auto [gi, info] : llvm::enumerate(groupInfos)) {
+      if (!info.needsLoop) {
+        continue;
+      }
+      extractOffsets[info.outerDim] = loopIVs[gi];
+      extractSizes[info.outerDim] = rewriter.getIndexAttr(1);
+    }
+
+    SmallVector<int64_t> extractShape;
+    for (OpFoldResult size : extractSizes) {
+      std::optional<int64_t> val = getConstantIntValue(size);
+      extractShape.push_back(val ? *val : ShapedType::kDynamic);
+    }
+    RankedTensorType extractType =
+        RankedTensorType::get(extractShape, sourceType.getElementType());
+
+    Value extracted = tensor::ExtractSliceOp::create(
+        rewriter, loc, extractType, source, extractOffsets, extractSizes,
+        extractStrides);
+
+    // Collapse the extracted inner slice (e.g. tensor<1x4x1x1> → tensor<4x1>
+    // for reassociation [[0,1],[2,3]]).
+    Value collapsedExtracted = tensor::CollapseShapeOp::create(
+        rewriter, loc, extracted, reassociation);
+
+    // Compute collapsed write offsets and sizes.
+    SmallVector<OpFoldResult> collapsedWriteOffsets;
+    SmallVector<OpFoldResult> collapsedWriteSizes;
+    for (auto [gi, info] : llvm::enumerate(groupInfos)) {
+      if (info.innerDim < 0) {
+        // Singleton group: pass through.
+        collapsedWriteOffsets.push_back(offsets[info.outerDim]);
+        collapsedWriteSizes.push_back(sizes[info.outerDim]);
+        continue;
+      }
+      if (!info.needsLoop) {
+        // Full inner coverage: collapsed = outer * innerDimSize.
+        AffineExpr d0;
+        bindDims(rewriter.getContext(), d0);
+        AffineMap mulMap =
+            AffineMap::get(1, 0, d0 * info.innerDimSize, rewriter.getContext());
+        collapsedWriteOffsets.push_back(affine::makeComposedFoldedAffineApply(
+            rewriter, loc, mulMap, {offsets[info.outerDim]}));
+        collapsedWriteSizes.push_back(affine::makeComposedFoldedAffineApply(
+            rewriter, loc, mulMap, {sizes[info.outerDim]}));
+      } else {
+        // Partial inner coverage:
+        //   offset = (origOuter + loopIV) * innerDimSize + innerOffset.
+        //   size = innerSize.
+        AffineExpr d0, d1, d2;
+        bindDims(rewriter.getContext(), d0, d1, d2);
+        AffineMap offsetMap = AffineMap::get(
+            3, 0, (d0 + d1) * info.innerDimSize + d2, rewriter.getContext());
+        collapsedWriteOffsets.push_back(affine::makeComposedFoldedAffineApply(
+            rewriter, loc, offsetMap,
+            {offsets[info.outerDim], loopIVs[gi], offsets[info.innerDim]}));
+        collapsedWriteSizes.push_back(sizes[info.innerDim]);
+      }
+    }
+
+    SmallVector<OpFoldResult> collapsedStrides(collapsedWriteOffsets.size(),
+                                               rewriter.getIndexAttr(1));
+    PCF::WriteSliceOp::create(rewriter, loc, collapsedExtracted,
+                              slice.getDest(), collapsedWriteOffsets,
+                              collapsedWriteSizes, collapsedStrides);
     rewriter.eraseOp(slice);
   }
 
