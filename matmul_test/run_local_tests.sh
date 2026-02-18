@@ -82,7 +82,7 @@ while IFS=, read -r group name m n k; do
     echo -n "[$TOTAL] $name ($group): compile... "
     COMPILE_CMD="$IREE_COMPILE $MLIR \
         --iree-hal-target-device=hip \
-        --iree-hip-target=$TARGET \
+        --iree-rocm-target=$TARGET \
         $EXTRA_COMPILE_FLAGS \
         -o $VMFB"
 
