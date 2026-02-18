@@ -50,6 +50,12 @@ iree_c_embed_data(
     "iree_uk_amdgpu_matmul_f16.mlir"
     "iree_uk_amdgpu_matmul_f8E4M3FN.mlir"
     "iree_uk_amdgpu_matmul_f8E4M3FNUZ.mlir"
+    "persistent_matmul_f16.mlir"
+    "pingpong_1cluster_f16.mlir"
+    "pingpong_2cluster_f16.mlir"
+    "pingpong_4cluster_f16.mlir"
+    "pingpong_chained_f16.mlir"
+    "warp_pipeline_f16.mlir"
   C_FILE_OUTPUT
     "iree_mlir_ukernels_amdgpu.c"
   H_FILE_OUTPUT
@@ -70,6 +76,12 @@ iree_lit_test_suite(
     "iree_uk_amdgpu_matmul_f16.mlir"
     "iree_uk_amdgpu_matmul_f8E4M3FN.mlir"
     "iree_uk_amdgpu_matmul_f8E4M3FNUZ.mlir"
+    "persistent_matmul_f16.mlir"
+    "pingpong_1cluster_f16.mlir"
+    "pingpong_2cluster_f16.mlir"
+    "pingpong_4cluster_f16.mlir"
+    "pingpong_chained_f16.mlir"
+    "warp_pipeline_f16.mlir"
   TOOLS
     iree-opt
 )
