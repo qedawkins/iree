@@ -34,6 +34,7 @@ iree_cc_library(
     "FuseConsumers.cpp"
     "FusePCFWrites.cpp"
     "FuseProducers.cpp"
+    "LowerGroups.cpp"
     "LowerStructuralPCF.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"

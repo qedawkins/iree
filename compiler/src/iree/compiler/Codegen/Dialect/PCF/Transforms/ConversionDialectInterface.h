@@ -9,9 +9,15 @@
 
 #include "mlir/IR/DialectInterface.h"
 
+namespace mlir {
+class ConversionTarget;
+class RewritePatternSet;
+class TypeConverter;
+} // namespace mlir
+
 namespace mlir::iree_compiler {
 
-// An interface for dialects to expose conversion functionality out of PCF.
+/// An interface for dialects to expose conversion functionality out of PCF.
 class PCFConversionDialectInterface
     : public DialectInterface::Base<PCFConversionDialectInterface> {
 public:
@@ -20,6 +26,11 @@ public:
   virtual void loadTokenLoweringDependentDialects(MLIRContext *context) const {}
   virtual void
   loadStructuralLoweringDependentDialects(MLIRContext *context) const {}
+  virtual void loadGroupLoweringDependentDialects(MLIRContext *context) const {}
+  virtual void populateGroupLoweringPatterns(const TypeConverter &typeConverter,
+                                             RewritePatternSet &patterns,
+                                             ConversionTarget &target,
+                                             int64_t regionId) const {}
 };
 
 } // namespace mlir::iree_compiler

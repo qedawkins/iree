@@ -233,4 +233,28 @@ def TestConvertForallToGenericNestPass :
   ];
 }
 
+def LowerGroupsPass : Pass<"iree-pcf-lower-groups", ""> {
+  let summary = "Lowers pcf.form_groups and related group ops to scf.if predicates.";
+  let description = [{
+    Lowers group-level parallelism to conditional code based on worker IDs.
+    This is the L3 to L2 transformation for the group-centric distribution
+    scheme.
+
+    The pass converts:
+    - `pcf.form_groups` to worker ID range predicates via the scope interface.
+    - `pcf.execute_as` to `scf.if` with the group's membership predicate.
+    - `pcf.bind` to direct value forwarding (eliminated).
+    - `pcf.join` / `pcf.split` to predicate composition (eliminated).
+    - `pcf.barrier` passes through unchanged.
+
+    After this pass, no `pcf.form_groups`, `pcf.execute_as`, `pcf.bind`,
+    `pcf.join`, or `pcf.split` ops remain.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect"
+  ];
+}
+
 #endif // IREE_CODEGEN_DIALECT_PCF_TRANSFORMS_PASSES

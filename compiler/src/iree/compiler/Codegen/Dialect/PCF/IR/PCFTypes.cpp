@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/LogicalResult.h"
 
@@ -39,9 +40,7 @@ Type ShapedRefType::parse(AsmParser &parser) {
     return {};
   }
 
-  SMLoc commaLoc = parser.getCurrentLocation();
   if (failed(parser.parseComma())) {
-    parser.emitError(commaLoc, "expected comma after 'elementType'");
     return {};
   }
 
@@ -71,7 +70,7 @@ Type ShapedRefType::parse(AsmParser &parser) {
 
     if (!isa<ScopeAttrInterface>(scope)) {
       parser.emitError(scopeLoc, "expected 'scope' parameter ")
-          << scope << " to implement 'ScopeAttrInterfaceInterface'";
+          << scope << " to implement 'ScopeAttrInterface'";
       return {};
     }
 
@@ -129,6 +128,131 @@ ShapedRefType ShapedRefType::get(MLIRContext *context, ArrayRef<int64_t> shape,
 
 bool ShapedRefType::isReturnOnlySync() const {
   return isa_and_present<SyncOnReturnAttr>(getSyncScope());
+}
+
+//===----------------------------------------------------------------------===//
+// !pcf.group<...>
+//===----------------------------------------------------------------------===//
+
+Type GroupType::parse(AsmParser &parser) {
+  if (parser.parseLess()) {
+    return {};
+  }
+
+  // Parse IDs: either `[id0, id1, ...]` or a single integer.
+  SmallVector<int64_t> ids;
+  SMLoc idsLoc = parser.getCurrentLocation();
+  if (succeeded(parser.parseOptionalLSquare())) {
+    // Grouped group: parse comma-separated integers.
+    if (failed(parser.parseCommaSeparatedList([&]() -> ParseResult {
+          int64_t id;
+          if (failed(parser.parseInteger(id))) {
+            return failure();
+          }
+          ids.push_back(id);
+          return success();
+        }))) {
+      return {};
+    }
+    if (parser.parseRSquare()) {
+      return {};
+    }
+  } else {
+    // Single ID.
+    int64_t id;
+    SMLoc idLoc = parser.getCurrentLocation();
+    if (failed(parser.parseInteger(id))) {
+      parser.emitError(idLoc, "expected group ID");
+      return {};
+    }
+    ids.push_back(id);
+  }
+
+  // Validate IDs are non-negative and unique.
+  DenseSet<int64_t> seenIds;
+  for (int64_t id : ids) {
+    if (id < 0) {
+      parser.emitError(idsLoc, "group IDs must be non-negative");
+      return {};
+    }
+    if (!seenIds.insert(id).second) {
+      parser.emitError(idsLoc, "duplicate group ID: ") << id;
+      return {};
+    }
+  }
+
+  // Parse comma and scope attribute.
+  if (parser.parseComma()) {
+    return {};
+  }
+
+  Attribute scopeAttr;
+  SMLoc scopeLoc = parser.getCurrentLocation();
+  if (failed(parser.parseAttribute(scopeAttr))) {
+    parser.emitError(scopeLoc, "failed to parse scope attribute");
+    return {};
+  }
+
+  ScopeAttrInterface scope = dyn_cast<ScopeAttrInterface>(scopeAttr);
+  if (!scope) {
+    parser.emitError(scopeLoc, "expected scope attribute to implement "
+                               "ScopeAttrInterface");
+    return {};
+  }
+
+  // Optionally parse struct elements: `, {type0, type1, ...}`.
+  SmallVector<Type> structTypes;
+  if (succeeded(parser.parseOptionalComma())) {
+    if (parser.parseLBrace()) {
+      return {};
+    }
+    if (failed(parser.parseCommaSeparatedList([&]() -> ParseResult {
+          Type ty;
+          if (failed(parser.parseType(ty))) {
+            return failure();
+          }
+          structTypes.push_back(ty);
+          return success();
+        }))) {
+      return {};
+    }
+    if (parser.parseRBrace()) {
+      return {};
+    }
+  }
+
+  if (parser.parseGreater()) {
+    return {};
+  }
+
+  return GroupType::get(parser.getContext(), ids, scope, structTypes);
+}
+
+void GroupType::print(AsmPrinter &printer) const {
+  printer << "<";
+
+  // Print IDs.
+  ArrayRef<int64_t> ids = getIds();
+  if (ids.size() == 1) {
+    printer << ids.front();
+  } else {
+    printer << "[";
+    llvm::interleaveComma(ids, printer);
+    printer << "]";
+  }
+
+  // Print scope.
+  printer << ", " << getScope();
+
+  // Print struct elements if present.
+  ArrayRef<Type> structTypes = getStructTypes();
+  if (!structTypes.empty()) {
+    printer << ", {";
+    llvm::interleaveComma(structTypes, printer);
+    printer << "}";
+  }
+
+  printer << ">";
 }
 
 //===----------------------------------------------------------------------===//

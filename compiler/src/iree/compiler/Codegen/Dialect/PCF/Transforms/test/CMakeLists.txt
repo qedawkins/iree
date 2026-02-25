@@ -22,6 +22,7 @@ iree_lit_test_suite(
     "fuse_consumers.mlir"
     "fuse_pcf_writes.mlir"
     "fuse_producers.mlir"
+    "lower_groups.mlir"
     "lower_structural_pcf.mlir"
     "resolve_tokens.mlir"
   TOOLS

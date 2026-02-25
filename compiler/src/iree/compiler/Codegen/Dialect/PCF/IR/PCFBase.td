@@ -181,6 +181,49 @@ def PCF_ShapedRef : TypeDef<PCF_Dialect, "ShapedRef", [
   }];
 }
 
+def PCF_GroupType : TypeDef<PCF_Dialect, "Group", []> {
+  let mnemonic = "group";
+  let summary = [{A worker group representing a subset of workers at a scope.}];
+  let description = [{
+    Represents a group of workers partitioned at a specific scope level.
+    Groups carry optional struct elements for work descriptors and
+    evolving state (accumulators, iteration space coordinates, etc.).
+
+    Single-ID groups are created by `pcf.form_groups`. Grouped groups
+    (multiple IDs) are created by `pcf.join`. IDs do NOT encode worker
+    count.
+
+    Examples:
+    ```
+    !pcf.group<0, #scope>                    // Single group, no data.
+    !pcf.group<1, #scope, {index, index}>    // With struct elements.
+    !pcf.group<[0, 1], #scope>               // Grouped group.
+    ```
+  }];
+
+  let parameters = (ins
+      ArrayRefParameter<"int64_t">:$ids,
+      "PCF::ScopeAttrInterface":$scope,
+      OptionalArrayRefParameter<"Type">:$structTypes);
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns true if this is a grouped group (multiple IDs).
+    bool isGrouped() const { return getIds().size() > 1; }
+
+    /// Returns the single ID. Asserts if grouped or empty.
+    int64_t getId() const {
+      assert(!getIds().empty() && "Group must have at least one ID.");
+      assert(!isGrouped() && "Use getIds() for grouped groups.");
+      return getIds().front();
+    }
+
+    /// Returns true if the group carries struct elements.
+    bool hasStructElements() const { return !getStructTypes().empty(); }
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // Base pcf attributes
 //===----------------------------------------------------------------------===//
@@ -199,17 +242,14 @@ def PCF_TestScopeAttr
   let assemblyFormat = [{}];
 
   let extraClassDeclaration = [{
-    SmallVector<Value> getWorkerCounts(OpBuilder&, Location, int64_t) {
-      assert(false && "why are you here?");
-      return {};
+    SmallVector<Value> getWorkerCounts(OpBuilder &, Location, int64_t) {
+      llvm_unreachable("TestScopeAttr::getWorkerCounts should not be called");
     }
-    SmallVector<Value> getWorkerIDs(OpBuilder&, Location, int64_t) {
-      assert(false && "why are you here?");
-      return {};
+    SmallVector<Value> getWorkerIDs(OpBuilder &, Location, int64_t) {
+      llvm_unreachable("TestScopeAttr::getWorkerIDs should not be called");
     }
     int64_t getNativeNumProcessorIds() {
-      assert(false && "why are you here?");
-      return 1;
+      llvm_unreachable("TestScopeAttr::getNativeNumProcessorIds should not be called");
     }
   }];
 }
@@ -219,7 +259,7 @@ def PCF_SequentialAttr
           PCF_Dialect,
           "Sequential", [DeclareAttrInterfaceMethods<PCF_ScopeAttrInterface>]> {
   let mnemonic = "sequential";
-  let summary = [{Attribute representing sequential execution}];
+  let summary = [{Attribute representing sequential execution.}];
   let description = [{
     Scope that reuses the current process as the sole executor of a parallel
     region.
@@ -228,12 +268,12 @@ def PCF_SequentialAttr
   let assemblyFormat = [{}];
 
   let extraClassDeclaration = [{
-    SmallVector<Value> getWorkerCounts(OpBuilder& builder, Location loc, int64_t numIds) {
+    SmallVector<Value> getWorkerCounts(OpBuilder &builder, Location loc, int64_t numIds) {
       Value one = arith::ConstantIndexOp::create(builder, loc, 1);
       SmallVector<Value> counts(numIds, one);
       return counts;
     }
-    SmallVector<Value> getWorkerIDs(OpBuilder& builder, Location loc, int64_t numIds) {
+    SmallVector<Value> getWorkerIDs(OpBuilder &builder, Location loc, int64_t numIds) {
       Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
       SmallVector<Value> ids(numIds, zero);
       return ids;
@@ -277,5 +317,6 @@ def PCF_SyncOnReturnAttr
 //===----------------------------------------------------------------------===//
 
 def PCF_AnyShapedRef : AnyTypeOf<[PCF_ShapedRef]>;
+def PCF_AnyGroup : AnyTypeOf<[PCF_GroupType]>;
 
 #endif  // IREE_CODEGEN_DIALECT_PCF_DIALECT

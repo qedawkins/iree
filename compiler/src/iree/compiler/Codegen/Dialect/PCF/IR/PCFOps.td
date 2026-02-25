@@ -383,13 +383,296 @@ def LoopOp : PCF_Op<"loop", [
 
 } // OpGroupParallelOps
 
+//===----------------------------------------------------------------------===//
+// Group Ops
+//===----------------------------------------------------------------------===//
+
+def OpGroupGroupOps : OpDocGroup {
+  let summary = "Group partitioning ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupGroupOps in {
+
+//===----------------------------------------------------------------------===//
+// FormGroupsOp
+//===----------------------------------------------------------------------===//
+
+def FormGroupsOp : PCF_Op<"form_groups", [
+       RecursiveMemoryEffects,
+     ]> {
+  let summary = [{Partition workers into named groups at a scope.}];
+  let description = [{
+    Partitions the workers at the given scope into separate groups. Each
+    group gets a portion of workers determined by the `sizes` attribute.
+    The body receives one block argument per group, typed as
+    `!pcf.group<i, scope>` where `i` is the 0-based index.
+
+    IDs do NOT encode worker count. The `sizes[i]` entry determines how
+    many workers from the parent scope are assigned to group `i`.
+
+    Example:
+    ```mlir
+    pcf.form_groups #scope sizes [2, 2] {
+      ^bb0(%prod: !pcf.group<0, #scope>,
+           %cons: !pcf.group<1, #scope>):
+        // prod has 2 workers, cons has 2 workers.
+        pcf.yield
+    }
+    ```
+  }];
+
+  let arguments = (ins
+      PCF_ScopeAttrInterface:$scope,
+      DenseI64ArrayAttr:$sizes);
+  let regions = (region MinSizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+      OpBuilder<(ins "ScopeAttrInterface":$scope,
+          "ArrayRef<int64_t>":$sizes)>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns the number of groups.
+    int64_t getNumGroups() { return getSizes().size(); }
+
+    /// Returns the block arguments representing groups.
+    ArrayRef<BlockArgument> getGroupArgs() {
+      return getBody().front().getArguments();
+    }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// ExecuteAsOp
+//===----------------------------------------------------------------------===//
+
+def ExecuteAsOp : PCF_Op<"execute_as", [
+       RecursiveMemoryEffects,
+     ]> {
+  let summary = [{Execute a region in the context of a group.}];
+  let description = [{
+    Executes a region in the context of the given group. The input group's
+    struct elements are unpacked as block arguments. If the region yields
+    values (via `pcf.yield`), those become the struct elements of the result
+    group. If the region ends with `pcf.return`, the op has no result.
+
+    Example with result:
+    ```mlir
+    %updated = pcf.execute_as [%cons]
+        -> !pcf.group<1, #scope, {tensor<64x128xf32>}> {
+      ^bb0(%acc: tensor<64x128xf32>):
+        %new_acc = ...
+        pcf.yield %new_acc : tensor<64x128xf32>
+    }
+    ```
+
+    Example without result (side-effect only):
+    ```mlir
+    pcf.execute_as [%group] {
+      pcf.return
+    }
+    ```
+  }];
+
+  let arguments = (ins PCF_GroupType:$group);
+  let results = (outs Optional<PCF_GroupType>:$result);
+  let regions = (region MinSizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+      // Builder without result (side-effect only).
+      OpBuilder<(ins "Value":$group)>,
+      // Builder with result.
+      OpBuilder<(ins "GroupType":$resultType, "Value":$group)>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns the input group type.
+    GroupType getGroupType() {
+      return cast<GroupType>(getGroup().getType());
+    }
+
+    /// Returns the result group type, or nullptr if no result.
+    GroupType getResultGroupType();
+
+    /// Returns true if this execute_as produces a result.
+    bool hasResult() { return getNumResults() > 0; }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// BindOp
+//===----------------------------------------------------------------------===//
+
+def BindOp : PCF_Op<"bind", [Pure]> {
+  let summary = [{Attach arbitrary data to a group as struct elements.}];
+  let description = [{
+    Takes a group and variadic values, producing a new group with those
+    values as struct elements. This is the most general form of data
+    attachment — no semantic constraints on the values.
+
+    The input group must be a single-ID group. The output group has the
+    same ID and scope as the input, with struct element types matching the
+    provided values.
+
+    If the input group already has struct elements, they are replaced by
+    the new values (the value count must match the existing struct element
+    count). To extend, yield all existing elements alongside new ones
+    through an `execute_as` region instead.
+
+    Example:
+    ```mlir
+    %tagged = pcf.bind %group, %off_m, %size_m
+        : !pcf.group<0, #scope, {index, index}>
+    ```
+  }];
+
+  let arguments = (ins
+      PCF_GroupType:$group,
+      Variadic<AnyType>:$values);
+  let results = (outs PCF_GroupType:$result);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// JoinOp
+//===----------------------------------------------------------------------===//
+
+def JoinOp : PCF_Op<"join", [Pure]> {
+  let summary = [{Combine multiple groups into a grouped group.}];
+  let description = [{
+    Combines multiple single-ID groups into a grouped group. All input
+    groups must have the same scope. The output group has concatenated
+    IDs and the same scope.
+
+    If any input group has struct elements, all inputs must have the same
+    struct element types. The output inherits those struct element types.
+
+    Example:
+    ```mlir
+    %grouped = pcf.join %bundle_0, %bundle_1
+        : !pcf.group<[0, 1], #scope>
+    ```
+  }];
+
+  let arguments = (ins
+      Variadic<PCF_GroupType>:$groups);
+  let results = (outs PCF_GroupType:$result);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// SplitOp
+//===----------------------------------------------------------------------===//
+
+def SplitOp : PCF_Op<"split", [Pure]> {
+  let summary = [{Partition a grouped group into sub-groups.}];
+  let description = [{
+    Splits a grouped group into sub-groups according to the given sizes.
+    The sum of sizes must equal the number of IDs in the input group.
+    Each output gets a contiguous slice of IDs.
+
+    Example:
+    ```mlir
+    %left, %right = pcf.split %grouped sizes [2, 2]
+        : !pcf.group<[0, 1], #scope>, !pcf.group<[2, 3], #scope>
+    ```
+  }];
+
+  let arguments = (ins
+      PCF_GroupType:$group,
+      DenseI64ArrayAttr:$sizes);
+  let results = (outs Variadic<PCF_GroupType>:$results);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// DefineWorkspaceOp
+//===----------------------------------------------------------------------===//
+
+def DefineWorkspaceOp : PCF_Op<"define_workspace", [Pure]> {
+  let summary = [{Compute iteration space coordinates for a group.}];
+  let description = [{
+    Computes per-group iteration space offsets and sizes based on the
+    group's position within the enclosing partition. The compiler knows
+    this represents an iteration space partition and can reason about
+    coverage, overlap, and reuse.
+
+    Returns a group with offset and size pairs appended as struct
+    elements for each distributed dimension (2 index values per
+    distributed dim). Existing struct elements are preserved.
+
+    Indexing maps distinguish distributed dimensions (map dims) from
+    non-distributed dimensions (symbols). For
+    `affine_map<(m) [n] -> (m, n)>`, `m` is distributed and `n` is a
+    symbol (each group sees the full `n` range).
+
+    Example:
+    ```mlir
+    %work = pcf.define_workspace %group
+        iteration_space(%c128, %c128)
+        indexing_maps = [affine_map<(m, n) -> (m, n)>]
+        : !pcf.group<0, #scope, {index, index, index, index}>
+    ```
+  }];
+
+  let arguments = (ins
+      PCF_GroupType:$group,
+      Variadic<Index>:$iteration_space,
+      DenseI64ArrayAttr:$static_iteration_space,
+      AffineMapArrayAttr:$indexing_maps);
+  let results = (outs PCF_GroupType:$result);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// BarrierOp
+//===----------------------------------------------------------------------===//
+
+def BarrierOp : PCF_Op<"barrier", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = [{Synchronize all workers in a given scope.}];
+  let description = [{
+    Barrier synchronization for all workers at the specified scope. This
+    op has side effects (it synchronizes workers) and produces no results.
+
+    Example:
+    ```mlir
+    pcf.barrier(#scope)
+    ```
+  }];
+
+  let arguments = (ins PCF_ScopeAttrInterface:$scope);
+
+  let assemblyFormat = [{
+    `(` $scope `)` attr-dict
+  }];
+}
+
+} // OpGroupGroupOps
 
 //===----------------------------------------------------------------------===//
 // Control Flow Ops
 //===----------------------------------------------------------------------===//
 
 def OpGroupControlFlowOps : OpDocGroup {
-  let summary = "Parallel execution ops";
+  let summary = "Control flow ops";
   let description = "";
 }
 
@@ -736,8 +1019,11 @@ def PCF_GetMemrefOp : PCF_Op<"get_memref", [
 // Misc
 //===----------------------------------------------------------------------===//
 
-def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp"]>, Pure,
-                                   ReturnLike, Terminator,
+def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<[
+                                     "IREE::PCF::GenericOp",
+                                     "IREE::PCF::FormGroupsOp",
+                                     "IREE::PCF::ExecuteAsOp",
+                                   ]>, Pure, ReturnLike, Terminator,
 ]> {
   let summary = [{Yields results from a region.}];
   let description = [{
@@ -750,7 +1036,7 @@ def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp"]>, Pure,
 
   let assemblyFormat = [{
     attr-dict
-    $operands `:` type($operands)
+    ($operands^ `:` type($operands))?
   }];
 }
 
@@ -758,6 +1044,7 @@ def PCF_ReturnOp : PCF_Op<"return", [
   ParentOneOf<[
     "IREE::PCF::GenericOp",
     "IREE::PCF::LoopOp",
+    "IREE::PCF::ExecuteAsOp",
   ]>,
   Pure,
   Terminator,
