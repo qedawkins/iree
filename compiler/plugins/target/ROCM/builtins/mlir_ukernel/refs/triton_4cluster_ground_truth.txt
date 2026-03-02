@@ -1,0 +1,95 @@
+Triton 4-Cluster Pingpong Ground Truth
+=======================================
+
+Source: /home/quinn/root/triton/test/TritonGPU/amd/amd-block-pingpong.mlir
+  Function: pingpong_large (line 138)
+  CHECK pattern: lines 82-130
+
+Implementation: /home/quinn/root/triton/third_party/amd/lib/TritonAMDGPUTransforms/BlockPingpong.cpp
+  Function: transformFourPPClusters (line 525)
+
+Target: gfx942 (CDNA3), NOT gfx950
+MFMA: 16x16x16 (K=16), so 64/16 = 4 K-slices
+Tile: 256x256, K-block=64, 8 warps, 2 stages
+Memory: tt.load (register path) + ttg.local_store (register -> LDS)
+        NOT direct-to-LDS async copy
+
+=== Expected Output (FileCheck pattern) ===
+
+// Pre-loop:
+ttg.barrier local                        // Full sync (lgkmcnt(0) + s_barrier)
+warpIDX = threadIdx.x / 256
+warpLow = (warpIDX == 0)
+warpHigh = (warpIDX != 0)
+amdg.cond_barrier warpHigh              // Hold warp1, let warp0 go
+
+scf.for:
+  // --- mem0: global_load A + local_load slices 0/4 ---
+  tt.load                                // global_load A (next iteration, to register)
+  ttg.local_load A[0/4]                  // LDS -> register (current iter, slice 0)
+  ttg.local_load B[0/4]
+  ttg.barrier local                      // lgkmcnt(0) + s_barrier
+  rocdl.sched.barrier 0
+
+  // --- dot0: K-slice 1/4 ---
+  rocdl.s.setprio 1                      // Compute gets HIGH
+  tt.dot slice[0]
+  rocdl.s.setprio 0                      // Back to LOW
+  ttg.barrier local
+  rocdl.sched.barrier 0
+
+  // --- mem1: global_load B + local_load slices 1/4 ---
+  tt.load                                // global_load B (next iteration, to register)
+  ttg.local_load A[1/4]
+  ttg.local_load B[1/4]
+  ttg.barrier local
+  rocdl.sched.barrier 0
+
+  // --- dot1: K-slice 2/4 ---
+  rocdl.s.setprio 1
+  tt.dot slice[1]
+  rocdl.s.setprio 0
+  ttg.barrier local
+  rocdl.sched.barrier 0
+
+  // --- mem2: local_load slices 2/4 + 3/4 (NO global loads) ---
+  ttg.local_load A[2/4]
+  ttg.local_load B[2/4]
+  ttg.local_load A[3/4]
+  ttg.local_load B[3/4]
+  ttg.barrier local
+  rocdl.sched.barrier 0
+
+  // --- dot2: K-slice 3/4 ---
+  rocdl.s.setprio 1
+  tt.dot slice[2]
+  rocdl.s.setprio 0
+  ttg.barrier local
+  rocdl.sched.barrier 0
+
+  // --- mem3: local_store writeback (register -> LDS) ---
+  ttg.local_store A
+  ttg.local_store B
+  ttg.barrier local
+  rocdl.sched.barrier 0
+
+  // --- dot3: K-slice 4/4 ---
+  rocdl.s.setprio 1
+  tt.dot slice[3]
+  rocdl.s.setprio 0
+  ttg.barrier local
+  rocdl.sched.barrier 0
+  scf.yield
+
+// Post-loop:
+amdg.cond_barrier warpLow               // Hold warp0, let warp1 finish
+
+=== Key Design Points ===
+
+1. 8 sub-clusters per loop iteration: mem0, dot0, mem1, dot1, mem2, dot2, mem3, dot3
+2. Dot is sliced 4 ways along K (K=64 / MFMA_K=16 = 4 slices)
+3. Global loads (register path) are interleaved: A in mem0, B in mem1
+4. local_store (register -> LDS writeback) is in mem3 (last memory cluster)
+5. ttg.barrier local at EVERY cluster boundary (lgkmcnt(0) + s_barrier)
+6. s_setprio: compute=HIGH(1), then LOW(0) after each dot
+7. Asymmetric cond_barrier pre/post loop for warp offset

@@ -1,0 +1,94 @@
+Comparison: Our ukernels vs Triton References (UPDATED)
+=======================================================
+
+BOTTOM LINE: All three pingpong ukernels now follow Triton's
+transformTwoClusterWithLocalLoadAndAll scheduling pattern for gfx950.
+
+=== What Triton uses for gfx950 large GEMMs ===
+
+Triton variant: transformTwoClusterWithLocalLoadAndAll
+  - 3-stage pipeline (triple-buffered LDS)
+  - Single full dot (NOT sliced along K)
+  - sched_group_barrier hints for MFMA/SALU interleaving
+  - async_copy overlapped with compute
+  - No s_setprio toggle
+  - See: refs/triton_gfx950_async_ground_truth.txt
+
+=== What our ukernels now do ===
+
+All three files (1-cluster, 2-cluster, 4-cluster) follow the same gfx950
+scheduling pattern, differing only in tile size and thread count:
+
+Loop body order:
+  1. memory_counter_wait load(0)  -- wait for prev DMA (s_waitcnt vmcnt(0))
+  2. LDS reads (all K-steps)      -- vector.transfer_read from current buffer
+  3. sched.barrier 0
+  4. DMA LHS gathers              -- amdgpu.gather_to_lds for next K-block
+  5. sched.barrier 0
+  6. sched_group_barrier hints    -- MFMA/SALU interleaving (5 hints)
+  7. DMA RHS gathers              -- amdgpu.gather_to_lds for next K-block
+  8. MFMA (both K-steps)          -- iree_codegen.inner_tiled
+  9. sched.barrier 0 + s_barrier + sched.barrier 0
+
+=== Remaining differences from Triton ===
+
+1. PIPELINE DEPTH
+   Triton gfx950: 3 stages (triple buffered)
+   Our ukernels: 2 stages (double buffered)
+   Reason: LDS budget. 3 stages requires 50% more LDS which may not fit.
+   Impact: Less DMA-compute overlap headroom.
+
+2. WAIT PLACEMENT
+   Triton gfx950: wait AFTER LDS reads and LHS DMA (mid-loop)
+   Our ukernels: wait BEFORE LDS reads (top of loop)
+   Reason: Triton's mid-loop wait relies on 3-stage pipeline + warp
+   staggering (cond_barrier creates true half-iteration offset between
+   warp groups). Our 2-stage pipeline requires wait-before-read for
+   correctness — reading from a buffer before confirming its DMA is
+   complete would be a race condition.
+   Impact: Slightly less overlap, but correctness is guaranteed.
+
+3. SCHEDULING HINTS
+   Same as Triton: rocdl.sched.group.barrier 8,1,0 / 4,3,0 pattern.
+   This is now present in all three ukernels.
+
+4. NO s_setprio
+   Same as Triton gfx950: no priority toggle. Removed from all ukernels.
+   (Previous versions incorrectly used s_setprio from gfx942 pattern.)
+
+5. ASYMMETRIC SYNC
+   2-cluster and 4-cluster have scf.if + s_barrier for warp staggering.
+   1-cluster (4 warps only) does not have asymmetric sync.
+   Triton uses amdg.cond_barrier for true warp pipelining.
+
+=== What async_commit_group and async_wait expand to on AMD ===
+
+On CDNA4 (gfx950):
+  - async_commit_group → NO-OP (literally replaced with i32 constant 0)
+  - async_wait → s_waitcnt vmcnt(N) via ROCDL::SWaitcntOp
+  - UpdateAsyncWaitCount pass converts group counts to precise vmcnt values
+  - gfx950 maps to ISAFamily::CDNA4 (NOT RDNA4!)
+  - See: TargetUtils.cpp line 17: GK_GFX950 → CDNA4
+
+=== Source Files for Verification ===
+
+Triton lit test (4-cluster, gfx942):
+  /home/quinn/root/triton/test/TritonGPU/amd/amd-block-pingpong.mlir
+
+Triton lit test (chained-dot, gfx950):
+  /home/quinn/root/triton/test/TritonGPU/amd/amd-block-pingpong-chained-dots.mlir
+
+Triton implementation:
+  /home/quinn/root/triton/third_party/amd/lib/TritonAMDGPUTransforms/BlockPingpong.cpp
+
+Triton ISA family mapping:
+  /home/quinn/root/triton/third_party/amd/lib/TritonAMDGPUToLLVM/TargetUtils.cpp
+
+Triton async lowering:
+  /home/quinn/root/triton/third_party/amd/lib/TritonAMDGPUToLLVM/LoadStoreOpToLLVM.cpp
+  /home/quinn/root/triton/third_party/amd/lib/TritonAMDGPUTransforms/UpdateAsyncWaitCount.cpp
+
+Our ukernels:
+  /home/quinn/root/iree-triton-ukernels/iree/compiler/plugins/target/ROCM/builtins/mlir_ukernel/pingpong_1cluster_f16.mlir
+  /home/quinn/root/iree-triton-ukernels/iree/compiler/plugins/target/ROCM/builtins/mlir_ukernel/pingpong_2cluster_f16.mlir
+  /home/quinn/root/iree-triton-ukernels/iree/compiler/plugins/target/ROCM/builtins/mlir_ukernel/pingpong_4cluster_f16.mlir

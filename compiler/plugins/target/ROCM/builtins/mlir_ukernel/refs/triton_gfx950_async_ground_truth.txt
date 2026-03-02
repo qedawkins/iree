@@ -1,0 +1,63 @@
+Triton gfx950 Async Two-Cluster Ground Truth
+=============================================
+
+This is the ACTUAL gfx950 direct-to-LDS variant that Triton uses for large GEMMs.
+
+Source: /home/quinn/root/triton/third_party/amd/lib/TritonAMDGPUTransforms/BlockPingpong.cpp
+  Function: transformTwoClusterWithLocalLoadAndAll (line 855)
+
+Variant selection (line 1079-1093):
+  if (dotOps.size() == 1 && useAsyncCopy) {
+    if (numWarps == 8 && numStages == 3 && dotShape[0] > 64 &&
+        dotShape[1] > 64 && (elemWidth == 16 || elemWidth == 8)) {
+      transformTwoClusterWithLocalLoadAndAll(...)
+    }
+  }
+
+Target: gfx950 (CDNA4)
+Conditions: 1 dot, async copy enabled, 8 warps, 3 stages, dot > 64x64, f16 or f8
+Memory: ttg.async_copy_global_to_local (direct-to-LDS via global_load_lds)
+
+=== Pattern Structure ===
+
+scf.for:
+  // --- Fused memory+compute cluster ---
+  ttg.local_load A                       // LDS -> register (for MFMA input)
+  ttg.local_load B
+  rocdl.sched.barrier 0
+  ttg.async_copy A                       // global -> LDS (direct-to-LDS, operand A)
+  ttg.async_commit_group
+  rocdl.sched.barrier 0
+  ttg.async_wait                         // Wait for PREVIOUS iteration's copy
+  rocdl.sched.barrier 0
+  // Interleave hints: 1 MFMA then 3 SALU, repeated
+  rocdl.sched_group_barrier(MFMA, 1, 0)
+  rocdl.sched_group_barrier(SALU, 3, 0)
+  rocdl.sched_group_barrier(MFMA, 1, 0)
+  rocdl.sched_group_barrier(SALU, 3, 0)
+  rocdl.sched_group_barrier(MFMA, 1, 0)
+  ttg.async_copy B                       // global -> LDS (direct-to-LDS, operand B)
+  ttg.async_commit_group
+  tt.dot A*B                             // Full MFMA (not sliced)
+  rocdl.sched.barrier 0
+  rocdl.s.barrier
+  rocdl.sched.barrier 0
+
+=== Key Design Points ===
+
+1. Only 2 logical clusters, but everything is FUSED into one block
+2. NOT sliced along K — single full dot per iteration
+3. No s_setprio toggle (no alternating priority)
+4. Uses sched_group_barrier hints for MFMA/SALU interleaving (NOT available in our IREE ops)
+5. async_wait waits for PREVIOUS iteration (3-stage pipeline means 1 iter ahead)
+6. local_load happens BEFORE async_copy (reads from already-complete buffer)
+7. async_copy happens DURING compute (overlapped via hardware DMA)
+8. Single s_barrier at end (NOT per-cluster barriers)
+9. 3-stage pipeline with triple-buffered LDS
+10. The "pingpong_2step" attribute triggers a second MFMA lowering pass
+
+=== Variant Selection Logic (lines 1079-1093) ===
+
+For gfx950 with direct-to-LDS, Triton does NOT use the 4-cluster variant.
+The 4-cluster variant requires tt.load (register path) and 2-stage pipeline.
+gfx950's async copy path uses 3-stage pipeline with this fused two-cluster scheme.

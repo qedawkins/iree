@@ -1,0 +1,63 @@
+Triton Chained-Dot Pingpong Ground Truth (gfx950, FlashAttention)
+=================================================================
+
+Source: /home/quinn/root/triton/test/TritonGPU/amd/amd-block-pingpong-chained-dots.mlir
+Implementation: BlockPingpong.cpp, transformChainedDotSchedule (line 671+)
+
+Target: gfx950
+Config: 2 chained dots (dot0 feeds dot1), num_stages=4
+Memory: Either async_copy (direct-to-LDS) or tt.load (register path)
+
+=== Async Copy Variant (CHECK pattern from test) ===
+
+scf.for:
+  // --- Compute Cluster 1 ---
+  rocdl.s.barrier                        // Full workgroup sync
+  rocdl.sched.barrier 0
+  tt.dot                                 // MFMA: Q*K (first chained dot)
+
+  // --- Memory Cluster 1 ---
+  rocdl.sched.barrier 0
+  ttg.async_wait                         // Wait for previous iteration
+  rocdl.s.setprio 1                      // HIGH priority for memory
+  rocdl.sched.barrier 0
+  ttg.local_load                         // LDS -> register
+  ttg.async_copy_global_to_local         // global -> LDS (direct-to-LDS)
+  ttg.async_commit_group
+  rocdl.sched.barrier 0
+
+  // --- Transition: Memory -> Compute ---
+  rocdl.s.setprio 0                      // LOW priority for compute
+  amdg.memory_counter_wait ds(0)         // lgkmcnt(0) - all LDS reads done
+  rocdl.s.barrier
+  rocdl.sched.barrier 0
+
+  // --- Compute Cluster 2 ---
+  tt.dot                                 // MFMA: softmax(Q*K) * V
+
+  // --- Memory Cluster 2 ---
+  rocdl.sched.barrier 0
+  ttg.async_wait
+  rocdl.s.setprio 1                      // HIGH
+  rocdl.sched.barrier 0
+  ttg.local_load
+  ttg.async_copy_global_to_local
+  ttg.async_commit_group
+  rocdl.sched.barrier 0
+
+  // --- End of loop ---
+  rocdl.s.setprio 0
+  amdg.memory_counter_wait ds(0)
+  scf.yield
+
+=== Key Design Points ===
+
+1. 4 clusters: compute1, memory1, compute2, memory2
+2. Memory gets HIGH priority (s_setprio 1), compute gets LOW (s_setprio 0)
+   - OPPOSITE of the gfx942 4-cluster register variant!
+   - Rationale: Memory cluster has v_xxx for address updates; if compute
+     had higher priority, it would monopolize VALU and starve memory
+3. amdg.memory_counter_wait ds(0) at END of memory cluster (before next compute)
+   - Prevents LLVM from inserting waits inside compute cluster
+4. s_barrier (not ttg.barrier local) between compute/memory transitions
+5. This is the only variant that uses explicit s_setprio for memory > compute
