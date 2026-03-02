@@ -78,23 +78,6 @@ def LLVMCPULinkExecutablesPass :
   ];
 }
 
-def LLVMCPULowerExecutableTargetPass :
-    InterfacePass<"iree-llvmcpu-lower-executable-target", "mlir::FunctionOpInterface"> {
-  let summary =
-      "Lower executable target using an IREE::HAL::DispatchLoweringPassPipeline";
-  let description = [{
-    Pass to lower the module an hal.executable.variant operation to external
-    dialect. Currently this pass lowers to LLVM dialect, but could be
-    generalized to lower to any "final" dialect like SPIR-V/NVVM, etc.
-  }];
-  let options = [
-    Option<"cpuOptions", "cpu-options", "CPUCodegenOptions",
-      /*default=*/"CPUCodegenOptions::FromFlags::get()",
-      "Session-scoped CPU codegen options controlling optimization level, "
-      "distribution, etc.">,
-  ];
-}
-
 def LLVMCPUMmt4dVectorLoweringPass
     : InterfacePass<"iree-llvmcpu-mmt4d-vector-lowering", "mlir::FunctionOpInterface"> {
   let summary = "Apply vector lowering logic to vector ops";
@@ -113,11 +96,11 @@ def LLVMCPUPeelPass :
 def LLVMCPUSelectLoweringStrategyPass :
     Pass<"iree-llvmcpu-select-lowering-strategy", "ModuleOp"> {
   let summary =
-      "Select a IREE::HAL::DispatchLoweringPassPipeline for lowering the variant";
+      "Select the lowering strategy for lowering the variant";
   let description = [{
     Pass to select a lowering strategy for a hal.executable.variant operation.
     The variant is annotated with the selected strategies, which are
-    subsequently ingested by LLVMCPULowerExecutableTargetPass.
+    subsequently ingested by LowerDispatchUsingPipelineAttrPass.
   }];
 }
 

@@ -1,5 +1,5 @@
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx1100 \
-// RUN:     --pass-pipeline="builtin.module(func.func(iree-llvmgpu-lower-executable-target))" %s | \
+// RUN:     --pass-pipeline="builtin.module(func.func(iree-codegen-lower-dispatch-using-pipeline-attr))" %s | \
 // RUN: FileCheck %s
 
 #pipeline_layout = #hal.pipeline.layout<bindings = [#hal.pipeline.binding<storage_buffer, Indirect>], flags = Indirect>

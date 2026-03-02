@@ -1,8 +1,8 @@
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx942 \
-// RUN:  --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-llvmgpu-select-lowering-strategy, func.func(iree-llvmgpu-lower-executable-target)))))" \
+// RUN:  --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-llvmgpu-select-lowering-strategy, func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" \
 // RUN:  %s | FileCheck %s
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx1100 \
-// RUN:  --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-llvmgpu-select-lowering-strategy, func.func(iree-llvmgpu-lower-executable-target)))))" \
+// RUN:  --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-llvmgpu-select-lowering-strategy, func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" \
 // RUN:  %s | FileCheck %s --check-prefix=RDNA3
 
 #pipeline_layout = #hal.pipeline.layout<bindings = [

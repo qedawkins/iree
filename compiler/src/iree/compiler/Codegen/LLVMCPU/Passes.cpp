@@ -671,11 +671,14 @@ void buildLLVMCPUCodegenPassPipeline(OpPassManager &variantPassManager,
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
+    {
+      // All LLVMCPU pipelines are dynamic (take LLVMCPUPipelineOptions).
+      MultiPipelineNest nest;
+      nest.nestIf(hasPipelineAttrInterface())
+          .addPass(createLowerDispatchUsingPipelineAttrPass());
+      nest.addTo(modulePassManager);
+    }
     FunctionLikeNest(modulePassManager)
-        .addPass([&]() {
-          return createLLVMCPULowerExecutableTargetPass(
-              LLVMCPULowerExecutableTargetPassOptions{cpuOpts});
-        })
         .addPass(createVerifyWorkgroupDistributionPass);
     if (clPatchFuncOps) {
       modulePassManager.addPass(createPatchFuncOpsPass());

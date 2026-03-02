@@ -120,6 +120,7 @@ iree_cc_library(
     "InsertBatchDimForBatchlessConv.cpp"
     "InstrumentMemoryAccesses.cpp"
     "LinkTuningSpecsPass.cpp"
+    "LowerDispatchUsingPipelineAttrPass.cpp"
     "LowerExecutableUsingTransformDialect.cpp"
     "LowerUKernelDescriptors.cpp"
     "LowerUKernelsToCalls.cpp"

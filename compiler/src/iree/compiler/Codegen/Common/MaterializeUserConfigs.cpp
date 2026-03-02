@@ -251,10 +251,8 @@ struct MaterializeUserConfigsPass final
       LDBG() << "--guaranteed unique translationInfo: " << translationInfo;
       /// We only need to resolve symbols for transform dialect based
       /// strategies.
-      if (!translationInfo ||
-          translationInfo.getDispatchLoweringPassPipeline() !=
-              IREE::Codegen::DispatchLoweringPassPipeline::
-                  TransformDialectCodegen) {
+      if (!translationInfo || !isa<IREE::Codegen::TransformDialectPipelineAttr>(
+                                  translationInfo.getPassPipeline())) {
         continue;
       }
 

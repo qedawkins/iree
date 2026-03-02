@@ -1,4 +1,4 @@
-// RUN: iree-opt --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-llvmgpu-lower-executable-target)))))" \
+// RUN: iree-opt --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" \
 // RUN:     %s | FileCheck %s
 
 // Test that the vector distribute pipeline correctly handles the case where

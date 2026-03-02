@@ -13,104 +13,253 @@ include "mlir/Dialect/SCF/IR/DeviceMappingInterface.td"
 include "mlir/IR/EnumAttr.td"
 
 //===---------------------------------------------------------------------===//
-// Pass pipelines
+// Per-backend pipeline enums and attributes
 //===---------------------------------------------------------------------===//
 
-// List of pre-existing pipelines for translating executables.
-def CPU_Default
+// LLVMCPU pipeline types.
+def LLVMCPUPipeline_CPUDefault
     : I32EnumAttrCase<"CPUDefault", 0>;
-def CPU_DoubleTilingExpert
+def LLVMCPUPipeline_CPUDoubleTilingExpert
     : I32EnumAttrCase<"CPUDoubleTilingExpert", 1>;
-def CPU_ConvTileAndDecomposeExpert
+def LLVMCPUPipeline_CPUConvTileAndDecomposeExpert
     : I32EnumAttrCase<"CPUConvTileAndDecomposeExpert", 2>;
-def CPU_Mmt4dTilingExpert
+def LLVMCPUPipeline_Mmt4dTilingExpert
     : I32EnumAttrCase<"Mmt4dTilingExpert", 3>;
-def CPU_BufferOpsTileAndVectorize
+def LLVMCPUPipeline_CPUBufferOpsTileAndVectorize
     : I32EnumAttrCase<"CPUBufferOpsTileAndVectorize", 4>;
-def CPU_DataTiling
+def LLVMCPUPipeline_CPUDataTiling
     : I32EnumAttrCase<"CPUDataTiling", 5>;
-def CPU_LinalgExtTileAndVectorize
+def LLVMCPUPipeline_CPULinalgExtTileAndVectorize
     : I32EnumAttrCase<"CPULinalgExtTileAndVectorize", 6>;
 
-def LLVMGPU_Default
-    : I32EnumAttrCase<"LLVMGPUDefault", 100>;
-def LLVMGPU_BaseLowering
-    : I32EnumAttrCase<"LLVMGPUBaseLowering", 101>;
-def LLVMGPU_SimpleDistribute
-    : I32EnumAttrCase<"LLVMGPUDistribute", 102>;
-def LLVMGPU_Vectorize
-    : I32EnumAttrCase<"LLVMGPUVectorize", 103>;
-def LLVMGPU_VectorDistribute
-    : I32EnumAttrCase<"LLVMGPUVectorDistribute", 104>;
-def LLVMGPU_WinogradVectorize
-    : I32EnumAttrCase<"LLVMGPUWinogradVectorize", 105>;
-def LLVMGPU_TileAndFuse
-    : I32EnumAttrCase<"LLVMGPUTileAndFuse", 106>;
-
-def SPIRV_BaseLowering
-    : I32EnumAttrCase<"SPIRVBaseLowering", 200>;
-def SPIRV_BaseDistribute
-    : I32EnumAttrCase<"SPIRVBaseDistribute", 201>;
-def SPIRV_BaseVectorize
-    : I32EnumAttrCase<"SPIRVBaseVectorize", 202>;
-def SPIRV_SubgroupReduce
-    : I32EnumAttrCase<"SPIRVSubgroupReduce", 203>;
-def SPIRV_MatmulPromoteVectorize
-    : I32EnumAttrCase<"SPIRVMatmulPromoteVectorize", 204>;
-def SPIRV_CooperativeMatrixVectorize
-    : I32EnumAttrCase<"SPIRVCooperativeMatrixVectorize", 205>;
-def SPIRV_WinogradVectorize
-    : I32EnumAttrCase<"SPIRVWinogradVectorize", 206>;
-
-def VMVX_Default : I32EnumAttrCase<"VMVXDefault", 300>;
-
-def Linalg_TransformDialectCodegen
-    : I32EnumAttrCase<"TransformDialectCodegen", 1000>;
-def Custom
-    : I32EnumAttrCase<"Custom", 1001>;
-
-def None : I32EnumAttrCase<"None", 0xffff>;
-
-// EnumAttrCase for all known lowerings for ops within dispatch region
-// to scalar/native-vector code.
-def DispatchLoweringPassPipelineEnum : I32EnumAttr<
-  "DispatchLoweringPassPipeline",
-  "identifier for pass pipeline use to lower dispatch region", [
-    // CPU CodeGen pipelines
-    CPU_Default, CPU_DoubleTilingExpert,
-    CPU_ConvTileAndDecomposeExpert,
-    CPU_Mmt4dTilingExpert, CPU_BufferOpsTileAndVectorize,
-    CPU_DataTiling, CPU_LinalgExtTileAndVectorize,
-
-    // LLVMGPU CodeGen pipelines
-    LLVMGPU_Default, LLVMGPU_BaseLowering, LLVMGPU_SimpleDistribute,
-    LLVMGPU_Vectorize, LLVMGPU_VectorDistribute,
-    LLVMGPU_WinogradVectorize, LLVMGPU_TileAndFuse,
-
-    // SPIR-V CodeGen pipelines
-    SPIRV_BaseLowering, SPIRV_BaseDistribute, SPIRV_BaseVectorize,
-    SPIRV_SubgroupReduce, SPIRV_MatmulPromoteVectorize,
-    SPIRV_CooperativeMatrixVectorize, SPIRV_WinogradVectorize,
-
-    VMVX_Default,
-
-    // Transform dialect based codegen
-    Linalg_TransformDialectCodegen,
-
-    // For out of tree pass-pipelines
-    Custom,
-
-    // None to specify no in-built pipelines to use.
-    None
+def LLVMCPUPipelineEnum : I32EnumAttr<
+  "LLVMCPUPipeline",
+  "LLVMCPU dispatch lowering pipeline.", [
+    LLVMCPUPipeline_CPUDefault,
+    LLVMCPUPipeline_CPUDoubleTilingExpert,
+    LLVMCPUPipeline_CPUConvTileAndDecomposeExpert,
+    LLVMCPUPipeline_Mmt4dTilingExpert,
+    LLVMCPUPipeline_CPUBufferOpsTileAndVectorize,
+    LLVMCPUPipeline_CPUDataTiling,
+    LLVMCPUPipeline_CPULinalgExtTileAndVectorize
   ]> {
   let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
-  // Don't generate a C++ class! We want to use the AttrDef
   let genSpecializedAttr = 0;
 }
 
-// Define the AttrDef
-def DispatchLoweringPassPipelineAttr :
-    EnumAttr<IREECodegen_Dialect, DispatchLoweringPassPipelineEnum, "">;
+// LLVMGPU pipeline types.
+def LLVMGPUPipeline_LLVMGPUDefault
+    : I32EnumAttrCase<"LLVMGPUDefault", 0>;
+def LLVMGPUPipeline_LLVMGPUBaseLowering
+    : I32EnumAttrCase<"LLVMGPUBaseLowering", 1>;
+def LLVMGPUPipeline_LLVMGPUDistribute
+    : I32EnumAttrCase<"LLVMGPUDistribute", 2>;
+def LLVMGPUPipeline_LLVMGPUVectorize
+    : I32EnumAttrCase<"LLVMGPUVectorize", 3>;
+def LLVMGPUPipeline_LLVMGPUVectorDistribute
+    : I32EnumAttrCase<"LLVMGPUVectorDistribute", 4>;
+def LLVMGPUPipeline_LLVMGPUWinogradVectorize
+    : I32EnumAttrCase<"LLVMGPUWinogradVectorize", 5>;
+def LLVMGPUPipeline_LLVMGPUTileAndFuse
+    : I32EnumAttrCase<"LLVMGPUTileAndFuse", 6>;
+
+def LLVMGPUPipelineEnum : I32EnumAttr<
+  "LLVMGPUPipeline",
+  "LLVMGPU dispatch lowering pipeline.", [
+    LLVMGPUPipeline_LLVMGPUDefault,
+    LLVMGPUPipeline_LLVMGPUBaseLowering,
+    LLVMGPUPipeline_LLVMGPUDistribute,
+    LLVMGPUPipeline_LLVMGPUVectorize,
+    LLVMGPUPipeline_LLVMGPUVectorDistribute,
+    LLVMGPUPipeline_LLVMGPUWinogradVectorize,
+    LLVMGPUPipeline_LLVMGPUTileAndFuse
+  ]> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
+  let genSpecializedAttr = 0;
+}
+
+// SPIRV pipeline types.
+def SPIRVPipeline_SPIRVBaseLowering
+    : I32EnumAttrCase<"SPIRVBaseLowering", 0>;
+def SPIRVPipeline_SPIRVBaseDistribute
+    : I32EnumAttrCase<"SPIRVBaseDistribute", 1>;
+def SPIRVPipeline_SPIRVBaseVectorize
+    : I32EnumAttrCase<"SPIRVBaseVectorize", 2>;
+def SPIRVPipeline_SPIRVSubgroupReduce
+    : I32EnumAttrCase<"SPIRVSubgroupReduce", 3>;
+def SPIRVPipeline_SPIRVMatmulPromoteVectorize
+    : I32EnumAttrCase<"SPIRVMatmulPromoteVectorize", 4>;
+def SPIRVPipeline_SPIRVCooperativeMatrixVectorize
+    : I32EnumAttrCase<"SPIRVCooperativeMatrixVectorize", 5>;
+def SPIRVPipeline_SPIRVWinogradVectorize
+    : I32EnumAttrCase<"SPIRVWinogradVectorize", 6>;
+
+def SPIRVPipelineEnum : I32EnumAttr<
+  "SPIRVPipeline",
+  "SPIRV dispatch lowering pipeline.", [
+    SPIRVPipeline_SPIRVBaseLowering,
+    SPIRVPipeline_SPIRVBaseDistribute,
+    SPIRVPipeline_SPIRVBaseVectorize,
+    SPIRVPipeline_SPIRVSubgroupReduce,
+    SPIRVPipeline_SPIRVMatmulPromoteVectorize,
+    SPIRVPipeline_SPIRVCooperativeMatrixVectorize,
+    SPIRVPipeline_SPIRVWinogradVectorize
+  ]> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
+  let genSpecializedAttr = 0;
+}
+
+// VMVX pipeline types.
+def VMVXPipeline_VMVXDefault
+    : I32EnumAttrCase<"VMVXDefault", 0>;
+
+def VMVXPipelineEnum : I32EnumAttr<
+  "VMVXPipeline",
+  "VMVX dispatch lowering pipeline.", [
+    VMVXPipeline_VMVXDefault
+  ]> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
+  let genSpecializedAttr = 0;
+}
+
+// Per-backend pipeline attributes.
+// These do NOT implement PipelineAttrInterface directly. The interface is
+// attached externally by each backend via the ExternalModel mechanism.
+
+def IREECodegen_LLVMCPUDispatchLoweringPipelineAttr :
+    AttrDef<IREECodegen_Dialect, "LLVMCPUDispatchLoweringPipeline", []> {
+  let mnemonic = "llvmcpu_pipeline";
+  let summary = "LLVMCPU dispatch lowering pipeline specification.";
+  let parameters = (ins
+    EnumParameter<LLVMCPUPipelineEnum>:$pipeline,
+    OptionalParameter<"DictionaryAttr",
+        "Pipeline-specific configuration">:$configuration
+  );
+  let assemblyFormat = "`<` $pipeline (`,` $configuration^)? `>`";
+  let builders = [
+    AttrBuilder<(ins "LLVMCPUPipeline":$pipeline), [{
+      return $_get($_ctxt, pipeline, DictionaryAttr());
+    }]>
+  ];
+}
+
+def IREECodegen_LLVMGPUDispatchLoweringPipelineAttr :
+    AttrDef<IREECodegen_Dialect, "LLVMGPUDispatchLoweringPipeline", []> {
+  let mnemonic = "llvmgpu_pipeline";
+  let summary = "LLVMGPU dispatch lowering pipeline specification.";
+  let parameters = (ins
+    EnumParameter<LLVMGPUPipelineEnum>:$pipeline,
+    OptionalParameter<"DictionaryAttr",
+        "Pipeline-specific configuration">:$configuration
+  );
+  let assemblyFormat = "`<` $pipeline (`,` $configuration^)? `>`";
+  let builders = [
+    AttrBuilder<(ins "LLVMGPUPipeline":$pipeline), [{
+      return $_get($_ctxt, pipeline, DictionaryAttr());
+    }]>
+  ];
+}
+
+def IREECodegen_SPIRVDispatchLoweringPipelineAttr :
+    AttrDef<IREECodegen_Dialect, "SPIRVDispatchLoweringPipeline", []> {
+  let mnemonic = "spirv_pipeline";
+  let summary = "SPIRV dispatch lowering pipeline specification.";
+  let parameters = (ins
+    EnumParameter<SPIRVPipelineEnum>:$pipeline,
+    OptionalParameter<"DictionaryAttr",
+        "Pipeline-specific configuration">:$configuration
+  );
+  let assemblyFormat = "`<` $pipeline (`,` $configuration^)? `>`";
+  let builders = [
+    AttrBuilder<(ins "SPIRVPipeline":$pipeline), [{
+      return $_get($_ctxt, pipeline, DictionaryAttr());
+    }]>
+  ];
+}
+
+def IREECodegen_VMVXDispatchLoweringPipelineAttr :
+    AttrDef<IREECodegen_Dialect, "VMVXDispatchLoweringPipeline", []> {
+  let mnemonic = "vmvx_pipeline";
+  let summary = "VMVX dispatch lowering pipeline specification.";
+  let parameters = (ins
+    EnumParameter<VMVXPipelineEnum>:$pipeline,
+    OptionalParameter<"DictionaryAttr",
+        "Pipeline-specific configuration">:$configuration
+  );
+  let assemblyFormat = "`<` $pipeline (`,` $configuration^)? `>`";
+  let builders = [
+    AttrBuilder<(ins "VMVXPipeline":$pipeline), [{
+      return $_get($_ctxt, pipeline, DictionaryAttr());
+    }]>
+  ];
+}
+
+// Common pipeline attributes.
+// These implement PipelineAttrInterface directly (no external model needed).
+
+def IREECodegen_NonePipelineAttr :
+    AttrDef<IREECodegen_Dialect, "NonePipeline", [
+      DeclareAttrInterfaceMethods<IREECodegen_PipelineAttrInterface, [
+        "buildPipeline"
+      ]>
+    ]> {
+  let mnemonic = "none_pipeline";
+  let summary = "No-op pipeline specification (no lowering).";
+  let parameters = (ins
+    OptionalParameter<"DictionaryAttr",
+        "Pipeline-specific configuration">:$configuration
+  );
+  let assemblyFormat = "(`,` $configuration^)?";
+  let builders = [
+    AttrBuilder<(ins), [{
+      return $_get($_ctxt, DictionaryAttr());
+    }]>
+  ];
+}
+
+def IREECodegen_TransformDialectPipelineAttr :
+    AttrDef<IREECodegen_Dialect, "TransformDialectPipeline", [
+      DeclareAttrInterfaceMethods<IREECodegen_PipelineAttrInterface, [
+        "buildPipeline"
+      ]>
+    ]> {
+  let mnemonic = "transform_dialect_pipeline";
+  let summary = "Transform dialect codegen pipeline.";
+  let description = [{
+    No-op pipeline specification. The transform dialect interpreter runs
+    as a separate pass before the pipeline lowering pass.
+  }];
+  let parameters = (ins
+    OptionalParameter<"DictionaryAttr",
+        "Pipeline-specific configuration">:$configuration
+  );
+  let assemblyFormat = "(`,` $configuration^)?";
+  let builders = [
+    AttrBuilder<(ins), [{
+      return $_get($_ctxt, DictionaryAttr());
+    }]>
+  ];
+}
+
+def IREECodegen_CustomPipelineAttr :
+    AttrDef<IREECodegen_Dialect, "CustomPipeline", [
+      DeclareAttrInterfaceMethods<IREECodegen_PipelineAttrInterface, [
+        "buildPipeline"
+      ]>
+    ]> {
+  let mnemonic = "custom_pipeline";
+  let summary = "Custom out-of-tree pipeline specification.";
+  let parameters = (ins
+    OptionalParameter<"DictionaryAttr",
+        "Pipeline-specific configuration">:$configuration
+  );
+  let assemblyFormat = "(`,` $configuration^)?";
+  let builders = [
+    AttrBuilder<(ins), [{
+      return $_get($_ctxt, DictionaryAttr());
+    }]>
+  ];
+}
 
 //===---------------------------------------------------------------------===//
 // IREE Codegen workgroup mapping attributes
@@ -251,6 +400,32 @@ def IREECodegen_SimpleTargetAttr :
 
 
 //===---------------------------------------------------------------------===//
+// iree_codegen.pass_pipeline
+//===---------------------------------------------------------------------===//
+
+def IREECodegen_PassPipelineAttr :
+    AttrDef<IREECodegen_Dialect, "PassPipeline", [
+      DeclareAttrInterfaceMethods<IREECodegen_PipelineAttrInterface, [
+        "buildPipeline"
+      ]>
+    ]> {
+  let mnemonic = "pass_pipeline";
+  let summary = "An attribute carrying a textual pass pipeline string.";
+  let description = [{
+    Specifies a pass pipeline using MLIR's textual pass pipeline syntax.
+    The pipeline string is parsed and populated into an OpPassManager
+    when `buildPipeline` is called.
+  }];
+  let parameters = (ins
+    StringRefParameter<"The textual pass pipeline specification">:$pipeline
+  );
+  let assemblyFormat = [{
+    `<` $pipeline `>`
+  }];
+  let genVerifyDecl = 1;
+}
+
+//===---------------------------------------------------------------------===//
 // iree_codegen.translation_info
 //===---------------------------------------------------------------------===//
 
@@ -269,44 +444,30 @@ def IREECodegen_TranslationInfoAttr :
     dispatch region (like `linalg.matmul`/`linalg.*conv*`), this
     attribute gets propagated to the entry point function.
 
-    The fields are
-    - `passPipeline` : The pass pipeline to use.
-
-  }];
-
-  let assemblyFormat = [{
-    `<` `pipeline` `=` `` $passPipeline
-    (`codegen_spec` `=` $codegenSpec^)?
-    (`workgroup_size` `=` `[` $workgroupSize^ `]`)?
-    (`subgroup_size` `=` $subgroupSize^)?
-    (`,` $configuration^)? `>`
+    The `passPipeline` field can be either:
+    - A per-backend pipeline attr (e.g., `LLVMCPUDispatchLoweringPipelineAttr`,
+      `LLVMGPUDispatchLoweringPipelineAttr`) or a common pipeline attr
+      (e.g., `NonePipelineAttr`, `TransformDialectPipelineAttr`).
+    - Any attribute implementing `PipelineAttrInterface` (e.g.,
+      `#iree_codegen.pass_pipeline<"...">`).
   }];
 
   let parameters = (ins
-    AttrParameter<"IREE::Codegen::DispatchLoweringPassPipelineAttr",
-        "Name of the pipeline to be invoked on the translation unit.">:$passPipeline,
+    AttrParameter<"Attribute",
+        "Pass pipeline specification.">:$passPipeline,
     OptionalParameter<"SymbolRefAttr",
         "The symbol pointing to the transform dialect codegen spec to be used">:$codegenSpec,
     OptionalArrayRefParameter<"int64_t", "The workgroup size to use">:$workgroupSize,
-    OptionalParameter<"int64_t", "The subgroup size to use">:$subgroupSize,
-    OptionalParameter<"DictionaryAttr",
-        "Pipeline specific configuration">:$configuration
+    OptionalParameter<"int64_t", "The subgroup size to use">:$subgroupSize
   );
-  let builders = [
-    AttrBuilder<(ins "DispatchLoweringPassPipeline":$passPipeline,
-        CArg<"SymbolRefAttr", "{}">:$codegenSpec,
-        CArg<"ArrayRef<int64_t>", "{}">:$workgroupSize,
-        CArg<"std::optional<int64_t>", "std::nullopt">:$subgroupSize,
-        CArg<"DictionaryAttr", "{}">:$configuration)>,
-    AttrBuilder<(ins "DispatchLoweringPassPipeline":$passPipeline,
-        "ArrayRef<int64_t>":$workgroupSize,
-        CArg<"std::optional<int64_t>", "std::nullopt">:$subgroupSize,
-        CArg<"DictionaryAttr", "{}">:$configuration)>
-  ];
+  let hasCustomAssemblyFormat = 1;
+
   let extraClassDeclaration = [{
-    // Returns the lowering pass pipeline set.
-    DispatchLoweringPassPipeline getDispatchLoweringPassPipeline();
+    /// Returns the pipeline-specific configuration dictionary, if any.
+    /// Delegates to the pipeline attr's configuration parameter.
+    DictionaryAttr getConfiguration() const;
   }];
+
   let genVerifyDecl = 1;
 }
 

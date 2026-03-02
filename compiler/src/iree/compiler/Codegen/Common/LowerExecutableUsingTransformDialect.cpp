@@ -34,9 +34,8 @@ void LowerExecutableUsingTransformDialectPass::runOnOperation() {
   auto funcOp = *funcOps.begin();
   IREE::Codegen::TranslationInfoAttr translationInfo =
       getTranslationInfo(funcOp);
-  if (!translationInfo || translationInfo.getDispatchLoweringPassPipeline() !=
-                              IREE::Codegen::DispatchLoweringPassPipeline::
-                                  TransformDialectCodegen) {
+  if (!translationInfo || !isa<IREE::Codegen::TransformDialectPipelineAttr>(
+                              translationInfo.getPassPipeline())) {
     return;
   }
 
@@ -57,8 +56,8 @@ void LowerExecutableUsingTransformDialectPass::runOnOperation() {
   // other pass pipelines.
   auto translationInfoModified = getTranslationInfo(funcOp);
   if (!translationInfoModified ||
-      translationInfoModified.getDispatchLoweringPassPipeline() !=
-          IREE::Codegen::DispatchLoweringPassPipeline::None) {
+      !isa<IREE::Codegen::NonePipelineAttr>(
+          translationInfoModified.getPassPipeline())) {
     funcOp->emitOpError("expected transform dialect lowering to set the "
                         "translation_info to use None");
     return signalPassFailure();

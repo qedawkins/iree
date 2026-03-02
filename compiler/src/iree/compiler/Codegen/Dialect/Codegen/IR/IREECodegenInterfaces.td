@@ -752,6 +752,59 @@ def IREECodegen_UKernelProviderInterface :
   ];
 }
 
+def IREECodegen_PipelineAttrInterface :
+    AttrInterface<"PipelineAttrInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
+  let description = [{
+    Attribute interface for building a pass pipeline. Implementations populate
+    the provided OpPassManager with the desired pass pipeline. All pipeline
+    configuration is stored on the attribute itself (via configuration
+    dictionaries on per-backend pipeline attrs), so no function operation
+    is needed at pipeline construction time.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Populates the given pass manager with a pass pipeline.
+      }],
+      /*retTy=*/"::mlir::LogicalResult",
+      /*methodName=*/"buildPipeline",
+      /*args=*/(ins "::mlir::OpPassManager &":$pm)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns pipeline-specific configuration, if any.
+      }],
+      /*retTy=*/"::mlir::DictionaryAttr",
+      /*methodName=*/"getConfiguration",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return ::mlir::DictionaryAttr();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Pre-computes target-dependent configuration from the given function and
+        returns a new pipeline attr with the configuration embedded. Backends
+        implement this to read target information (e.g., executable target
+        attributes, translation info configuration) and bake it into the
+        pipeline attr's configuration dictionary.
+
+        The default implementation returns the attribute unchanged.
+      }],
+      /*retTy=*/"::mlir::Attribute",
+      /*methodName=*/"materializeConfiguration",
+      /*args=*/(ins "::mlir::Operation *":$funcOp),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return $_attr;
+      }]
+    >
+  ];
+}
+
 def IREECodegen_TargetInfoAttrInterface :
     AttrInterface<"TargetInfoAttrInterface"> {
   let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";

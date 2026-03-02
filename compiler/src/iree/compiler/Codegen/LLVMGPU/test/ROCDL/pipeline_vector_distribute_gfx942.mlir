@@ -1,11 +1,11 @@
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx942 \
 // RUN:   --iree-codegen-llvmgpu-use-vector-distribution --iree-llvmgpu-prefetch-num-stages=2 \
-// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-llvmgpu-lower-executable-target{for-rocdl=true})))))" \
+// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" \
 // RUN:   %s | FileCheck %s
 
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx942 \
 // RUN:   --iree-codegen-llvmgpu-use-vector-distribution --iree-llvmgpu-prefetch-num-stages=2 \
-// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-llvmgpu-lower-executable-target{for-rocdl=true})))))" \
+// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" \
 // RUN:   %s | FileCheck %s --check-prefix=MEMORY
 
 #config = #iree_gpu.lowering_config<{workgroup = [64, 64, 0], reduction = [0, 0, 128], promote_operands = [0, 1], mma_kind = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>, subgroup_basis = [[2, 2, 1], [0, 1, 2]]}>

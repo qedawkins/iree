@@ -27,7 +27,8 @@ constexpr unsigned kVectorDistributeReductionSizeToTargetIfDynamic = (1 << 31);
 
 namespace mlir::iree_compiler::IREE::GPU {
 
-using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
+using Codegen::LLVMGPUDispatchLoweringPipelineAttr;
+using Codegen::LLVMGPUPipeline;
 
 namespace {
 
@@ -781,9 +782,11 @@ LogicalResult setReductionConfig(IREE::GPU::TargetAttr target,
 
   auto pipelineConfig = b.getDictionaryAttr(pipelineAttrs);
 
-  auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-      context, CodeGenPipeline::LLVMGPUVectorDistribute, SymbolRefAttr(),
-      {workgroupSize, 1, 1}, subgroupSize, pipelineConfig);
+  auto translationInfo = Codegen::TranslationInfoAttr::get(
+      context,
+      LLVMGPUDispatchLoweringPipelineAttr::get(
+          context, LLVMGPUPipeline::LLVMGPUVectorDistribute, pipelineConfig),
+      SymbolRefAttr(), {workgroupSize, 1, 1}, subgroupSize);
 
   if (shouldSetTunerAttributes()) {
     setRootOpInfo(op);

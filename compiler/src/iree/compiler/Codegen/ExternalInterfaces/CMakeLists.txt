@@ -18,19 +18,28 @@ iree_cc_library(
     "CodegenExternalModels.h"
     "GPUEncodingExternalModels.h"
     "Interfaces.h"
+    "LLVMCPUPipelineExternalModels.h"
+    "LLVMGPUPipelineExternalModels.h"
+    "SPIRVPipelineExternalModels.h"
     "UtilExternalModels.h"
     "Utils.h"
+    "VMVXPipelineExternalModels.h"
   SRCS
     "CPUEncodingExternalModels.cpp"
     "CodegenExternalModels.cpp"
     "GPUEncodingExternalModels.cpp"
     "Interfaces.cpp"
+    "LLVMCPUPipelineExternalModels.cpp"
+    "LLVMGPUPipelineExternalModels.cpp"
+    "SPIRVPipelineExternalModels.cpp"
     "UtilExternalModels.cpp"
     "Utils.cpp"
+    "VMVXPipelineExternalModels.cpp"
   DEPS
     LLVMSupport
     MLIRAffineDialect
     MLIRArithDialect
+    MLIRFunctionInterfaces
     MLIRIR
     MLIRLinalgDialect
     MLIRLinalgTransforms
@@ -40,13 +49,19 @@ iree_cc_library(
     iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
     iree::compiler::Codegen::Dialect::Codegen::Utils
     iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
+    iree::compiler::Codegen::Dialect::GPU::TargetUtils::ConfigUtils
     iree::compiler::Codegen::Dialect::GPU::TargetUtils::KnownTargets
     iree::compiler::Codegen::Dialect::PCF::IR
     iree::compiler::Codegen::Dialect::PCF::Transforms
+    iree::compiler::Codegen::LLVMCPU
+    iree::compiler::Codegen::LLVMGPU
+    iree::compiler::Codegen::SPIRV
     iree::compiler::Codegen::Utils
+    iree::compiler::Codegen::VMVX
     iree::compiler::Dialect::Encoding::IR
     iree::compiler::Dialect::Encoding::Utils
     iree::compiler::Dialect::HAL::IR
+    iree::compiler::Dialect::LinalgExt::IR
     iree::compiler::Dialect::LinalgExt::Utils
     iree::compiler::Dialect::TensorExt::IR
   PUBLIC

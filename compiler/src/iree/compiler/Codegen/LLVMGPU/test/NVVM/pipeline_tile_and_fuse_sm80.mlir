@@ -1,5 +1,5 @@
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=sm_80 \
-// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-llvmgpu-lower-executable-target)))))" %s | FileCheck %s
+// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" %s | FileCheck %s
 
 // Test that TileAndFuse pipeline with NV_MMA_SYNC generates nvgpu.mma.sync operations.
 

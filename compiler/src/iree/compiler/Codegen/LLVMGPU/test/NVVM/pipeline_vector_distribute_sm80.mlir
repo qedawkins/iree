@@ -1,6 +1,6 @@
 // RUN: iree-opt --iree-gpu-test-target=sm_80 \
 // RUN:   --iree-codegen-llvmgpu-use-vector-distribution --iree-llvmgpu-prefetch-num-stages=2 \
-// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-llvmgpu-lower-executable-target)))))" \
+// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" \
 // RUN:   %s | FileCheck %s
 
 // Test matmul lowering with NV_MMA_SYNC intrinsics produces nvgpu.mma.sync operations.

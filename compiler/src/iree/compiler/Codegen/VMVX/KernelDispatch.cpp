@@ -10,6 +10,7 @@
 #include "iree/compiler/Codegen/Interfaces/PartitionableLoopsInterface.h"
 #include "iree/compiler/Codegen/Utils/CPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "mlir/IR/Attributes.h"
 
@@ -18,6 +19,23 @@
 namespace mlir::iree_compiler {
 
 constexpr int kDefaultDistTileSize = 64;
+
+/// Creates the pipeline configuration dictionary for VMVX pipelines.
+/// Pre-computes target-dependent options from the function's executable target.
+static DictionaryAttr getVMVXPipelineConfig(FunctionOpInterface funcOp) {
+  MLIRContext *ctx = funcOp.getContext();
+  IREE::HAL::ExecutableTargetAttr target =
+      IREE::HAL::ExecutableTargetAttr::lookup(funcOp);
+  bool enableUKernels = target && hasUkernel(target.getConfiguration());
+  if (!enableUKernels) {
+    return DictionaryAttr();
+  }
+  Builder b(ctx);
+  SmallVector<NamedAttribute> items;
+  items.emplace_back(b.getStringAttr("enable_ukernels"),
+                     b.getBoolAttr(enableUKernels));
+  return b.getDictionaryAttr(items);
+}
 
 static SmallVector<int64_t>
 getDefaultDistributionTileSizes(TilingInterface op) {
@@ -65,9 +83,12 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   }
   IREE::CPU::LoweringConfigAttr loweringConfig =
       getLoweringConfigWithDistributionTiles(fftOp.getContext(), distTileSizes);
+  DictionaryAttr vmvxConfig = getVMVXPipelineConfig(entryPointFn);
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, fftOp, loweringConfig,
-      IREE::Codegen::DispatchLoweringPassPipeline::VMVXDefault);
+      IREE::Codegen::VMVXDispatchLoweringPipelineAttr::get(
+          fftOp.getContext(), IREE::Codegen::VMVXPipeline::VMVXDefault,
+          vmvxConfig));
 }
 
 static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
@@ -80,9 +101,12 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   IREE::CPU::LoweringConfigAttr loweringConfig =
       getLoweringConfigWithDistributionTiles(tilingInterfaceOp.getContext(),
                                              distTileSizes);
+  DictionaryAttr vmvxConfig = getVMVXPipelineConfig(entryPointFn);
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, tilingInterfaceOp, loweringConfig,
-      IREE::Codegen::DispatchLoweringPassPipeline::VMVXDefault);
+      IREE::Codegen::VMVXDispatchLoweringPipelineAttr::get(
+          tilingInterfaceOp.getContext(),
+          IREE::Codegen::VMVXPipeline::VMVXDefault, vmvxConfig));
 }
 
 static LogicalResult
@@ -101,9 +125,13 @@ setVMVXRootConfigImpl(mlir::FunctionOpInterface entryPointFn, Operation *op) {
 
 static LogicalResult
 lowerUsingVMVXDefaultPipeline(mlir::FunctionOpInterface op) {
+  MLIRContext *ctx = op.getContext();
+  DictionaryAttr vmvxConfig = getVMVXPipelineConfig(op);
   auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-      op.getContext(),
-      IREE::Codegen::DispatchLoweringPassPipeline::VMVXDefault);
+      ctx,
+      IREE::Codegen::VMVXDispatchLoweringPipelineAttr::get(
+          ctx, IREE::Codegen::VMVXPipeline::VMVXDefault, vmvxConfig),
+      SymbolRefAttr(), ArrayRef<int64_t>{}, /*subgroupSize=*/int64_t());
   return setTranslationInfo(op, translationInfo);
 }
 

@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/LLVMGPU/KernelConfig.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "mlir/Pass/Pass.h"
@@ -47,8 +48,11 @@ static LogicalResult verifyLoweringConfiguration(
       return success();
     }
 
-    if (translationInfo.getDispatchLoweringPassPipeline() ==
-        IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUVectorDistribute) {
+    auto gpuAttr = dyn_cast<IREE::Codegen::LLVMGPUDispatchLoweringPipelineAttr>(
+        translationInfo.getPassPipeline());
+    if (gpuAttr &&
+        gpuAttr.getPipeline() ==
+            IREE::Codegen::LLVMGPUPipeline::LLVMGPUVectorDistribute) {
       return verifyLLVMGPUVectorDistributePipeline(op, loweringConfig);
     }
     return success();

@@ -49,7 +49,6 @@ iree_cc_library(
     "Passes.cpp"
     "VMVXAssignConstantOrdinals.cpp"
     "VMVXLinkExecutables.cpp"
-    "VMVXLowerExecutableTargetPass.cpp"
     "VMVXLowerLinalgMicrokernels.cpp"
     "VMVXSelectLoweringStrategy.cpp"
   DEPS

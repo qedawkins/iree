@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/SPIRV/KernelConfig.h"
 #include "iree/compiler/Codegen/SPIRV/Passes.h"
@@ -18,7 +19,8 @@ namespace mlir::iree_compiler {
 #define GEN_PASS_DEF_SPIRVSELECTLOWERINGSTRATEGYPASS
 #include "iree/compiler/Codegen/SPIRV/Passes.h.inc"
 
-using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
+using IREE::Codegen::SPIRVDispatchLoweringPipelineAttr;
+using IREE::Codegen::SPIRVPipeline;
 
 namespace {
 /// Lowers a hal.executable.variant inner module to SPIR-V scalar/native-vector
@@ -61,23 +63,29 @@ verifyLoweringConfiguration(FunctionOpInterface funcOp,
 static LogicalResult
 verifyTranslationInfo(FunctionOpInterface funcOp,
                       IREE::Codegen::TranslationInfoAttr translationInfo) {
-  if (translationInfo.getDispatchLoweringPassPipeline() ==
-      CodeGenPipeline::TransformDialectCodegen) {
+  if (isa<IREE::Codegen::TransformDialectPipelineAttr>(
+          translationInfo.getPassPipeline())) {
     // Transform dialect encodes configuration into the schedule directly.
+    return success();
+  }
+
+  auto spirvAttr = dyn_cast<SPIRVDispatchLoweringPipelineAttr>(
+      translationInfo.getPassPipeline());
+  if (!spirvAttr) {
     return success();
   }
 
   SmallVector<int64_t> workgroupSizes =
       llvm::to_vector(translationInfo.getWorkgroupSize());
-  switch (translationInfo.getDispatchLoweringPassPipeline()) {
-  case CodeGenPipeline::SPIRVBaseVectorize:
+  switch (spirvAttr.getPipeline()) {
+  case SPIRVPipeline::SPIRVBaseVectorize:
     return verifyLoweringConfiguration(funcOp, translationInfo, workgroupSizes,
                                        verifySPIRVBaseVectorizePassPipeline);
-  case CodeGenPipeline::SPIRVMatmulPromoteVectorize:
+  case SPIRVPipeline::SPIRVMatmulPromoteVectorize:
     return verifyLoweringConfiguration(
         funcOp, translationInfo, workgroupSizes,
         verifySPIRVMatmulPromoteVectorizePassPipeline);
-  case CodeGenPipeline::SPIRVCooperativeMatrixVectorize:
+  case SPIRVPipeline::SPIRVCooperativeMatrixVectorize:
     return verifyLoweringConfiguration(
         funcOp, translationInfo, workgroupSizes,
         verifySPIRVCooperativeMatrixVectorizePassPipeline);
@@ -95,7 +103,8 @@ void SPIRVSelectLoweringStrategyPass::runOnOperation() {
       return signalPassFailure();
     }
 
-    auto translationInfo = getTranslationInfo(funcOp);
+    IREE::Codegen::TranslationInfoAttr translationInfo =
+        getTranslationInfo(funcOp);
     if (!translationInfo) {
       continue;
     }

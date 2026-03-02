@@ -240,25 +240,29 @@ void LLVMCPUSelectLoweringStrategyPass::runOnOperation() {
       return signalPassFailure();
     }
 
-    auto translationInfo = getTranslationInfo(funcOp);
+    IREE::Codegen::TranslationInfoAttr translationInfo =
+        getTranslationInfo(funcOp);
     if (!translationInfo) {
       continue;
     }
 
-    // Verify the configuration.
+    // Verify the configuration for known LLVMCPU pipelines.
     LogicalResult verificationStatus = success();
-    switch (translationInfo.getDispatchLoweringPassPipeline()) {
-    case IREE::Codegen::DispatchLoweringPassPipeline::CPUDoubleTilingExpert:
-      verificationStatus = verifyLoweringConfiguration(
-          funcOp, verifyMultiTilingExpertPassPipelineConfig);
-      break;
-    case IREE::Codegen::DispatchLoweringPassPipeline::
-        CPUConvTileAndDecomposeExpert:
-      verificationStatus = verifyLoweringConfiguration(
-          funcOp, verifyConvTileAndDecomposeExpertConfig);
-      break;
-    default:
-      break;
+    auto cpuAttr = dyn_cast<IREE::Codegen::LLVMCPUDispatchLoweringPipelineAttr>(
+        translationInfo.getPassPipeline());
+    if (cpuAttr) {
+      switch (cpuAttr.getPipeline()) {
+      case IREE::Codegen::LLVMCPUPipeline::CPUDoubleTilingExpert:
+        verificationStatus = verifyLoweringConfiguration(
+            funcOp, verifyMultiTilingExpertPassPipelineConfig);
+        break;
+      case IREE::Codegen::LLVMCPUPipeline::CPUConvTileAndDecomposeExpert:
+        verificationStatus = verifyLoweringConfiguration(
+            funcOp, verifyConvTileAndDecomposeExpertConfig);
+        break;
+      default:
+        break;
+      }
     }
     if (failed(verificationStatus)) {
       return signalPassFailure();

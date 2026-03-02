@@ -95,23 +95,21 @@ transform_dialect::MapNestedForallToGpuThreadsOp::applyToOne(
     return diag;
   }
 
+  MLIRContext *ctx = rewriter.getContext();
+  // Build the pipeline attr, embedding any existing config from the original
+  // translation info.
+  Attribute pipelineAttr = IREE::Codegen::NonePipelineAttr::get(ctx);
+  if (translationInfo) {
+    DictionaryAttr existingConfig = translationInfo.getConfiguration();
+    if (existingConfig) {
+      pipelineAttr = IREE::Codegen::embedConfigInPipelineAttr(pipelineAttr,
+                                                              existingConfig);
+    }
+  }
   IREE::Codegen::TranslationInfoAttr updatedTranslationInfo =
       IREE::Codegen::TranslationInfoAttr::get(
-          rewriter.getContext(),
-          IREE::Codegen::DispatchLoweringPassPipeline::None, getWorkgroupDims(),
+          ctx, pipelineAttr, SymbolRefAttr(), getWorkgroupDims(),
           getSubgroupSize());
-
-  // Set config dictionary.
-  // Transform Dialect pipeline requires translation_info pass pipeline to
-  // be set to None here.
-  if (translationInfo) {
-    updatedTranslationInfo = IREE::Codegen::TranslationInfoAttr::get(
-        rewriter.getContext(), updatedTranslationInfo.getPassPipeline(),
-        updatedTranslationInfo.getCodegenSpec(),
-        updatedTranslationInfo.getWorkgroupSize(),
-        updatedTranslationInfo.getSubgroupSize(),
-        translationInfo.getConfiguration());
-  }
 
   if (failed(setTranslationInfo(target, updatedTranslationInfo))) {
     target->emitOpError("failed to update translation info");

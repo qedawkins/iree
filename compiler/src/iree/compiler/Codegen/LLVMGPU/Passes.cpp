@@ -11,6 +11,7 @@
 #include "iree-dialects/Dialect/LinalgTransform/Passes.h"
 #include "iree/compiler/Codegen/Common/CombineLayoutTransformation.h"
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
+#include "iree/compiler/Codegen/Common/PassUtils.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
@@ -1014,56 +1015,69 @@ static void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager,
   // Handled tensor constants.
   modulePassManager.addPass(createIREEBufferizeConstantsPass());
 
-  FunctionLikeNest funcPassManager(modulePassManager);
-  funcPassManager.addPass(createFoldTensorExtractOpPass)
-      .addPass(createExpandGPUOpsPass)
-      // Barrier elimination before we reach unstructured control flow.
-      .addPass(createGpuEliminateBarriers)
-      .addPass(createCanonicalizerPass)
-      .addPass(createCSEPass);
+  {
+    FunctionLikeNest funcPassManager(modulePassManager);
+    funcPassManager.addPass(createFoldTensorExtractOpPass)
+        .addPass(createExpandGPUOpsPass)
+        // Barrier elimination before we reach unstructured control flow.
+        .addPass(createGpuEliminateBarriers)
+        .addPass(createCanonicalizerPass)
+        .addPass(createCSEPass);
 
-  // This pass needs to run before SCF -> CF.
-  addLowerAndOptimizeAddressComputationPasses(funcPassManager);
-  funcPassManager.addPass(createLLVMGPUVectorLoweringPass)
-      .addPass(createCanonicalizerPass)
-      .addPass(createCSEPass);
+    // This pass needs to run before SCF -> CF.
+    addLowerAndOptimizeAddressComputationPasses(funcPassManager);
+    funcPassManager.addPass(createLLVMGPUVectorLoweringPass)
+        .addPass(createCanonicalizerPass)
+        .addPass(createCSEPass);
 
-  if (forROCDL) {
-    // This pass needs to run after the LLVMGPUVectorLoweringPass.
-    funcPassManager.addPass(amdgpu::createAmdgpuMaskedloadToLoadPass);
-    // This pass needs to run before the ResolveSwizzleHints pass.
-    funcPassManager.addPass(amdgpu::createAmdgpuFoldMemRefOpsPass);
+    if (forROCDL) {
+      // This pass needs to run after the LLVMGPUVectorLoweringPass.
+      funcPassManager.addPass(amdgpu::createAmdgpuMaskedloadToLoadPass);
+      // This pass needs to run before the ResolveSwizzleHints pass.
+      funcPassManager.addPass(amdgpu::createAmdgpuFoldMemRefOpsPass);
+    }
+
+    funcPassManager
+        // Run checks on shared memory usage.
+        .addPass([&] {
+          auto getIndexBitwidth = [](mlir::FunctionOpInterface) { return 64; };
+          return createGPUCheckResourceUsagePass(getIndexBitwidth);
+        })
+        // Handle complex operation conversion.
+        .addPass(createConvertComplexToStandardPass)
+        // Math dialect ops rewrites, approximations, casts.
+        .addPass(createMathTransformPass)
+        // SCF -> CF
+        .addPass(createSCFToControlFlowPass)
+        .addPass(createCanonicalizerPass)
+        .addPass(createCSEPass)
+        // Hoist allocations back into the entry block, as lowering to CF may
+        // have split the block at a point before the allocation.
+        .addPass(createHoistStaticallyBoundAllocationsPass)
+        .addPass(createIREECodegenFoldMemRefAliasOpsPass)
+        .addPass([]() {
+          IREEExpandStridedMetadataPassOptions options;
+          options.allowSubviewExpansion = true;
+          return createIREEExpandStridedMetadataPass(options);
+        })
+        .addPass([&forROCDL]() {
+          return forROCDL ? createAMDGPUEmulateNarrowTypePass()
+                          : createEmulateNarrowTypePass();
+        })
+        .addPass(createIREECodegenAffineExpandIndexOpsPass)
+        .addPass(createIREECodegenLowerAffinePass);
+
+    if (forROCDL) {
+      // Software emulation for small float types (fp4/fp8) is controlled by
+      // --iree-llvmgpu-enable-small-float-emulation. When disabled (default),
+      // ConvertToROCDL will error on unsupported types.
+      funcPassManager.addPass([] {
+        return createConvertUnsupportedFloatArithPass(
+            ConvertUnsupportedFloatArithPassOptions{
+                clLLVMGPUEnableSmallFloatEmulation});
+      });
+    }
   }
-
-  funcPassManager
-      // Run checks on shared memory usage.
-      .addPass([&] {
-        auto getIndexBitwidth = [](mlir::FunctionOpInterface) { return 64; };
-        return createGPUCheckResourceUsagePass(getIndexBitwidth);
-      })
-      // Handle complex operation conversion.
-      .addPass(createConvertComplexToStandardPass)
-      // Math dialect ops rewrites, approximations, casts.
-      .addPass(createMathTransformPass)
-      // SCF -> CF
-      .addPass(createSCFToControlFlowPass)
-      .addPass(createCanonicalizerPass)
-      .addPass(createCSEPass)
-      // Hoist allocations back into the entry block, as lowering to CF may have
-      // split the block at a point before the allocation.
-      .addPass(createHoistStaticallyBoundAllocationsPass)
-      .addPass(createIREECodegenFoldMemRefAliasOpsPass)
-      .addPass([]() {
-        IREEExpandStridedMetadataPassOptions options;
-        options.allowSubviewExpansion = true;
-        return createIREEExpandStridedMetadataPass(options);
-      })
-      .addPass([&forROCDL]() {
-        return forROCDL ? createAMDGPUEmulateNarrowTypePass()
-                        : createEmulateNarrowTypePass();
-      })
-      .addPass(createIREECodegenAffineExpandIndexOpsPass)
-      .addPass(createIREECodegenLowerAffinePass);
 
   if (!preserveDebugInfo) {
     modulePassManager.addPass(createStripDebugInfoPass());
@@ -1074,20 +1088,12 @@ static void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager,
       IREE::Util::DropCompilerHintsPassOptions{/*keepAssumeInt=*/true}));
 
   if (forROCDL) {
-    // convert to ROCDL.
-    // Software emulation for small float types (fp4/fp8) is controlled by
-    // --iree-llvmgpu-enable-small-float-emulation. When disabled (default),
-    // ConvertToROCDL will error on unsupported types.
-    funcPassManager.addPass([] {
-      return createConvertUnsupportedFloatArithPass(
-          ConvertUnsupportedFloatArithPassOptions{
-              clLLVMGPUEnableSmallFloatEmulation});
-    });
+    // Convert to ROCDL.
     modulePassManager.addPass(createConvertToROCDLPass());
     modulePassManager.addNestedPass<LLVM::LLVMFuncOp>(
         createROCDLAnnotateKernelForTranslationPass());
   } else {
-    // convert to NVVM.
+    // Convert to NVVM.
     modulePassManager.addPass(createConvertToNVVMPass());
   }
 }
@@ -1163,11 +1169,28 @@ void buildLLVMGPUCodegenPassPipeline(OpPassManager &variantPassManager,
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
-    LLVMGPULowerExecutableTargetPassOptions options;
-    options.forROCDL = useROCM;
+    {
+      using Pipeline = IREE::Codegen::LLVMGPUPipeline;
+      using PipelineAttr = IREE::Codegen::LLVMGPUDispatchLoweringPipelineAttr;
+      MultiPipelineNest nest;
+
+      // Static pipelines (no per-op config needed).
+      addGPUBaseLoweringPassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::LLVMGPUBaseLowering)));
+      addGPUSimpleDistributePassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::LLVMGPUDistribute)));
+      addGPUVectorizationPassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::LLVMGPUVectorize)));
+      addGPUWinogradVectorizePassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::LLVMGPUWinogradVectorize)));
+
+      // Dynamic fallback (Default, TileAndFuse, VectorDistribute).
+      nest.nestIf(hasPipelineAttrInterface())
+          .addPass(createLowerDispatchUsingPipelineAttrPass());
+
+      nest.addTo(modulePassManager);
+    }
     FunctionLikeNest(modulePassManager)
-        .addPass(
-            [&] { return createLLVMGPULowerExecutableTargetPass(options); })
         .addPass(createVerifyWorkgroupDistributionPass)
         .addPass(createRemoveIndexHintsPass);
     if (clPatchFuncOps) {
@@ -1215,6 +1238,35 @@ void buildLLVMGPULinkingPassPipeline(OpPassManager &modulePassManager,
   auto &variantPassManager = modulePassManager.nest<IREE::HAL::ExecutableOp>()
                                  .nest<IREE::HAL::ExecutableVariantOp>();
   variantPassManager.addPass(createLLVMGPUAssignConstantOrdinalsPass());
+}
+
+//===----------------------------------------------------------------------===//
+// ROCDL Pass Pipelines
+//===----------------------------------------------------------------------===//
+
+void buildROCDLCodegenPassPipeline(OpPassManager &variantPassManager,
+                                   bool preserveDebugInfo) {
+  {
+    OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
+    modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
+    FunctionLikeNest(modulePassManager)
+        .addPass(createLowerDispatchUsingPipelineAttrPass)
+        .addPass(createVerifyWorkgroupDistributionPass);
+  }
+  variantPassManager.addPass(createReconcileTranslationInfoPass());
+  variantPassManager.addPass(createResolveWorkgroupCountHintsPass());
+  variantPassManager.addPass(createIREECodegenLowerAffinePass());
+  variantPassManager.addPass(IREE::Util::createDropCompilerHintsPass(
+      IREE::Util::DropCompilerHintsPassOptions{/*keepAssumeInt=*/true}));
+
+  addLowerToLLVMGPUPasses(variantPassManager.nest<ModuleOp>(),
+                          /*forROCDL=*/true, preserveDebugInfo);
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "Using ROCDL pass pipeline:\n";
+    variantPassManager.printAsTextualPipeline(llvm::dbgs());
+    llvm::dbgs() << "\n";
+  });
 }
 
 //===---------------------------------------------------------------------===//

@@ -779,6 +779,20 @@ def LinkTuningSpecsPass : Pass<"iree-codegen-link-tuning-specs", "ModuleOp"> {
   let dependentDialects = ["transform::TransformDialect"];
 }
 
+def LowerDispatchUsingPipelineAttrPass :
+    InterfacePass<"iree-codegen-lower-dispatch-using-pipeline-attr", "mlir::FunctionOpInterface"> {
+  let summary = "Lower dispatch using PipelineAttrInterface on translation info.";
+  let description = [{
+    Function-level pass that reads the function's TranslationInfoAttr, extracts
+    the pipeline attribute, casts it to PipelineAttrInterface, calls
+    materializeConfiguration() to pre-compute target-dependent settings, and
+    invokes buildPipeline() to populate and run the lowering pipeline.
+
+    This pass serves as the dynamic fallback within MultiPipelineNest for
+    pipelines that need per-function configuration from the pipeline attribute.
+  }];
+}
+
 def LowerExecutableUsingTransformDialectPass :
     Pass<"iree-codegen-lower-executable-using-transform-dialect", "ModuleOp"> {
   let summary = "Lower executables using the transform dialect recipe provided in the module.";

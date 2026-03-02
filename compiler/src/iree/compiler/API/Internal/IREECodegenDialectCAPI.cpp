@@ -29,39 +29,90 @@
 #include "mlir/IR/MLIRContext.h"
 
 using mlir::iree_compiler::IREE::Codegen::CompilationInfoAttr;
-using mlir::iree_compiler::IREE::Codegen::DispatchLoweringPassPipeline;
-using mlir::iree_compiler::IREE::Codegen::DispatchLoweringPassPipelineAttr;
 using mlir::iree_compiler::IREE::Codegen::LoweringConfigAttrInterface;
+using mlir::iree_compiler::IREE::Codegen::PipelineAttrInterface;
 using mlir::iree_compiler::IREE::Codegen::RootOpAttr;
 using mlir::iree_compiler::IREE::Codegen::TranslationInfoAttr;
 using mlir::iree_compiler::IREE::HAL::ExecutableVariantOp;
 
 bool ireeAttributeIsACodegenDispatchLoweringPassPipelineAttr(
     MlirAttribute attr) {
-  return llvm::isa<DispatchLoweringPassPipelineAttr>(unwrap(attr));
+  // Check if the attribute implements PipelineAttrInterface.
+  return llvm::isa<PipelineAttrInterface>(unwrap(attr));
 }
 
 MlirTypeID ireeCodegenDispatchLoweringPassPipelineAttrGetTypeID() {
-  return wrap(DispatchLoweringPassPipelineAttr::getTypeID());
+  // Returns the interface ID since the old concrete attr type no longer exists.
+  return wrap(PipelineAttrInterface::getInterfaceID());
 }
-
-static_assert(
-    std::is_same_v<uint32_t,
-                   std::underlying_type_t<DispatchLoweringPassPipeline>>,
-    "Enum type changed");
 
 MlirAttribute
 ireeCodegenDispatchLoweringPassPipelineAttrGet(MlirContext mlirCtx,
                                                uint32_t value) {
+  using namespace mlir::iree_compiler::IREE::Codegen;
   mlir::MLIRContext *ctx = unwrap(mlirCtx);
-  return wrap(DispatchLoweringPassPipelineAttr::get(
-      ctx, static_cast<DispatchLoweringPassPipeline>(value)));
+
+  // Map from the unified DispatchLoweringPassPipeline enum values to the
+  // per-backend pipeline attributes. The old enum used range-based numbering:
+  //   CPU: 0-6, LLVMGPU: 100-106, SPIRV: 200-206, VMVX: 300,
+  //   TransformDialectCodegen: 1000, None: 0xffff.
+  if (value <= 6) {
+    std::optional<LLVMCPUPipeline> pipeline = symbolizeLLVMCPUPipeline(value);
+    if (pipeline) {
+      return wrap(LLVMCPUDispatchLoweringPipelineAttr::get(ctx, *pipeline));
+    }
+  } else if (value >= 100 && value <= 106) {
+    std::optional<LLVMGPUPipeline> pipeline =
+        symbolizeLLVMGPUPipeline(value - 100);
+    if (pipeline) {
+      return wrap(LLVMGPUDispatchLoweringPipelineAttr::get(ctx, *pipeline));
+    }
+  } else if (value >= 200 && value <= 206) {
+    std::optional<SPIRVPipeline> pipeline = symbolizeSPIRVPipeline(value - 200);
+    if (pipeline) {
+      return wrap(SPIRVDispatchLoweringPipelineAttr::get(ctx, *pipeline));
+    }
+  } else if (value == 300) {
+    std::optional<VMVXPipeline> pipeline = symbolizeVMVXPipeline(value - 300);
+    if (pipeline) {
+      return wrap(VMVXDispatchLoweringPipelineAttr::get(ctx, *pipeline));
+    }
+  } else if (value == 1000) {
+    return wrap(TransformDialectPipelineAttr::get(ctx));
+  } else if (value == 0xffff) {
+    return wrap(NonePipelineAttr::get(ctx));
+  }
+  return wrap(mlir::Attribute());
 }
 
 uint32_t
 ireeCodegenDispatchLoweringPassPipelineAttrGetValue(MlirAttribute attr) {
-  return static_cast<uint32_t>(
-      llvm::cast<DispatchLoweringPassPipelineAttr>(unwrap(attr)).getValue());
+  using namespace mlir::iree_compiler::IREE::Codegen;
+  mlir::Attribute unwrapped = unwrap(attr);
+
+  // Map from per-backend pipeline attributes back to the unified enum values.
+  if (auto cpu =
+          llvm::dyn_cast<LLVMCPUDispatchLoweringPipelineAttr>(unwrapped)) {
+    return static_cast<uint32_t>(cpu.getPipeline());
+  }
+  if (auto gpu =
+          llvm::dyn_cast<LLVMGPUDispatchLoweringPipelineAttr>(unwrapped)) {
+    return static_cast<uint32_t>(gpu.getPipeline()) + 100;
+  }
+  if (auto spirv =
+          llvm::dyn_cast<SPIRVDispatchLoweringPipelineAttr>(unwrapped)) {
+    return static_cast<uint32_t>(spirv.getPipeline()) + 200;
+  }
+  if (auto vmvx = llvm::dyn_cast<VMVXDispatchLoweringPipelineAttr>(unwrapped)) {
+    return static_cast<uint32_t>(vmvx.getPipeline()) + 300;
+  }
+  if (llvm::isa<TransformDialectPipelineAttr>(unwrapped)) {
+    return 1000;
+  }
+  if (llvm::isa<NonePipelineAttr>(unwrapped)) {
+    return 0xffff;
+  }
+  return 0;
 }
 
 bool ireeAttributeIsACodegenTranslationInfoAttr(MlirAttribute attr) {
@@ -75,8 +126,6 @@ MlirTypeID ireeCodegenTranslationInfoAttrGetTypeID() {
 MlirAttribute ireeCodegenTranslationInfoAttrGet(
     MlirContext mlirCtx, ireeCodegenTranslationInfoParameters parameters) {
   assert(!mlirAttributeIsNull(parameters.passPipeline) &&
-         ireeAttributeIsACodegenDispatchLoweringPassPipelineAttr(
-             parameters.passPipeline) &&
          "Invalid pass pipeline attr");
 
   assert((mlirAttributeIsNull(parameters.codegenSpec) ||
@@ -87,10 +136,7 @@ MlirAttribute ireeCodegenTranslationInfoAttrGet(
           mlirAttributeIsADictionary(parameters.configuration)) &&
          "Invalid configuration attr");
 
-  DispatchLoweringPassPipeline passPipeline =
-      llvm::cast<DispatchLoweringPassPipelineAttr>(
-          unwrap(parameters.passPipeline))
-          .getValue();
+  mlir::Attribute passPipeline = unwrap(parameters.passPipeline);
   auto codegenSpec = llvm::cast_if_present<mlir::SymbolRefAttr>(
       unwrap(parameters.codegenSpec));
 
@@ -100,14 +146,18 @@ MlirAttribute ireeCodegenTranslationInfoAttrGet(
                      parameters.numWorkgroupSizeElements};
   }
 
-  std::optional<int64_t> subgroupSize = parameters.subgroupSize;
+  int64_t subgroupSize = parameters.subgroupSize;
   auto configuration = llvm::cast_if_present<mlir::DictionaryAttr>(
       unwrap(parameters.configuration));
 
+  // Embed configuration into the pipeline attr.
+  mlir::Attribute pipeline =
+      mlir::iree_compiler::IREE::Codegen::embedConfigInPipelineAttr(
+          passPipeline, configuration);
+
   mlir::MLIRContext *ctx = unwrap(mlirCtx);
-  return wrap(TranslationInfoAttr::get(ctx, passPipeline, codegenSpec,
-                                       workgroupSize, subgroupSize,
-                                       configuration));
+  return wrap(TranslationInfoAttr::get(ctx, pipeline, codegenSpec,
+                                       workgroupSize, subgroupSize));
 }
 
 ireeCodegenTranslationInfoParameters

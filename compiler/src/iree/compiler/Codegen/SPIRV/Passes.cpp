@@ -15,6 +15,7 @@
 
 #include "iree-dialects/Dialect/LinalgTransform/Passes.h"
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
+#include "iree/compiler/Codegen/Common/PassUtils.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/SPIRV/KernelConfig.h"
 #include "iree/compiler/Codegen/SPIRV/Passes.h"
@@ -181,45 +182,49 @@ static void addLoopMaterializationPasses(OpPassManager &funcPassManager) {
 /// cross loop nest optimizations. This should be invoked after structured op
 /// lowering and before final SPIR-V conversion.
 static void addMemRefLoweringPasses(OpPassManager &modulePassManager) {
-  FunctionLikeNest funcPassManager(modulePassManager);
+  {
+    FunctionLikeNest funcPassManager(modulePassManager);
 
-  funcPassManager.addPass(createCanonicalizerPass)
-      .addPass(createCSEPass)
-      .addPass(createConvertComplexToStandardPass)
-      // Math dialect ops rewrites, approximations, casts.
-      .addPass(createMathTransformPass)
-      .addPass(createPadDynamicAllocPass);
+    funcPassManager.addPass(createCanonicalizerPass)
+        .addPass(createCSEPass)
+        .addPass(createConvertComplexToStandardPass)
+        // Math dialect ops rewrites, approximations, casts.
+        .addPass(createMathTransformPass)
+        .addPass(createPadDynamicAllocPass);
 
-  // TODO: query this from the target.
-  auto getIndexBitwidth = [](mlir::FunctionOpInterface) { return 32; };
-  funcPassManager
-      .addPass(
-          [&]() { return createGPUCheckResourceUsagePass(getIndexBitwidth); })
+    // TODO: query this from the target.
+    auto getIndexBitwidth = [](mlir::FunctionOpInterface) { return 32; };
+    funcPassManager
+        .addPass(
+            [&]() { return createGPUCheckResourceUsagePass(getIndexBitwidth); })
 
-      // Fold load/store from/to subview ops into the original memref when
-      // possible. In SPIR-V we don't use memref descriptor so it's not possible
-      // to handle subview ops.
-      .addPass(memref::createFoldMemRefAliasOpsPass)
-      .addPass(createEmulateNarrowTypePass)
-      .addPass(createCanonicalizerPass)
-      .addPass(createCSEPass)
+        // Fold load/store from/to subview ops into the original memref when
+        // possible. In SPIR-V we don't use memref descriptor so it's not
+        // possible to handle subview ops.
+        .addPass(memref::createFoldMemRefAliasOpsPass)
+        .addPass(createEmulateNarrowTypePass)
+        .addPass(createCanonicalizerPass)
+        .addPass(createCSEPass)
 
-      // Turn scalar load/store from memrefs into vectorized ones if possible.
-      // This gives better memory access patterns, which is very important for
-      // perf.
-      .addPass(createSPIRVVectorizeLoadStorePass)
-      // Perform optimizations that need to across the scf.for region boundary.
-      .addPass(createForOpCanonicalizationPass)
-      // Perform various vector-level cross-op optimizations like load-store
-      // forwarding, shape casting and casting op cancelling.
-      .addPass([&]() { return createOptimizeVectorTransferPass(); })
-      .addPass(createSPIRVBreakDownLargeVectorPass)
+        // Turn scalar load/store from memrefs into vectorized ones if possible.
+        // This gives better memory access patterns, which is very important for
+        // perf.
+        .addPass(createSPIRVVectorizeLoadStorePass)
+        // Perform optimizations that need to across the scf.for region
+        // boundary.
+        .addPass(createForOpCanonicalizationPass)
+        // Perform various vector-level cross-op optimizations like load-store
+        // forwarding, shape casting and casting op cancelling.
+        .addPass([&]() { return createOptimizeVectorTransferPass(); })
+        .addPass(createSPIRVBreakDownLargeVectorPass)
 
-      // Perform optimizations that need to across the scf.for region boundary.
-      .addPass(createForOpCanonicalizationPass)
-      .addPass(createCanonicalizerPass)
-      .addPass(createCSEPass)
-      .addPass([&]() { return createOptimizeVectorTransferPass(); });
+        // Perform optimizations that need to across the scf.for region
+        // boundary.
+        .addPass(createForOpCanonicalizationPass)
+        .addPass(createCanonicalizerPass)
+        .addPass(createCSEPass)
+        .addPass([&]() { return createOptimizeVectorTransferPass(); });
+  }
 
   // Turn multi-dimension memref into one-dimension. This is needed for
   // SPIR-V because we don't use upstream memref descriptors.
@@ -656,8 +661,30 @@ void buildSPIRVCodegenPassPipeline(OpPassManager &variantPassManager) {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(
         createSPIRVLowerExecutableUsingTransformDialectPass());
+    {
+      using Pipeline = IREE::Codegen::SPIRVPipeline;
+      using PipelineAttr = IREE::Codegen::SPIRVDispatchLoweringPipelineAttr;
+      MultiPipelineNest nest;
+
+      // Static pipelines (no per-op config needed).
+      addSPIRVBaseLoweringPassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::SPIRVBaseLowering)));
+      addSPIRVBaseDistributePassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::SPIRVBaseDistribute)));
+      addSPIRVBaseVectorizePassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::SPIRVBaseVectorize)));
+      addSPIRVSubgroupReducePassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::SPIRVSubgroupReduce)));
+      addSPIRVWinogradVectorizePassPipeline(nest.nestIf(
+          matchesPipeline<PipelineAttr>(Pipeline::SPIRVWinogradVectorize)));
+
+      // Dynamic fallback (CooperativeMatrixVectorize, MatmulPromoteVectorize).
+      nest.nestIf(hasPipelineAttrInterface())
+          .addPass(createLowerDispatchUsingPipelineAttrPass());
+
+      nest.addTo(modulePassManager);
+    }
     FunctionLikeNest(modulePassManager)
-        .addPass(createSPIRVLowerExecutableTargetPass)
         .addPass(createVerifyWorkgroupDistributionPass);
     addMemRefLoweringPasses(modulePassManager);
     FunctionLikeNest(modulePassManager).addPass(createGpuEliminateBarriers);

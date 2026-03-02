@@ -45,7 +45,8 @@ constexpr int kMaxVectorNumBits = 128;
 
 namespace mlir::iree_compiler {
 
-using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
+using IREE::Codegen::SPIRVDispatchLoweringPipelineAttr;
+using IREE::Codegen::SPIRVPipeline;
 
 //===----------------------------------------------------------------------===//
 // Utility Functions
@@ -301,7 +302,8 @@ LogicalResult setConvOpConfig(linalg::LinalgOp linalgOp,
     threadTileSizes[i] = workgroupTileSizes[i] / workgroupSize[3 - i];
   }
 
-  auto pipeline = CodeGenPipeline::SPIRVBaseVectorize;
+  Attribute pipeline = SPIRVDispatchLoweringPipelineAttr::get(
+      linalgOp.getContext(), SPIRVPipeline::SPIRVBaseVectorize);
   TileSizesListType tileSizes;
   tileSizes.push_back(workgroupTileSizes);
   tileSizes.push_back(threadTileSizes);
@@ -767,7 +769,9 @@ LogicalResult setMatmulOpConfig(IREE::GPU::TargetAttr target,
 
     return setOpConfigAndEntryPointFnTranslation(
         op->getParentOfType<mlir::FunctionOpInterface>(), op, tileSizes,
-        CodeGenPipeline::SPIRVMatmulPromoteVectorize, workgroupSize,
+        SPIRVDispatchLoweringPipelineAttr::get(
+            op->getContext(), SPIRVPipeline::SPIRVMatmulPromoteVectorize),
+        workgroupSize,
         /*subgroupSize=*/std::nullopt,
         getSoftwarePipeliningAttrDict(op->getContext(), pipelineDepth,
                                       storeStage));
@@ -786,7 +790,9 @@ LogicalResult setMatmulOpConfig(IREE::GPU::TargetAttr target,
                       reductionTileSizes);
   return setOpConfigAndEntryPointFnTranslation(
       op->getParentOfType<mlir::FunctionOpInterface>(), op, tileSizes,
-      CodeGenPipeline::SPIRVBaseVectorize, workgroupSize);
+      SPIRVDispatchLoweringPipelineAttr::get(op->getContext(),
+                                             SPIRVPipeline::SPIRVBaseVectorize),
+      workgroupSize);
 }
 
 static LogicalResult setTilingAndMatmulOpConfig(linalg::LinalgOp op,
@@ -970,7 +976,8 @@ setCooperativeMatrixConfig(IREE::GPU::TargetAttr target, linalg::LinalgOp op,
   }
   assert(schedule->hasSingleDimensions() && "expected single M/N/K dimension");
 
-  auto pipeline = CodeGenPipeline::SPIRVCooperativeMatrixVectorize;
+  Attribute pipeline = SPIRVDispatchLoweringPipelineAttr::get(
+      op->getContext(), SPIRVPipeline::SPIRVCooperativeMatrixVectorize);
 
   std::array<int64_t, 3> workgroupSize{schedule->nSubgroupCounts[0] *
                                            subgroupSize,
@@ -1051,7 +1058,8 @@ static LogicalResult setFftOpConfig(IREE::GPU::TargetAttr target,
                                     IREE::LinalgExt::FftOp op) {
   LLVM_DEBUG(llvm::dbgs() << "trying to deduce config as fft...\n");
   int subgroupSize = target.getPreferredSubgroupSize();
-  auto pipeline = CodeGenPipeline::SPIRVBaseDistribute;
+  Attribute pipeline = SPIRVDispatchLoweringPipelineAttr::get(
+      op->getContext(), SPIRVPipeline::SPIRVBaseDistribute);
 
   std::array<int64_t, 3> workgroupSize = {subgroupSize, 1, 1};
 
@@ -1092,7 +1100,8 @@ static LogicalResult setWinogradOpConfig(IREE::GPU::TargetAttr target,
   // workgroup size. The tile sizes below are placeholders and were obtained
   // by manual tuning on the AMD Navi2 GPU on a small set of convolution
   // sizes found in the StableDiffusion model.
-  auto pipeline = CodeGenPipeline::SPIRVWinogradVectorize;
+  Attribute pipeline = SPIRVDispatchLoweringPipelineAttr::get(
+      op->getContext(), SPIRVPipeline::SPIRVWinogradVectorize);
   std::array<int64_t, 3> workgroupSize = {32, 4, 4};
   TileSizesListType tileSizes = {{1, 0, 0, 32}, {1, 1, 1, 1}, {0, 0, 0, 0}};
   return setOpConfigAndEntryPointFnTranslation(
@@ -1335,7 +1344,9 @@ static LogicalResult setReductionConfig(IREE::GPU::TargetAttr target,
     std::array<int64_t, 3> workgroupSize = {subgroupSize, 1, 1};
     if (failed(setOpConfigAndEntryPointFnTranslation(
             op->getParentOfType<mlir::FunctionOpInterface>(), op, tileSizes,
-            CodeGenPipeline::SPIRVSubgroupReduce, workgroupSize))) {
+            SPIRVDispatchLoweringPipelineAttr::get(
+                op->getContext(), SPIRVPipeline::SPIRVSubgroupReduce),
+            workgroupSize))) {
       return failure();
     }
 
@@ -1458,7 +1469,9 @@ static LogicalResult setReductionConfig(IREE::GPU::TargetAttr target,
   tileSizes.emplace_back(std::move(reductionTileSizes)); // reduction level
   if (failed(setOpConfigAndEntryPointFnTranslation(
           op->getParentOfType<mlir::FunctionOpInterface>(), op, tileSizes,
-          CodeGenPipeline::SPIRVSubgroupReduce, workgroupSize))) {
+          SPIRVDispatchLoweringPipelineAttr::get(
+              op->getContext(), SPIRVPipeline::SPIRVSubgroupReduce),
+          workgroupSize))) {
     return failure();
   }
 
@@ -1488,7 +1501,8 @@ static LogicalResult setDefaultOpConfig(IREE::GPU::TargetAttr target,
   if (partitionedLoops.empty()) {
     // No tiled loops means we cannot tile (and distribute) at all. Use just one
     // single thread to run everything.
-    auto pipeline = CodeGenPipeline::SPIRVBaseDistribute;
+    Attribute pipeline = SPIRVDispatchLoweringPipelineAttr::get(
+        op->getContext(), SPIRVPipeline::SPIRVBaseDistribute);
     std::array<int64_t, 3> workgroupSize = {1, 1, 1};
     return setOpConfigAndEntryPointFnTranslation(
         funcOp, op, TileSizesListType{}, pipeline, workgroupSize);
@@ -1520,7 +1534,8 @@ static LogicalResult setDefaultOpConfig(IREE::GPU::TargetAttr target,
   // Special case for non-linalg ops.
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp || linalgOp.getNumDpsInits() != 1) {
-    auto pipeline = CodeGenPipeline::SPIRVBaseDistribute;
+    Attribute pipeline = SPIRVDispatchLoweringPipelineAttr::get(
+        op->getContext(), SPIRVPipeline::SPIRVBaseDistribute);
 
     initConfiguration();
     TileSizesListType tileSizes;
@@ -1679,8 +1694,9 @@ static LogicalResult setDefaultOpConfig(IREE::GPU::TargetAttr target,
     }
   }
 
-  auto pipeline = vectorizable ? CodeGenPipeline::SPIRVBaseVectorize
-                               : CodeGenPipeline::SPIRVBaseDistribute;
+  Attribute pipeline = SPIRVDispatchLoweringPipelineAttr::get(
+      op->getContext(), vectorizable ? SPIRVPipeline::SPIRVBaseVectorize
+                                     : SPIRVPipeline::SPIRVBaseDistribute);
 
   TileSizesListType tileSizes;
   tileSizes.push_back(workgroupTileSizes);
@@ -1866,9 +1882,12 @@ LogicalResult initSPIRVLaunchConfig(FunctionOpInterface funcOp) {
       auto isOne = [](Value value) { return matchPattern(value, m_One()); };
       if (llvm::all_of(retOp.getOperands(), isOne)) {
         std::array<int64_t, 3> workgroupSize = {1, 1, 1};
+        MLIRContext *ctx = funcOp.getContext();
         auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-            funcOp.getContext(), CodeGenPipeline::SPIRVBaseLowering,
-            workgroupSize);
+            ctx,
+            SPIRVDispatchLoweringPipelineAttr::get(
+                ctx, SPIRVPipeline::SPIRVBaseLowering),
+            SymbolRefAttr(), workgroupSize, /*subgroupSize=*/int64_t());
         return setTranslationInfo(funcOp, translationInfo);
       }
     }

@@ -1,4 +1,4 @@
-// RUN: iree-opt --split-input-file --iree-gpu-test-target=volta@vulkan --pass-pipeline='builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-codegen-spirv-configuration-pipeline, func.func(iree-spirv-lower-executable-target-pass)))))' %s | FileCheck %s
+// RUN: iree-opt --split-input-file --iree-gpu-test-target=volta@vulkan --pass-pipeline='builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-codegen-spirv-configuration-pipeline, func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))' %s | FileCheck %s
 
 // TODO (MaheshRavishankar): This test should be modified to run just on the inner module/func.func. Blocked
 // today since `TileAndDistributeToWorkgroups` runs the `FoldAffineMinOverWorkgroupIds` pattern that

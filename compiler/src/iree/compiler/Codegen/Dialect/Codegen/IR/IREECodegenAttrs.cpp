@@ -19,6 +19,127 @@
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/StorageUniquerSupport.h"
+#include "mlir/Pass/PassRegistry.h"
+
+// Custom parse/print directives for TranslationInfoAttr's pipeline field.
+// These must be defined before the generated .cpp.inc is included because
+// the ODS-generated parse/print methods call them.
+namespace mlir::iree_compiler::IREE::Codegen {
+
+/// Parses either a pipeline enum keyword (e.g., `CPUDefault`,
+/// `LLVMGPUTileAndFuse`) or a generic attribute implementing
+/// PipelineAttrInterface (e.g., `#iree_codegen.pass_pipeline<"...">`).
+static ParseResult parsePipelineAttr(AsmParser &parser, Attribute &result) {
+  StringRef keyword;
+  SMLoc loc = parser.getCurrentLocation();
+  if (succeeded(parser.parseOptionalKeyword(&keyword))) {
+    MLIRContext *ctx = parser.getContext();
+    // Try LLVMCPU pipelines.
+    if (auto val = symbolizeLLVMCPUPipeline(keyword)) {
+      result = LLVMCPUDispatchLoweringPipelineAttr::get(
+          ctx, *val, /*configuration=*/DictionaryAttr());
+      return success();
+    }
+    // Try LLVMGPU pipelines.
+    if (auto val = symbolizeLLVMGPUPipeline(keyword)) {
+      result = LLVMGPUDispatchLoweringPipelineAttr::get(
+          ctx, *val, /*configuration=*/DictionaryAttr());
+      return success();
+    }
+    // Try SPIRV pipelines.
+    if (auto val = symbolizeSPIRVPipeline(keyword)) {
+      result = SPIRVDispatchLoweringPipelineAttr::get(
+          ctx, *val, /*configuration=*/DictionaryAttr());
+      return success();
+    }
+    // Try VMVX pipelines.
+    if (auto val = symbolizeVMVXPipeline(keyword)) {
+      result = VMVXDispatchLoweringPipelineAttr::get(
+          ctx, *val, /*configuration=*/DictionaryAttr());
+      return success();
+    }
+    // Try common pipelines.
+    if (keyword == "TransformDialectCodegen") {
+      result = TransformDialectPipelineAttr::get(ctx);
+      return success();
+    }
+    if (keyword == "Custom") {
+      result = CustomPipelineAttr::get(ctx);
+      return success();
+    }
+    if (keyword == "None") {
+      result = NonePipelineAttr::get(ctx);
+      return success();
+    }
+    parser.emitError(loc, "unknown pipeline keyword: ") << keyword;
+    return failure();
+  }
+  Attribute attr;
+  if (parser.parseAttribute(attr)) {
+    return failure();
+  }
+  result = attr;
+  return success();
+}
+
+/// Prints pipeline attrs as bare keywords and other attributes (e.g.,
+/// PipelineAttrInterface impls) via the generic printer.
+static void printPipelineAttr(AsmPrinter &printer, Attribute pipelineAttr) {
+  llvm::TypeSwitch<Attribute>(pipelineAttr)
+      .Case<LLVMCPUDispatchLoweringPipelineAttr>([&](auto attr) {
+        printer << stringifyLLVMCPUPipeline(attr.getPipeline());
+      })
+      .Case<LLVMGPUDispatchLoweringPipelineAttr>([&](auto attr) {
+        printer << stringifyLLVMGPUPipeline(attr.getPipeline());
+      })
+      .Case<SPIRVDispatchLoweringPipelineAttr>([&](auto attr) {
+        printer << stringifySPIRVPipeline(attr.getPipeline());
+      })
+      .Case<VMVXDispatchLoweringPipelineAttr>([&](auto attr) {
+        printer << stringifyVMVXPipeline(attr.getPipeline());
+      })
+      .Case<NonePipelineAttr>([&](auto) { printer << "None"; })
+      .Case<TransformDialectPipelineAttr>(
+          [&](auto) { printer << "TransformDialectCodegen"; })
+      .Case<CustomPipelineAttr>([&](auto) { printer << "Custom"; })
+      .Default([&](Attribute attr) { printer.printAttribute(attr); });
+}
+
+Attribute embedConfigInPipelineAttr(Attribute pipelineAttr,
+                                    DictionaryAttr config) {
+  if (!config) {
+    return pipelineAttr;
+  }
+  return llvm::TypeSwitch<Attribute, Attribute>(pipelineAttr)
+      .Case<LLVMCPUDispatchLoweringPipelineAttr>([&](auto attr) -> Attribute {
+        return LLVMCPUDispatchLoweringPipelineAttr::get(
+            attr.getContext(), attr.getPipeline(), config);
+      })
+      .Case<LLVMGPUDispatchLoweringPipelineAttr>([&](auto attr) -> Attribute {
+        return LLVMGPUDispatchLoweringPipelineAttr::get(
+            attr.getContext(), attr.getPipeline(), config);
+      })
+      .Case<SPIRVDispatchLoweringPipelineAttr>([&](auto attr) -> Attribute {
+        return SPIRVDispatchLoweringPipelineAttr::get(
+            attr.getContext(), attr.getPipeline(), config);
+      })
+      .Case<VMVXDispatchLoweringPipelineAttr>([&](auto attr) -> Attribute {
+        return VMVXDispatchLoweringPipelineAttr::get(
+            attr.getContext(), attr.getPipeline(), config);
+      })
+      .Case<NonePipelineAttr>([&](auto attr) -> Attribute {
+        return NonePipelineAttr::get(attr.getContext(), config);
+      })
+      .Case<TransformDialectPipelineAttr>([&](auto attr) -> Attribute {
+        return TransformDialectPipelineAttr::get(attr.getContext(), config);
+      })
+      .Case<CustomPipelineAttr>([&](auto attr) -> Attribute {
+        return CustomPipelineAttr::get(attr.getContext(), config);
+      })
+      .Default([](Attribute attr) { return attr; });
+}
+
+} // namespace mlir::iree_compiler::IREE::Codegen
 
 #define GET_ATTRDEF_CLASSES
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.cpp.inc"
@@ -65,53 +186,196 @@ ArrayAttr ExportConfigAttr::getWorkgroupSizeIndexArray() {
 }
 
 //===----------------------------------------------------------------------===//
+// iree_codegen.pass_pipeline
+//===----------------------------------------------------------------------===//
+
+LogicalResult PassPipelineAttr::buildPipeline(OpPassManager &pm) const {
+  if (failed(parsePassPipeline(getPipeline(), pm))) {
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult
+PassPipelineAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                         StringRef pipeline) {
+  OpPassManager pm("builtin.module");
+  if (failed(parsePassPipeline(pipeline, pm))) {
+    return emitError() << "invalid pass pipeline specification: '" << pipeline
+                       << "'";
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// iree_codegen.none_pipeline
+//===----------------------------------------------------------------------===//
+
+LogicalResult NonePipelineAttr::buildPipeline(OpPassManager &pm) const {
+  // No-op: no pipeline to build.
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// iree_codegen.transform_dialect_pipeline
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+TransformDialectPipelineAttr::buildPipeline(OpPassManager &pm) const {
+  // No-op: the transform dialect interpreter runs separately.
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// iree_codegen.custom_pipeline
+//===----------------------------------------------------------------------===//
+
+LogicalResult CustomPipelineAttr::buildPipeline(OpPassManager &pm) const {
+  // No-op: custom pipelines are handled out-of-tree.
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // iree_codegen.translation_info
 //===----------------------------------------------------------------------===//
 
-TranslationInfoAttr TranslationInfoAttr::get(
-    MLIRContext *context, DispatchLoweringPassPipeline passPipeline,
-    SymbolRefAttr codegenSpec, ArrayRef<int64_t> workgroupSize,
-    std::optional<int64_t> subgroupSize, DictionaryAttr configuration) {
-  auto pipelineAttr =
-      DispatchLoweringPassPipelineAttr::get(context, passPipeline);
-  return get(context, pipelineAttr, codegenSpec, workgroupSize,
-             subgroupSize.value_or(int64_t()), configuration);
+DictionaryAttr TranslationInfoAttr::getConfiguration() const {
+  return llvm::TypeSwitch<Attribute, DictionaryAttr>(getPassPipeline())
+      .Case<LLVMCPUDispatchLoweringPipelineAttr,
+            LLVMGPUDispatchLoweringPipelineAttr,
+            SPIRVDispatchLoweringPipelineAttr, VMVXDispatchLoweringPipelineAttr,
+            NonePipelineAttr, TransformDialectPipelineAttr, CustomPipelineAttr>(
+          [](auto attr) { return attr.getConfiguration(); })
+      .Default([](Attribute) { return DictionaryAttr(); });
 }
 
-TranslationInfoAttr TranslationInfoAttr::get(
-    MLIRContext *context, DispatchLoweringPassPipeline passPipeline,
-    ArrayRef<int64_t> workgroupSize, std::optional<int64_t> subgroupSize,
-    DictionaryAttr configuration) {
-  auto pipelineAttr =
-      DispatchLoweringPassPipelineAttr::get(context, passPipeline);
-  return get(context, pipelineAttr, /*codegenSpec=*/SymbolRefAttr(),
-             workgroupSize, subgroupSize.value_or(int64_t()), configuration);
+/// Custom parser for TranslationInfoAttr.
+/// Format: `<pipeline = <keyword> [codegen_spec = @sym]
+///           [workgroup_size = [x, y, z]] [subgroup_size = N]
+///           [, {config_dict}]>`
+/// The trailing config dict is stored on the pipeline attr, not on
+/// TranslationInfoAttr. This maintains backward-compatible textual IR.
+Attribute TranslationInfoAttr::parse(AsmParser &parser, Type type) {
+  if (parser.parseLess()) {
+    return {};
+  }
+
+  // Parse: pipeline = <keyword_or_attr>
+  if (parser.parseKeyword("pipeline") || parser.parseEqual()) {
+    return {};
+  }
+  Attribute passPipeline;
+  if (parsePipelineAttr(parser, passPipeline)) {
+    return {};
+  }
+
+  // Parse optional: codegen_spec = @sym
+  SymbolRefAttr codegenSpec;
+  if (succeeded(parser.parseOptionalKeyword("codegen_spec"))) {
+    if (parser.parseEqual() || parser.parseAttribute(codegenSpec)) {
+      return {};
+    }
+  }
+
+  // Parse optional: workgroup_size = [x, y, z]
+  SmallVector<int64_t> workgroupSize;
+  if (succeeded(parser.parseOptionalKeyword("workgroup_size"))) {
+    if (parser.parseEqual() || parser.parseLSquare()) {
+      return {};
+    }
+    if (parser.parseCommaSeparatedList([&]() -> ParseResult {
+          int64_t val;
+          if (parser.parseInteger(val)) {
+            return failure();
+          }
+          workgroupSize.push_back(val);
+          return success();
+        })) {
+      return {};
+    }
+    if (parser.parseRSquare()) {
+      return {};
+    }
+  }
+
+  // Parse optional: subgroup_size = N
+  int64_t subgroupSize = 0;
+  if (succeeded(parser.parseOptionalKeyword("subgroup_size"))) {
+    if (parser.parseEqual() || parser.parseInteger(subgroupSize)) {
+      return {};
+    }
+  }
+
+  // Parse optional trailing: , {config_dict}
+  DictionaryAttr config;
+  if (succeeded(parser.parseOptionalComma())) {
+    if (parser.parseAttribute(config)) {
+      return {};
+    }
+  }
+
+  if (parser.parseGreater()) {
+    return {};
+  }
+
+  // Embed config into the pipeline attr.
+  if (config) {
+    passPipeline = embedConfigInPipelineAttr(passPipeline, config);
+  }
+
+  // Use getChecked so verify errors become proper parse diagnostics rather
+  // than assertions.
+  SMLoc resultLoc = parser.getCurrentLocation();
+  return TranslationInfoAttr::getChecked(
+      parser.getEncodedSourceLoc(resultLoc), parser.getContext(), passPipeline,
+      codegenSpec, workgroupSize, subgroupSize);
 }
 
-DispatchLoweringPassPipeline
-TranslationInfoAttr::getDispatchLoweringPassPipeline() {
-  return getPassPipeline().getValue();
+/// Custom printer for TranslationInfoAttr.
+/// Extracts config from the pipeline attr and prints it at the end,
+/// maintaining the original textual format.
+void TranslationInfoAttr::print(AsmPrinter &printer) const {
+  printer << "<pipeline = ";
+  printPipelineAttr(printer, getPassPipeline());
+
+  if (SymbolRefAttr codegenSpec = getCodegenSpec()) {
+    printer << " codegen_spec = " << codegenSpec;
+  }
+
+  ArrayRef<int64_t> workgroupSize = getWorkgroupSize();
+  if (!workgroupSize.empty()) {
+    printer << " workgroup_size = [";
+    llvm::interleaveComma(workgroupSize, printer);
+    printer << "]";
+  }
+
+  int64_t subgroupSize = getSubgroupSize();
+  if (subgroupSize != 0) {
+    printer << " subgroup_size = " << subgroupSize;
+  }
+
+  DictionaryAttr config = getConfiguration();
+  if (config && !config.empty()) {
+    printer << ", " << config;
+  }
+
+  printer << ">";
 }
 
-LogicalResult TranslationInfoAttr::verify(
-    function_ref<InFlightDiagnostic()> emitError,
-    IREE::Codegen::DispatchLoweringPassPipelineAttr passPipeline,
-    SymbolRefAttr codegenSpec, ArrayRef<int64_t> workgroupSize,
-    int64_t subgroupSize, DictionaryAttr configuration) {
+LogicalResult
+TranslationInfoAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                            Attribute passPipeline, SymbolRefAttr codegenSpec,
+                            ArrayRef<int64_t> workgroupSize,
+                            int64_t subgroupSize) {
   if (!passPipeline) {
     return emitError() << "missing pass pipeline specification";
   }
-  auto passPipelineValue = passPipeline.getValue();
-  if (passPipelineValue > IREE::Codegen::DispatchLoweringPassPipeline::None) {
-    return emitError() << "invalid pass pipeline value : "
-                       << stringifyEnum(passPipeline.getValue());
+  if (!isa<PipelineAttrInterface>(passPipeline)) {
+    return emitError() << "pass pipeline must implement PipelineAttrInterface";
   }
-  auto tdPassPipeline =
-      IREE::Codegen::DispatchLoweringPassPipeline::TransformDialectCodegen;
-  if (codegenSpec && passPipelineValue != tdPassPipeline) {
-    return emitError()
-           << "transform dialect codegen spec requires pass pipeline : "
-           << stringifyEnum(tdPassPipeline);
+  if (codegenSpec && !isa<TransformDialectPipelineAttr>(passPipeline)) {
+    return emitError() << "transform dialect codegen spec requires "
+                          "TransformDialectCodegen pipeline";
   }
   if (workgroupSize.size() > 3) {
     return emitError() << "workgroup size cannot have more than 3 entries";
@@ -386,8 +650,7 @@ CompilationInfoAttr::verify(function_ref<InFlightDiagnostic()> emitError,
   if (failed(TranslationInfoAttr::verify(
           emitError, translationInfo.getPassPipeline(),
           translationInfo.getCodegenSpec(), translationInfo.getWorkgroupSize(),
-          translationInfo.getSubgroupSize(),
-          translationInfo.getConfiguration()))) {
+          translationInfo.getSubgroupSize()))) {
     return emitError() << "invalid translation info: " << translationInfo;
   }
   return success();

@@ -126,7 +126,8 @@ LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
   // TODO(qedawkins): Use a shared pipeline identifier here.
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, loweringConfig,
-      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+      Codegen::LLVMGPUDispatchLoweringPipelineAttr::get(
+          context, Codegen::LLVMGPUPipeline::LLVMGPUTileAndFuse),
       workgroupSize, targetSubgroupSize, pipelineConfig);
 }
 
@@ -1120,7 +1121,8 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
   // TODO(qedawkins): Use a shared pipeline identifier here.
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, loweringConfig,
-      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+      Codegen::LLVMGPUDispatchLoweringPipelineAttr::get(
+          linalgOp->getContext(), Codegen::LLVMGPUPipeline::LLVMGPUTileAndFuse),
       workgroupSize, targetSubgroupSize, pipelineConfig);
 }
 
@@ -1196,7 +1198,8 @@ setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
   // TODO(qedawkins): Use a shared pipeline identifier here.
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, loweringConfig,
-      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+      Codegen::LLVMGPUDispatchLoweringPipelineAttr::get(
+          linalgOp->getContext(), Codegen::LLVMGPUPipeline::LLVMGPUTileAndFuse),
       workgroupSize, targetSubgroupSize, pipelineConfig);
 }
 
@@ -1680,7 +1683,8 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
   // TODO(qedawkins): Use a shared pipeline identifier here.
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, loweringConfig,
-      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+      Codegen::LLVMGPUDispatchLoweringPipelineAttr::get(
+          context, Codegen::LLVMGPUPipeline::LLVMGPUTileAndFuse),
       {flatWorkgroupSize, 1, 1}, subgroupSize, DictionaryAttr());
 }
 
@@ -1786,7 +1790,8 @@ LogicalResult setScatterLoweringConfig(IREE::GPU::TargetAttr target,
   // TODO(qedawkins): Use a shared pipeline identifier here.
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, scatter, loweringConfig,
-      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+      Codegen::LLVMGPUDispatchLoweringPipelineAttr::get(
+          context, Codegen::LLVMGPUPipeline::LLVMGPUTileAndFuse),
       {flatWorkgroupSize, 1, 1}, flatWorkgroupSize, DictionaryAttr());
 }
 
@@ -2052,8 +2057,9 @@ LogicalResult setDirectConvolutionLoweringConfig(
 
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, loweringConfig,
-      Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse, workgroupSize,
-      targetSubgroupSize, pipelineConfig);
+      Codegen::LLVMGPUDispatchLoweringPipelineAttr::get(
+          context, Codegen::LLVMGPUPipeline::LLVMGPUTileAndFuse),
+      workgroupSize, targetSubgroupSize, pipelineConfig);
 }
 
 //====---------------------------------------------------------------------===//
@@ -2085,7 +2091,8 @@ LogicalResult setSortConfig(IREE::GPU::TargetAttr target,
         createLoweringConfig(int64_t{0}, int64_t{0});
     return setOpConfigAndEntryPointFnTranslation(
         entryPoint, op, loweringConfig,
-        IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+        Codegen::LLVMGPUDispatchLoweringPipelineAttr::get(
+            context, Codegen::LLVMGPUPipeline::LLVMGPUTileAndFuse),
         {1, 1, 1}, subgroupSize, DictionaryAttr());
   }
 
@@ -2131,7 +2138,8 @@ LogicalResult setSortConfig(IREE::GPU::TargetAttr target,
       createLoweringConfig(workgroupTileSizes, threadTileSizes);
   return setOpConfigAndEntryPointFnTranslation(
       entryPoint, op, loweringConfig,
-      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+      Codegen::LLVMGPUDispatchLoweringPipelineAttr::get(
+          context, Codegen::LLVMGPUPipeline::LLVMGPUTileAndFuse),
       workgroupSize, subgroupSize, DictionaryAttr());
 }
 

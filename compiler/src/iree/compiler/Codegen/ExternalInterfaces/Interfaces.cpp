@@ -9,7 +9,11 @@
 #include "iree/compiler/Codegen/ExternalInterfaces/CPUEncodingExternalModels.h"
 #include "iree/compiler/Codegen/ExternalInterfaces/CodegenExternalModels.h"
 #include "iree/compiler/Codegen/ExternalInterfaces/GPUEncodingExternalModels.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/LLVMCPUPipelineExternalModels.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/LLVMGPUPipelineExternalModels.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/SPIRVPipelineExternalModels.h"
 #include "iree/compiler/Codegen/ExternalInterfaces/UtilExternalModels.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/VMVXPipelineExternalModels.h"
 
 namespace mlir::iree_compiler {
 
@@ -18,6 +22,10 @@ void registerCodegenExternalInterfaces(DialectRegistry &registry) {
   IREE::Codegen::registerUtilExternalModels(registry);
   IREE::CPU::registerCPUEncodingExternalModels(registry);
   IREE::GPU::registerGPUEncodingExternalModels(registry);
+  registerLLVMCPUPipelineExternalModels(registry);
+  registerLLVMGPUPipelineExternalModels(registry);
+  registerSPIRVPipelineExternalModels(registry);
+  registerVMVXPipelineExternalModels(registry);
 }
 
 } // namespace mlir::iree_compiler

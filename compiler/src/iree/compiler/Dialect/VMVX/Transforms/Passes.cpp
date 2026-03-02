@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "iree/compiler/Codegen/Common/CPU/Passes.h"
+#include "iree/compiler/Codegen/Common/PassUtils.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/VMVX/Passes.h"
 #include "iree/compiler/Dialect/HAL/Transforms/Passes.h"
@@ -62,8 +63,11 @@ buildVectorVMVXTransformPassPipeline(OpPassManager &variantPassManager) {
   // Tensor-level optimization, kernel dispatch and lower to buffers.
   // ---------------------------------------------------------------------------
   {
-    FunctionLikeNest(modulePassManager)
-        .addPass(createVMVXLowerExecutableTargetPass);
+    // VMVX has a single pipeline (VMVXDefault) with quasi-static config.
+    MultiPipelineNest nest;
+    nest.nestIf(hasPipelineAttrInterface())
+        .addPass(createLowerDispatchUsingPipelineAttrPass());
+    nest.addTo(modulePassManager);
   }
   modulePassManager.addPass(createLowerUKernelOpsToCallsPass());
 

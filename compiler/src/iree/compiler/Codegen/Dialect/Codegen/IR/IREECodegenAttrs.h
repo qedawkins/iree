@@ -36,6 +36,14 @@ bool shouldSetTunerAttributes();
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h.inc"
 // clang-format on
 
+namespace mlir::iree_compiler::IREE::Codegen {
+/// Creates a new pipeline attr with the given configuration dict embedded.
+/// For per-backend pipeline attrs, creates a new instance with the config.
+/// For other attrs, returns the original unchanged.
+Attribute embedConfigInPipelineAttr(Attribute pipelineAttr,
+                                    DictionaryAttr config);
+} // namespace mlir::iree_compiler::IREE::Codegen
+
 namespace mlir::iree_compiler {
 //===----------------------------------------------------------------------===//
 // Constant names.
@@ -159,15 +167,17 @@ inline LogicalResult setOpConfigAndEntryPointFnTranslation(
 /// and optional workgroup/subgroup size.
 inline LogicalResult setOpConfigAndEntryPointFnTranslation(
     mlir::FunctionOpInterface entryPointFn, Operation *op,
-    IREE::Codegen::LoweringConfigAttrInterface config,
-    IREE::Codegen::DispatchLoweringPassPipeline passPipeline,
+    IREE::Codegen::LoweringConfigAttrInterface config, Attribute passPipeline,
     ArrayRef<int64_t> workgroupSize = {},
     std::optional<int64_t> subgroupSize = {},
     DictionaryAttr pipelineConfig = DictionaryAttr()) {
   MLIRContext *context = entryPointFn.getContext();
+  // Embed pipeline config into the pipeline attr rather than TranslationInfo.
+  Attribute pipeline =
+      IREE::Codegen::embedConfigInPipelineAttr(passPipeline, pipelineConfig);
   auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-      context, passPipeline, SymbolRefAttr(), workgroupSize, subgroupSize,
-      pipelineConfig);
+      context, pipeline, SymbolRefAttr(), workgroupSize,
+      subgroupSize.value_or(int64_t()));
   return setOpConfigAndEntryPointFnTranslation(entryPointFn, op, config,
                                                translationInfo);
 }
@@ -179,8 +189,7 @@ inline LogicalResult setOpConfigAndEntryPointFnTranslation(
 inline LogicalResult setOpConfigAndEntryPointFnTranslation(
     mlir::FunctionOpInterface entryPointFn, Operation *op,
     TileSizesListTypeRef tileSizes,
-    ScalableTileFlagsListTypeRef scalableTileFlags,
-    IREE::Codegen::DispatchLoweringPassPipeline passPipeline,
+    ScalableTileFlagsListTypeRef scalableTileFlags, Attribute passPipeline,
     ArrayRef<int64_t> workgroupSize = {},
     std::optional<int64_t> subgroupSize = {},
     DictionaryAttr pipelineConfig = DictionaryAttr()) {
@@ -196,8 +205,7 @@ inline LogicalResult setOpConfigAndEntryPointFnTranslation(
 /// flags" case.
 inline LogicalResult setOpConfigAndEntryPointFnTranslation(
     mlir::FunctionOpInterface entryPointFn, Operation *op,
-    TileSizesListTypeRef tileSizes,
-    IREE::Codegen::DispatchLoweringPassPipeline passPipeline,
+    TileSizesListTypeRef tileSizes, Attribute passPipeline,
     ArrayRef<int64_t> workgroupSize = {},
     std::optional<int64_t> subgroupSize = {},
     DictionaryAttr pipelineConfig = DictionaryAttr()) {

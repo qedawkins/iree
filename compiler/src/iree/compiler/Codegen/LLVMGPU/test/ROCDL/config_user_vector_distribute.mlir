@@ -1,11 +1,11 @@
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx942 --iree-codegen-llvmgpu-use-vector-distribution \
 // RUN:   --iree-codegen-reorder-workgroups-strategy=transpose \
-// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-llvmgpu-select-lowering-strategy, func.func(iree-llvmgpu-lower-executable-target)))))" %s | FileCheck %s --check-prefix=OPT-OUT
+// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-llvmgpu-select-lowering-strategy, func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" %s | FileCheck %s --check-prefix=OPT-OUT
 
 // Check that applying `ReorderWorkgroups*` enables or disables workgroup reordering.
 
 // RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx942 --iree-codegen-llvmgpu-use-vector-distribution \
-// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-llvmgpu-select-lowering-strategy, func.func(iree-llvmgpu-lower-executable-target)))))" %s | FileCheck %s --check-prefix=OPT-IN
+// RUN:   --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-llvmgpu-select-lowering-strategy, func.func(iree-codegen-lower-dispatch-using-pipeline-attr)))))" %s | FileCheck %s --check-prefix=OPT-IN
 
 // Check that applying the `no_reduce_shared_memory_bank_conflicts` pipeline option attribute disables shared memory padding.
 

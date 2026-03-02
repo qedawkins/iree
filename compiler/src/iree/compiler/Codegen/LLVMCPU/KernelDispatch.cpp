@@ -125,7 +125,8 @@ static llvm::cl::opt<bool> clEnableRiscvAggressiveDist(
         "set distConfig.maxTileSizes[i] to 2 * distConfig.minTileSizes[i]."),
     llvm::cl::init(false));
 
-using IREE::Codegen::DispatchLoweringPassPipeline;
+using IREE::Codegen::LLVMCPUDispatchLoweringPipelineAttr;
+using IREE::Codegen::LLVMCPUPipeline;
 
 // Encodes the pre-processing strategy to be applied on a Linalg operation
 // before vectorization.
@@ -1412,7 +1413,8 @@ setMatmulPeelingRootConfig(mlir::FunctionOpInterface entryPointFn,
       getPipelineConfWithPeelingAttr(op.getContext());
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, op, loweringConfig,
-      DispatchLoweringPassPipeline::CPUDoubleTilingExpert,
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          op.getContext(), LLVMCPUPipeline::CPUDoubleTilingExpert),
       /*workgroupSize=*/{}, /*subgroupSize=*/{}, pipelineConfig);
 }
 
@@ -1458,7 +1460,8 @@ setMatmulRootConfig(mlir::FunctionOpInterface entryPointFn,
   LDBG() << "Final tile sizes and scalable flags for contraction: "
          << loweringConfig;
 
-  auto pipeline = DispatchLoweringPassPipeline::CPUDoubleTilingExpert;
+  Attribute pipeline = LLVMCPUDispatchLoweringPipelineAttr::get(
+      entryPointFn.getContext(), LLVMCPUPipeline::CPUDoubleTilingExpert);
   return setOpConfigAndEntryPointFnTranslation(entryPointFn, linalgOp,
                                                loweringConfig, pipeline);
 }
@@ -2176,7 +2179,8 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
       targetAttr ? targetAttr.getConfiguration() : nullptr;
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, mmt4dOp, getMmt4dLoweringConfig(mmt4dOp, targetConfig),
-      DispatchLoweringPassPipeline::Mmt4dTilingExpert);
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          entryPointFn.getContext(), LLVMCPUPipeline::Mmt4dTilingExpert));
 }
 
 /// Sets the lowering configuration for dispatch region for linalg.batch_mmt4d
@@ -2192,7 +2196,8 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, batchMmt4dOp,
       getMmt4dLoweringConfig(batchMmt4dOp, targetConfig),
-      DispatchLoweringPassPipeline::Mmt4dTilingExpert);
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          entryPointFn.getContext(), LLVMCPUPipeline::Mmt4dTilingExpert));
 }
 
 static bool isPackMatmulLHS(linalg::PackOp op) {
@@ -2288,8 +2293,9 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
       generator.generateCPULoweringConfig();
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, op, loweringConfig,
-      DispatchLoweringPassPipeline::CPUDataTiling, /*workgroupSize=*/{},
-      /*subgroupSize=*/{}, pipelineConfig);
+      LLVMCPUDispatchLoweringPipelineAttr::get(entryPointFn.getContext(),
+                                               LLVMCPUPipeline::CPUDataTiling),
+      /*workgroupSize=*/{}, /*subgroupSize=*/{}, pipelineConfig);
 }
 
 static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
@@ -2359,8 +2365,9 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
       generator.generateCPULoweringConfig();
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, op, loweringConfig,
-      DispatchLoweringPassPipeline::CPUDataTiling, /*workgroupSize=*/{},
-      /*subgroupSize=*/{}, pipelineConfig);
+      LLVMCPUDispatchLoweringPipelineAttr::get(entryPointFn.getContext(),
+                                               LLVMCPUPipeline::CPUDataTiling),
+      /*workgroupSize=*/{}, /*subgroupSize=*/{}, pipelineConfig);
 }
 
 static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
@@ -2488,7 +2495,9 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   LDBG() << "Set lowering_config for attnOp: " << loweringConfig;
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, attnOp, loweringConfig,
-      DispatchLoweringPassPipeline::CPULinalgExtTileAndVectorize);
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          entryPointFn.getContext(),
+          LLVMCPUPipeline::CPULinalgExtTileAndVectorize));
 }
 
 /// Sets the lowering configuration for dispatch region for linalg_ext.fft
@@ -2519,7 +2528,9 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
       generator.generateCPULoweringConfig();
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, fftOp, loweringConfig,
-      DispatchLoweringPassPipeline::CPULinalgExtTileAndVectorize);
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          entryPointFn.getContext(),
+          LLVMCPUPipeline::CPULinalgExtTileAndVectorize));
 }
 
 static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
@@ -2544,7 +2555,9 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
       generator.generateCPULoweringConfig();
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, gatherOp, loweringConfig,
-      DispatchLoweringPassPipeline::CPULinalgExtTileAndVectorize);
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          entryPointFn.getContext(),
+          LLVMCPUPipeline::CPULinalgExtTileAndVectorize));
 }
 
 /// Sets the lowering configuration for dispatch region for winograd ops:
@@ -2580,7 +2593,9 @@ setWinogradRootConfig(mlir::FunctionOpInterface entryPointFn,
       generator.generateCPULoweringConfig();
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, winogradOp, loweringConfig,
-      DispatchLoweringPassPipeline::CPULinalgExtTileAndVectorize);
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          entryPointFn.getContext(),
+          LLVMCPUPipeline::CPULinalgExtTileAndVectorize));
 }
 
 static void setVectorTileSizes(linalg::LinalgOp op,
@@ -2624,7 +2639,8 @@ setDefaultGenericOpRootConfig(mlir::FunctionOpInterface entryPointFn,
     LoweringConfigGenerator generator(genericOp);
     return setOpConfigAndEntryPointFnTranslation(
         entryPointFn, genericOp, generator.generateCPULoweringConfig(),
-        DispatchLoweringPassPipeline::CPUDefault);
+        LLVMCPUDispatchLoweringPipelineAttr::get(entryPointFn.getContext(),
+                                                 LLVMCPUPipeline::CPUDefault));
   }
 
   DistributionHeuristicConfig distConfig;
@@ -2656,15 +2672,18 @@ setDefaultGenericOpRootConfig(mlir::FunctionOpInterface entryPointFn,
   LDBG() << "Set lowering_config: " << loweringConfig;
 
   // For non-tensor based ops use the Buffer ops pipeline.
-  DispatchLoweringPassPipeline passPipeline;
+  MLIRContext *ctx = entryPointFn.getContext();
+  Attribute passPipeline;
   DictionaryAttr pipelineConfig;
   if (genericOp.hasPureTensorSemantics()) {
-    passPipeline = DispatchLoweringPassPipeline::CPUDoubleTilingExpert;
+    passPipeline = LLVMCPUDispatchLoweringPipelineAttr::get(
+        ctx, LLVMCPUPipeline::CPUDoubleTilingExpert);
     if (vecPreProcStrategy == VectorPreProcStrategy::Peeling) {
       pipelineConfig = getPipelineConfWithPeelingAttr(genericOp.getContext());
     }
   } else {
-    passPipeline = DispatchLoweringPassPipeline::CPUBufferOpsTileAndVectorize;
+    passPipeline = LLVMCPUDispatchLoweringPipelineAttr::get(
+        ctx, LLVMCPUPipeline::CPUBufferOpsTileAndVectorize);
   }
 
   return setOpConfigAndEntryPointFnTranslation(
@@ -2816,7 +2835,8 @@ setTransposeLikeOpRootConfig(mlir::FunctionOpInterface entryPointFn,
       generator.generateCPULoweringConfig();
   LDBG() << "Set lowering_config: " << loweringConfig;
 
-  auto passPipeline = DispatchLoweringPassPipeline::CPUDoubleTilingExpert;
+  Attribute passPipeline = LLVMCPUDispatchLoweringPipelineAttr::get(
+      entryPointFn.getContext(), LLVMCPUPipeline::CPUDoubleTilingExpert);
   return setOpConfigAndEntryPointFnTranslation(entryPointFn, genericOp,
                                                loweringConfig, passPipeline);
 }
@@ -2897,12 +2917,15 @@ static LogicalResult setElementwiseGenericOpRootConfig(
       generator.generateCPULoweringConfig();
   LDBG() << "Set lowering_config for element-wise op: " << loweringConfig;
 
-  DispatchLoweringPassPipeline passPipeline;
+  MLIRContext *ctx = entryPointFn.getContext();
+  Attribute passPipeline;
   DictionaryAttr pipelineConfig;
   if (genericOp.hasPureBufferSemantics()) {
-    passPipeline = DispatchLoweringPassPipeline::CPUBufferOpsTileAndVectorize;
+    passPipeline = LLVMCPUDispatchLoweringPipelineAttr::get(
+        ctx, LLVMCPUPipeline::CPUBufferOpsTileAndVectorize);
   } else {
-    passPipeline = DispatchLoweringPassPipeline::CPUDoubleTilingExpert;
+    passPipeline = LLVMCPUDispatchLoweringPipelineAttr::get(
+        ctx, LLVMCPUPipeline::CPUDoubleTilingExpert);
   }
 
   if (vecPreProcStrategy == VectorPreProcStrategy::Peeling) {
@@ -3048,7 +3071,9 @@ setConvRootConfig(mlir::FunctionOpInterface entryPointFn,
       generator.generateCPULoweringConfig();
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, convOp, loweringConfig,
-      DispatchLoweringPassPipeline::CPUConvTileAndDecomposeExpert,
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          entryPointFn.getContext(),
+          LLVMCPUPipeline::CPUConvTileAndDecomposeExpert),
       /*workgroupSize=*/{}, /*subgroupSize=*/{}, pipelineConfig);
 }
 
@@ -3183,7 +3208,8 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
 
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, padOp, loweringConfig,
-      DispatchLoweringPassPipeline::CPUDoubleTilingExpert);
+      LLVMCPUDispatchLoweringPipelineAttr::get(
+          entryPointFn.getContext(), LLVMCPUPipeline::CPUDoubleTilingExpert));
 }
 
 /// Set the default configuration for operations that implement the
@@ -3209,7 +3235,8 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   LDBG() << "Set lowering_config for tensor.pad op: " << loweringConfig;
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, op, loweringConfig,
-      DispatchLoweringPassPipeline::CPUDefault);
+      LLVMCPUDispatchLoweringPipelineAttr::get(entryPointFn.getContext(),
+                                               LLVMCPUPipeline::CPUDefault));
 }
 
 /// Redirects to methods that set the configuration based on operation type.
@@ -3969,14 +3996,15 @@ adjustTileSizesForRootUnPackOp(mlir::FunctionOpInterface entryPointFn,
     }
   }
 
-  auto tInfo = getTranslationInfo(entryPointFn);
-  auto pipeline = tInfo.getPassPipeline().getValue();
-  auto pipelineConfig = tInfo.getConfiguration();
+  IREE::Codegen::TranslationInfoAttr tInfo = getTranslationInfo(entryPointFn);
+  Attribute pipeline = tInfo.getPassPipeline();
+  DictionaryAttr pipelineConfig = tInfo.getConfiguration();
   if (isOptEnabled(entryPointFn, getEnableLoopPeelingStr())) {
     // See #16406
     LDBG() << "unpack fusion does not work with peeling, falling back to "
               "non-peeling path";
-    pipeline = DispatchLoweringPassPipeline::CPUDoubleTilingExpert;
+    pipeline = LLVMCPUDispatchLoweringPipelineAttr::get(
+        entryPointFn.getContext(), LLVMCPUPipeline::CPUDoubleTilingExpert);
 
     // Remove the "enable_loop_peeling" attr from pipelineConfig
     auto enableLoopPeelingAttrName =
@@ -4082,8 +4110,12 @@ lowerUsingDefaultPipeline(mlir::FunctionOpInterface entryPointFn) {
     return success();
   }
   // Otherwise lower using default pipeline.
+  MLIRContext *ctx = entryPointFn->getContext();
   auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-      entryPointFn->getContext(), DispatchLoweringPassPipeline::CPUDefault);
+      ctx,
+      LLVMCPUDispatchLoweringPipelineAttr::get(ctx,
+                                               LLVMCPUPipeline::CPUDefault),
+      SymbolRefAttr(), /*workgroupSize=*/{}, /*subgroupSize=*/int64_t());
   return setTranslationInfo(entryPointFn, translationInfo);
 }
 
@@ -4160,8 +4192,8 @@ setTranslationInfoAndRootConfig(mlir::FunctionOpInterface entryPointFn,
 
   // The transform dialect codegen has different logics and codegen flow.
   // Ignore the tile sizes adjustment.
-  auto pipeline = getTranslationInfo(entryPointFn).getPassPipeline().getValue();
-  if (pipeline != DispatchLoweringPassPipeline::TransformDialectCodegen) {
+  Attribute pipeline = getTranslationInfo(entryPointFn).getPassPipeline();
+  if (!isa<IREE::Codegen::TransformDialectPipelineAttr>(pipeline)) {
     if (failed(adjustTileSizesForRootUnPackOp(entryPointFn, rootOperation))) {
       return failure();
     }

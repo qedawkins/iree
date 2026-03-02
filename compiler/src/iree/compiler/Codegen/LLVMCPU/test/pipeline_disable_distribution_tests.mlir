@@ -1,4 +1,4 @@
-// RUN: iree-opt --pass-pipeline='builtin.module(iree-llvmcpu-select-lowering-strategy, func.func(iree-llvmcpu-lower-executable-target, iree-llvmcpu-check-ir-before-llvm-conversion))' --iree-llvmcpu-disable-distribution --split-input-file %s | FileCheck %s
+// RUN: iree-opt --pass-pipeline='builtin.module(iree-llvmcpu-select-lowering-strategy, func.func(iree-codegen-lower-dispatch-using-pipeline-attr), func.func(iree-llvmcpu-check-ir-before-llvm-conversion))' --iree-llvmcpu-disable-distribution --split-input-file %s | FileCheck %s
 
 // Test that iree_linalg_ext.map_store op is not generated when distribution
 // is disabled. The op is used in the fallback solution when the pack op is not

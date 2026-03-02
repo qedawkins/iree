@@ -59,18 +59,6 @@ def SPIRVLinkExecutablesPass :
   let summary = "Links SPIR-V HAL executables within the top-level program module.";
 }
 
-def SPIRVLowerExecutableTargetPass :
-    InterfacePass<"iree-spirv-lower-executable-target-pass",
-         "mlir::FunctionOpInterface"> {
-  let summary = "Lower the executable target to SPIR-V using one of the "
-                "IREE::HAL::DispatchLoweringPassPipeline";
-  let description = [{
-    Main pass to lower executables to scalar + vector code on SPIR-V path.
-    Invokes one of the pass pipelines that translate the executable to
-    scalar + vector code.
-  }];
-}
-
 def SPIRVLowerExecutableUsingTransformDialectPass :
     Pass<"iree-spirv-lower-executable-using-transform-dialect", "ModuleOp"> {
   let summary = "Lower the executable target to SPIR-V using transform dialect"
@@ -96,8 +84,7 @@ def SPIRVMaterializeExecutableConditionsPass :
 
 def SPIRVSelectLoweringStrategyPass :
     Pass<"iree-spirv-select-lowering-strategy-pass", "ModuleOp"> {
-  let summary = "Select the IREE::HAL::DispatchLoweringPassPipeline for lowering"
-                "to SPIR-V";
+  let summary = "Select the lowering strategy for lowering to SPIR-V";
 }
 
 def SPIRVTileAndDistributePass : InterfacePass<"iree-spirv-tile-and-distribute", "mlir::FunctionOpInterface"> {
