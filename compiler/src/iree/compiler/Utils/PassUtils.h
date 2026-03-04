@@ -8,8 +8,12 @@
 #define IREE_COMPILER_UTILS_PASSUTILS_H_
 
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 
+#include "llvm/ADT/DenseMap.h"
+#include "mlir/IR/Attributes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 
@@ -18,6 +22,42 @@ namespace mlir::iree_compiler {
 // If running under a FixedPointIterator pass, annotate that a modification
 // has been made which requires another iteration. No-op otherwise.
 void signalFixedPointModified(Operation *rootOp);
+
+//===----------------------------------------------------------------------===//
+// PipelineCache
+//===----------------------------------------------------------------------===//
+
+// Thread-safe cache for compiled pass pipelines keyed by target attribute.
+// When multiple executable variants share the same target attribute, the pass
+// pipeline only needs to be constructed once. The cache is shared across clones
+// of the outer pass that MLIR creates for parallel execution on different
+// ExecutableOps via a shared_ptr.
+//
+// getOrCreate() returns a deep copy of the cached pipeline rather than a
+// reference because MLIR passes carry mutable state (analysis caches,
+// statistics) that is modified during execution. The outer per-ExecutableOp
+// passes run in parallel, so two threads processing different executables with
+// the same target attribute would race on a shared OpPassManager. The copy cost
+// is negligible compared to pipeline execution; the savings come from avoiding
+// redundant pipeline construction (registry lookups, dynamic pass creation) for
+// every variant.
+struct PipelineCache {
+  std::mutex mutex;
+  llvm::DenseMap<Attribute, std::unique_ptr<OpPassManager>> entries;
+
+  // Returns a deep copy of the cached pipeline for |targetAttr|, building it
+  // on first access using |builder|. Thread-safe.
+  OpPassManager getOrCreate(Attribute targetAttr, StringRef operationName,
+                            llvm::function_ref<void(OpPassManager &)> builder) {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto &entry = entries[targetAttr];
+    if (!entry) {
+      entry = std::make_unique<OpPassManager>(operationName);
+      builder(*entry);
+    }
+    return OpPassManager(*entry);
+  }
+};
 
 //===----------------------------------------------------------------------===//
 // OpPipelineAdaptorPass
