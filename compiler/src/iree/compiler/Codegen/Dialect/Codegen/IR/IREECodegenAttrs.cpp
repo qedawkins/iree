@@ -7,6 +7,7 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
+#include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenTypes.h"
 #include "iree/compiler/Codegen/Utils/CodegenOptions.h"
@@ -112,7 +113,9 @@ ArrayAttr ExportConfigAttr::getWorkgroupSizeIndexArray() {
 // iree_codegen.pass_pipeline
 //===----------------------------------------------------------------------===//
 
-LogicalResult PassPipelineAttr::buildPipeline(OpPassManager &pm) const {
+LogicalResult PassPipelineAttr::buildPipeline(
+    OpPassManager &pm, IREE::HAL::ExecutableTargetAttr target) const {
+  // Textual pipelines ignore the target attribute.
   if (failed(parsePassPipeline(getPipeline(), pm))) {
     return failure();
   }

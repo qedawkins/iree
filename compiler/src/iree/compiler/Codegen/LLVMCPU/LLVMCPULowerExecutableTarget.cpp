@@ -174,7 +174,7 @@ void LLVMCPULowerExecutableTargetPass::runOnOperation() {
   Attribute pipelineAttr = translationInfo.getPassPipeline();
   if (auto customPipeline =
           dyn_cast<IREE::Codegen::PipelineAttrInterface>(pipelineAttr)) {
-    if (failed(customPipeline.buildPipeline(passManager))) {
+    if (failed(customPipeline.buildPipeline(passManager, target))) {
       funcOp.emitOpError("failed to build custom pass pipeline");
       return signalPassFailure();
     }

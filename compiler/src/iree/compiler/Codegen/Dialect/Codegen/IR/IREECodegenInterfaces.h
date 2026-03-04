@@ -16,6 +16,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/PassManager.h"
 
+#include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "llvm/ADT/STLExtras.h"
 
 // clang-format off

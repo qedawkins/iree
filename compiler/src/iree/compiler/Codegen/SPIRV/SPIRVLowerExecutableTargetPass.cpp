@@ -80,11 +80,14 @@ void SPIRVLowerExecutableTargetPass::runOnOperation() {
   }
   OpPassManager &pipeline = maybePipeline.value();
 
+  IREE::HAL::ExecutableTargetAttr target =
+      IREE::HAL::ExecutableTargetAttr::lookup(funcOp);
+
   // Check for a custom pipeline via PipelineAttrInterface.
   Attribute pipelineAttr = translationInfo.getPassPipeline();
   if (auto customPipeline =
           dyn_cast<IREE::Codegen::PipelineAttrInterface>(pipelineAttr)) {
-    if (failed(customPipeline.buildPipeline(pipeline))) {
+    if (failed(customPipeline.buildPipeline(pipeline, target))) {
       funcOp.emitOpError("failed to build custom pass pipeline");
       return signalPassFailure();
     }

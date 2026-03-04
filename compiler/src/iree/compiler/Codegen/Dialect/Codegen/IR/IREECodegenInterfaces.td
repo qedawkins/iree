@@ -763,11 +763,15 @@ def IREECodegen_PipelineAttrInterface :
   let methods = [
     InterfaceMethod<
       /*desc=*/[{
-        Populates the given pass manager with a pass pipeline.
+        Populates the given pass manager with a pass pipeline. The target
+        attribute provides information about the executable target (backend,
+        configuration dictionary with target features). May be null when
+        the target is not available.
       }],
       /*retTy=*/"::mlir::LogicalResult",
       /*methodName=*/"buildPipeline",
-      /*args=*/(ins "::mlir::OpPassManager &":$pm)
+      /*args=*/(ins "::mlir::OpPassManager &":$pm,
+                    "::mlir::iree_compiler::IREE::HAL::ExecutableTargetAttr":$target)
     >
   ];
 }

@@ -80,6 +80,7 @@ iree_cc_library(
     iree::compiler::Codegen::Dialect::PCF::IR
     iree::compiler::Codegen::Interfaces::UKernelOpInterface
     iree::compiler::Codegen::Utils::CodegenOptions
+    iree::compiler::Dialect::HAL::IR
     iree::compiler::Dialect::Util::IR
     iree::compiler::Utils
   PUBLIC
