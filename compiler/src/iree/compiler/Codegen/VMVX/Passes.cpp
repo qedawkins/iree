@@ -8,6 +8,8 @@
 
 #include "iree/compiler/Codegen/Common/CPU/Passes.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/DispatchPipelineExternalModels.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Codegen/VMVX/Passes.h"
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -80,6 +82,21 @@ void addVMVXDefaultPassPipeline(OpPassManager &funcPassManager,
   }
 }
 
+LogicalResult buildVMVXDispatchPassPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm) {
+  switch (pipeline) {
+  case IREE::Codegen::DispatchLoweringPassPipeline::VMVXDefault: {
+    bool enableUKernels = target && hasUkernel(target.getConfiguration());
+    addVMVXDefaultPassPipeline(pm, enableUKernels);
+    return success();
+  }
+  default:
+    // Not a VMVX pipeline.
+    return failure();
+  }
+}
+
 // NOTE: this runs on the top-level program module containing all
 // hal.executable ops.
 void buildVMVXLinkingPassPipeline(OpPassManager &modulePassManager) {
@@ -108,6 +125,10 @@ namespace {
 void registerCodegenVMVXPasses() {
   // Generated.
   registerPasses();
+
+  // Register the VMVX dispatch pipeline builder for ExternalModel.
+  IREE::Codegen::registerDispatchPipelineBuilder("vmvx",
+                                                  buildVMVXDispatchPassPipeline);
 
   static PassPipelineRegistration<> VMVXLinkingPipeline(
       "iree-codegen-vmvx-linking-pipeline",

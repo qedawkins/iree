@@ -11,6 +11,7 @@
 #include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/DispatchPipelineExternalModels.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Utils.h"
 #include "iree/compiler/Codegen/Utils/CodegenOptions.h"
@@ -694,6 +695,60 @@ void buildLLVMCPUCodegenPassPipeline(
   });
 }
 
+/// Assembles LLVMCPUPipelineOptions from target alone (no CPUCodegenOptions).
+/// Used by the ExternalModel dispatch path where session options aren't
+/// available.
+static LLVMCPUPipelineOptions
+assemblePipelineOptionsFromTarget(IREE::HAL::ExecutableTargetAttr target) {
+  LLVMCPUPipelineOptions opts;
+  DictionaryAttr config = target ? target.getConfiguration() : nullptr;
+  if (config) {
+    if (isX86(config) || isRISCV(config)) {
+      opts.useConfiguredVectorSizes = false;
+    }
+    opts.lowerToAVX2 = hasAVX2Feature(config);
+    opts.enableVectorMasking =
+        isX86(config) || isRISCV(config) ||
+        (isAArch64(config) && hasAnySVEFeature(config));
+    opts.enableAArch64SME = isAArch64(config) && hasAnySVEFeature(config) &&
+                            hasSMEFeature(config);
+    opts.enableAArch64I8mm = isAArch64(config) && hasI8mmFeature(config);
+  }
+  return opts;
+}
+
+LogicalResult buildLLVMCPUDispatchPassPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm) {
+  LLVMCPUPipelineOptions opts = assemblePipelineOptionsFromTarget(target);
+  switch (pipeline) {
+  case IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault:
+    addCPUDefaultPassPipeline(pm, opts);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::CPUBufferOpsTileAndVectorize:
+    addCPUBufferOpsTileAndVectorizePipeline(pm, opts);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::CPUConvTileAndDecomposeExpert:
+    addConvTileAndDecomposeExpertPassPipeline(pm, opts);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::Mmt4dTilingExpert:
+    addMmt4dTilingExpertPassPipeline(pm, opts);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::CPUDataTiling:
+    addCPUDataTilingPipeline(pm, opts);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::CPULinalgExtTileAndVectorize:
+    addCPULinalgExtTileAndVectorizePipeline(pm, opts);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::CPUDoubleTilingExpert:
+    // Needs per-op lowering config — dynamic only.
+    return failure();
+  default:
+    // Not a CPU pipeline.
+    return failure();
+  }
+}
+
 // NOTE: this runs on the top-level program module containing all
 // hal.executable ops.
 void buildLLVMCPULinkingPassPipeline(OpPassManager &modulePassManager,
@@ -726,6 +781,10 @@ namespace {
 void registerCodegenLLVMCPUPasses() {
   // Generated.
   registerPasses();
+
+  // Register the LLVMCPU dispatch pipeline builder for ExternalModel.
+  IREE::Codegen::registerDispatchPipelineBuilder("llvmcpu",
+                                                  buildLLVMCPUDispatchPassPipeline);
 
   static PassPipelineRegistration<> LLVMCPUConfigPipeline(
       "iree-codegen-llvmcpu-configuration-pipeline",

@@ -136,6 +136,13 @@ void buildLLVMCPUCodegenPassPipeline(
     IREE::HAL::ExecutableTargetAttr target,
     const CPUCodegenOptions &codegenOptions);
 
+/// Builds a function-level pass pipeline for the given dispatch lowering
+/// pipeline enum value. Returns failure if the pipeline is not a CPU pipeline
+/// or requires per-operation information not available at this level.
+LogicalResult buildLLVMCPUDispatchPassPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm);
+
 //----------------------------------------------------------------------------//
 // LLVMCPU Linking Passes and Pipelines
 //----------------------------------------------------------------------------//

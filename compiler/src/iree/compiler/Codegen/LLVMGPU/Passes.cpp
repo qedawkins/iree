@@ -15,6 +15,7 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/Passes.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/DispatchPipelineExternalModels.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMGPU/ROCDLPasses.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
@@ -1203,6 +1204,34 @@ void buildLLVMGPUCodegenPassPipeline(
   });
 }
 
+LogicalResult buildLLVMGPUDispatchPassPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm) {
+  // Pipelines that don't need per-function GPUPipelineOptions or forROCDL.
+  switch (pipeline) {
+  case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUBaseLowering:
+    addGPUBaseLoweringPassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUDistribute:
+    addGPUSimpleDistributePassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUVectorize:
+    addGPUVectorizationPassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUWinogradVectorize:
+    addGPUWinogradVectorizePassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUDefault:
+  case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUVectorDistribute:
+  case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse:
+    // Needs per-function GPUPipelineOptions or forROCDL — dynamic only.
+    return failure();
+  default:
+    // Not a GPU pipeline.
+    return failure();
+  }
+}
+
 // NOTE: this runs on the top-level program module containing all
 // hal.executable ops.
 void buildLLVMGPULinkingPassPipeline(OpPassManager &modulePassManager,
@@ -1234,6 +1263,10 @@ namespace common {
 void registerCodegenLLVMGPUPasses() {
   // Generated.
   common::registerPasses();
+
+  // Register the LLVMGPU dispatch pipeline builder for ExternalModel.
+  IREE::Codegen::registerDispatchPipelineBuilder("llvmgpu",
+                                                  buildLLVMGPUDispatchPassPipeline);
 
   struct LLVMGPUPipelineOptions final
       : PassPipelineOptions<LLVMGPUPipelineOptions> {

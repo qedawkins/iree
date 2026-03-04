@@ -67,6 +67,13 @@ void buildSPIRVCodegenPassPipeline(
     IREE::HAL::ExecutableTargetAttr target,
     const GPUCodegenOptions &gpuOpts);
 
+/// Builds a function-level pass pipeline for the given dispatch lowering
+/// pipeline enum value. Returns failure if the pipeline is not a SPIR-V
+/// pipeline or requires per-operation information not available at this level.
+LogicalResult buildSPIRVDispatchPassPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm);
+
 /// Populates passes needed to link HAL executables across SPIRV targets.
 void buildSPIRVLinkingPassPipeline(OpPassManager &modulePassManager);
 

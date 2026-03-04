@@ -85,6 +85,13 @@ void buildLLVMGPUCodegenPassPipeline(
 LogicalResult verifyLLVMGPUVectorDistributePipeline(
     Operation *op, IREE::GPU::LoweringConfigAttr loweringConfig);
 
+/// Builds a function-level pass pipeline for the given dispatch lowering
+/// pipeline enum value. Returns failure if the pipeline is not a GPU pipeline
+/// or requires per-operation information not available at this level.
+LogicalResult buildLLVMGPUDispatchPassPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm);
+
 //----------------------------------------------------------------------------//
 // LLVMGPU Linking Passes and Pipelines
 //----------------------------------------------------------------------------//

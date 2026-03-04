@@ -90,12 +90,20 @@ void LLVMGPULowerExecutableTargetPass::runOnOperation() {
   IREE::HAL::ExecutableTargetAttr target =
       IREE::HAL::ExecutableTargetAttr::lookup(funcOp);
 
-  // Check for a custom pipeline via PipelineAttrInterface.
+  // Check for a custom (non-enum) pipeline via PipelineAttrInterface.
+  // Enum attrs (DispatchLoweringPassPipelineAttr) are handled by the switch
+  // below, which has access to session-scoped and per-function options that
+  // the ExternalModel does not.
   Attribute pipelineAttr = translationInfo.getPassPipeline();
-  if (auto customPipeline =
-          dyn_cast<IREE::Codegen::PipelineAttrInterface>(pipelineAttr)) {
-    if (failed(customPipeline.buildPipeline(pipeline, target))) {
-      funcOp.emitOpError("failed to build custom pass pipeline");
+  if (!isa<IREE::Codegen::DispatchLoweringPassPipelineAttr>(pipelineAttr)) {
+    if (auto customPipeline =
+            dyn_cast<IREE::Codegen::PipelineAttrInterface>(pipelineAttr)) {
+      if (failed(customPipeline.buildPipeline(pipeline, target))) {
+        funcOp.emitOpError("failed to build custom pass pipeline");
+        return signalPassFailure();
+      }
+    } else {
+      funcOp.emitOpError("unsupported pass pipeline attribute type");
       return signalPassFailure();
     }
   } else {

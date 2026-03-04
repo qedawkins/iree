@@ -17,6 +17,7 @@
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/SPIRV/KernelConfig.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/DispatchPipelineExternalModels.h"
 #include "iree/compiler/Codegen/SPIRV/Passes.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/MarkerUtils.h"
@@ -687,6 +688,37 @@ void buildSPIRVCodegenPassPipeline(
   });
 }
 
+LogicalResult buildSPIRVDispatchPassPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm) {
+  switch (pipeline) {
+  case IREE::Codegen::DispatchLoweringPassPipeline::SPIRVBaseLowering:
+    addSPIRVBaseLoweringPassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::SPIRVBaseDistribute:
+    addSPIRVBaseDistributePassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::SPIRVBaseVectorize:
+    addSPIRVBaseVectorizePassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::SPIRVSubgroupReduce:
+    addSPIRVSubgroupReducePassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::SPIRVWinogradVectorize:
+    addSPIRVWinogradVectorizePassPipeline(pm);
+    return success();
+  case IREE::Codegen::DispatchLoweringPassPipeline::
+      SPIRVCooperativeMatrixVectorize:
+  case IREE::Codegen::DispatchLoweringPassPipeline::
+      SPIRVMatmulPromoteVectorize:
+    // Needs per-function software pipelining configuration — dynamic only.
+    return failure();
+  default:
+    // Not a SPIR-V pipeline.
+    return failure();
+  }
+}
+
 // NOTE: this runs on the top-level program module containing all hal.executable
 // ops.
 void buildSPIRVLinkingPassPipeline(OpPassManager &modulePassManager) {
@@ -721,6 +753,10 @@ namespace {
 void registerCodegenSPIRVPasses() {
   // Generated.
   registerPasses();
+
+  // Register the SPIRV dispatch pipeline builder for ExternalModel.
+  IREE::Codegen::registerDispatchPipelineBuilder("spirv",
+                                                  buildSPIRVDispatchPassPipeline);
 
   static PassPipelineRegistration<> SPIRVConfigPipeline(
       "iree-codegen-spirv-configuration-pipeline",

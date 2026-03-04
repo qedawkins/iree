@@ -12,6 +12,7 @@
 #ifndef IREE_COMPILER_CODEGEN_VMVX_PASSES_H_
 #define IREE_COMPILER_CODEGEN_VMVX_PASSES_H_
 
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
@@ -26,6 +27,13 @@ namespace mlir::iree_compiler {
 /// suitable for library call dispatch and lowering to loops.
 void addVMVXDefaultPassPipeline(OpPassManager &funcPassManager,
                                 bool enableUKernels);
+
+/// Builds a function-level pass pipeline for the given dispatch lowering
+/// pipeline enum value. Returns failure if the pipeline is not a VMVX pipeline
+/// or requires per-operation information not available at this level.
+LogicalResult buildVMVXDispatchPassPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline pipeline,
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm);
 
 //----------------------------------------------------------------------------//
 // VMVX Linking Passes and Pipelines

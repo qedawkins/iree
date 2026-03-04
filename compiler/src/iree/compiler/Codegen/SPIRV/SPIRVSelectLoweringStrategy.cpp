@@ -102,8 +102,13 @@ void SPIRVSelectLoweringStrategyPass::runOnOperation() {
       continue;
     }
 
-    // Custom pipelines via PipelineAttrInterface skip enum-based verification.
+    // Custom (non-enum) pipelines via PipelineAttrInterface skip enum-based
+    // verification. The enum attr also implements PipelineAttrInterface via
+    // ExternalModel, so check for the concrete type to avoid skipping
+    // verification for standard pipelines.
     if (isa<IREE::Codegen::PipelineAttrInterface>(
+            translationInfo.getPassPipeline()) &&
+        !isa<IREE::Codegen::DispatchLoweringPassPipelineAttr>(
             translationInfo.getPassPipeline())) {
       continue;
     }
