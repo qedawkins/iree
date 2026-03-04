@@ -655,6 +655,57 @@ void buildLLVMCPUCodegenConfigurationPassPipeline(
   buildLLVMCPUCodegenConfigurationPassPipelineImpl(modulePassManager, cpuOpts);
 }
 
+/// Assembles LLVMCPUPipelineOptions from target alone (no CPUCodegenOptions).
+/// Used by the ExternalModel dispatch path where session options aren't
+/// available.
+static LLVMCPUPipelineOptions
+assemblePipelineOptionsFromTarget(IREE::HAL::ExecutableTargetAttr target) {
+  LLVMCPUPipelineOptions opts;
+  DictionaryAttr config = target ? target.getConfiguration() : nullptr;
+  if (config) {
+    if (isX86(config) || isRISCV(config)) {
+      opts.useConfiguredVectorSizes = false;
+    }
+    opts.lowerToAVX2 = hasAVX2Feature(config);
+    opts.enableVectorMasking =
+        isX86(config) || isRISCV(config) ||
+        (isAArch64(config) && hasAnySVEFeature(config));
+    opts.enableAArch64SME = isAArch64(config) && hasAnySVEFeature(config) &&
+                            hasSMEFeature(config);
+    opts.enableAArch64I8mm = isAArch64(config) && hasI8mmFeature(config);
+  }
+  return opts;
+}
+
+/// Assembles LLVMCPUPipelineOptions from target and session-scoped CPU
+/// options. Used by the static pipeline declarations in
+/// buildLLVMCPUCodegenPassPipeline.
+static LLVMCPUPipelineOptions
+assemblePipelineOptions(IREE::HAL::ExecutableTargetAttr target,
+                        const CPUCodegenOptions &cpuOpts) {
+  LLVMCPUPipelineOptions opts = assemblePipelineOptionsFromTarget(target);
+  opts.cpuOpts = cpuOpts;
+  return opts;
+}
+
+/// Returns a condition function that matches operations with the given
+/// dispatch lowering pass pipeline enum value.
+static auto hasPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline expected) {
+  return [expected](Operation *op) -> bool {
+    auto funcOp = dyn_cast<FunctionOpInterface>(op);
+    if (!funcOp) {
+      return false;
+    }
+    IREE::Codegen::TranslationInfoAttr translationInfo =
+        getTranslationInfo(funcOp);
+    if (!translationInfo) {
+      return false;
+    }
+    return translationInfo.getDispatchLoweringPassPipeline() == expected;
+  };
+}
+
 void buildLLVMCPUCodegenPassPipeline(
     OpPassManager &variantPassManager,
     IREE::HAL::ExecutableTargetAttr target,
@@ -664,14 +715,71 @@ void buildLLVMCPUCodegenPassPipeline(
   bool enableAArch64SME = cpuOpts.forAArch64SME.value_or(
       targetConfig && isAArch64(targetConfig) &&
       hasAnySVEFeature(targetConfig) && hasSMEFeature(targetConfig));
+
+  LLVMCPUPipelineOptions pipelineOpts = assemblePipelineOptions(target, cpuOpts);
+
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
+
+    using Pipeline = IREE::Codegen::DispatchLoweringPassPipeline;
+    StringRef funcOpName = func::FuncOp::getOperationName();
+
+    // Static pipelines: conditioned on TranslationInfo enum value. Each
+    // pipeline is declared once at construction time and dispatched to the
+    // matching function at runtime via ConditionalDispatchPass.
+    MultiPipelineNest nest(modulePassManager);
+
+    addCPUDefaultPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPUDefault), funcOpName),
+        pipelineOpts);
+    addCPUBufferOpsTileAndVectorizePipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPUBufferOpsTileAndVectorize),
+                    funcOpName),
+        pipelineOpts);
+    addConvTileAndDecomposeExpertPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPUConvTileAndDecomposeExpert),
+                    funcOpName),
+        pipelineOpts);
+    addMmt4dTilingExpertPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::Mmt4dTilingExpert), funcOpName),
+        pipelineOpts);
+    addCPUDataTilingPipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPUDataTiling), funcOpName),
+        pipelineOpts);
+    addCPULinalgExtTileAndVectorizePipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPULinalgExtTileAndVectorize),
+                    funcOpName),
+        pipelineOpts);
+
+    // Fallback: LowerExecutableTargetPass for dynamic pipelines
+    // (CPUDoubleTilingExpert needs per-op loweringConfig) and custom
+    // PipelineAttrInterface attrs.
+    auto fallbackCondition = [](Operation *op) -> bool {
+      auto funcOp = dyn_cast<FunctionOpInterface>(op);
+      if (!funcOp) {
+        return false;
+      }
+      IREE::Codegen::TranslationInfoAttr translationInfo =
+          getTranslationInfo(funcOp);
+      if (!translationInfo) {
+        return false;
+      }
+      Attribute pipelineAttr = translationInfo.getPassPipeline();
+      // Custom (non-enum) pipeline attrs.
+      if (!isa<IREE::Codegen::DispatchLoweringPassPipelineAttr>(pipelineAttr)) {
+        return true;
+      }
+      // Dynamic enum pipelines that need per-op information.
+      Pipeline pipeline = translationInfo.getDispatchLoweringPassPipeline();
+      return pipeline == Pipeline::CPUDoubleTilingExpert;
+    };
+    nest.nestIf(fallbackCondition, funcOpName)
+        .addPass(createLLVMCPULowerExecutableTargetPass(
+            LLVMCPULowerExecutableTargetPassOptions{cpuOpts}));
+    nest.commitPass();
+
     FunctionLikeNest(modulePassManager)
-        .addPass([&]() {
-          return createLLVMCPULowerExecutableTargetPass(
-              LLVMCPULowerExecutableTargetPassOptions{cpuOpts});
-        })
         .addPass(createVerifyWorkgroupDistributionPass);
     if (clPatchFuncOps) {
       modulePassManager.addPass(createPatchFuncOpsPass());
@@ -693,28 +801,6 @@ void buildLLVMCPUCodegenPassPipeline(
     variantPassManager.printAsTextualPipeline(llvm::dbgs());
     llvm::dbgs() << "\n";
   });
-}
-
-/// Assembles LLVMCPUPipelineOptions from target alone (no CPUCodegenOptions).
-/// Used by the ExternalModel dispatch path where session options aren't
-/// available.
-static LLVMCPUPipelineOptions
-assemblePipelineOptionsFromTarget(IREE::HAL::ExecutableTargetAttr target) {
-  LLVMCPUPipelineOptions opts;
-  DictionaryAttr config = target ? target.getConfiguration() : nullptr;
-  if (config) {
-    if (isX86(config) || isRISCV(config)) {
-      opts.useConfiguredVectorSizes = false;
-    }
-    opts.lowerToAVX2 = hasAVX2Feature(config);
-    opts.enableVectorMasking =
-        isX86(config) || isRISCV(config) ||
-        (isAArch64(config) && hasAnySVEFeature(config));
-    opts.enableAArch64SME = isAArch64(config) && hasAnySVEFeature(config) &&
-                            hasSMEFeature(config);
-    opts.enableAArch64I8mm = isAArch64(config) && hasI8mmFeature(config);
-  }
-  return opts;
 }
 
 LogicalResult buildLLVMCPUDispatchPassPipeline(
