@@ -53,11 +53,22 @@ struct CPUCodegenOptions : CodegenOptions {
   // Instruments memory reads and writes in dispatches for address tracking.
   bool instrumentMemoryAccesses = false;
 
+  // Force AArch64 SME lowering path, overriding target-based detection.
+  // Used by pipeline registrations where no target attribute is available.
+  std::optional<bool> forAArch64SME = std::nullopt;
+
   void bindOptions(OptionsBinder &binder);
   using FromFlags = OptionsFromFlags<CPUCodegenOptions>;
 };
 
 struct GPUCodegenOptions : CodegenOptions {
+  // Force ROCM/ROCDL lowering path, overriding target-based detection.
+  // Used by pipeline registrations where no target attribute is available.
+  std::optional<bool> forROCM = std::nullopt;
+
+  // Preserve debug info through lowering (e.g., for ROCM debug symbols).
+  bool preserveDebugInfo = false;
+
   void bindOptions(OptionsBinder &binder);
   using FromFlags = OptionsFromFlags<GPUCodegenOptions>;
 };

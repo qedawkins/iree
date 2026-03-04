@@ -109,7 +109,8 @@ public:
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
                                     OpPassManager &passManager) final {
-    buildSPIRVCodegenPassPipeline(passManager);
+    GPUCodegenOptions gpuOpts;
+    buildSPIRVCodegenPassPipeline(passManager, targetAttr, gpuOpts);
 
     // Prepare SPIR-V for WebGPU by expanding or removing unsupported ops.
     // For example,

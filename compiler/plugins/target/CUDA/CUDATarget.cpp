@@ -453,8 +453,8 @@ public:
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
                                     OpPassManager &passManager) final {
-    buildLLVMGPUCodegenPassPipeline(passManager, false,
-                                    /*preserveDebugInfo=*/false);
+    GPUCodegenOptions gpuOpts;
+    buildLLVMGPUCodegenPassPipeline(passManager, targetAttr, gpuOpts);
   }
 
   void buildLinkingPassPipeline(OpPassManager &passManager) final {

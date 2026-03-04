@@ -131,9 +131,10 @@ void buildLLVMCPUCodegenConfigurationPassPipeline(
 /// Populates passes needed to lower high level ops, e.g., linalg, vector, etc,
 /// to LLVM dialect via the structured ops path. The  `variantPassManager`
 /// should operate on the module within the IREE::HAL::ExecutableOp.
-void buildLLVMCPUCodegenPassPipeline(OpPassManager &variantPassManager,
-                                     const CPUCodegenOptions &codegenOptions,
-                                     bool enableAArch64SME = false);
+void buildLLVMCPUCodegenPassPipeline(
+    OpPassManager &variantPassManager,
+    IREE::HAL::ExecutableTargetAttr target,
+    const CPUCodegenOptions &codegenOptions);
 
 //----------------------------------------------------------------------------//
 // LLVMCPU Linking Passes and Pipelines

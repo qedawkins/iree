@@ -219,7 +219,8 @@ public:
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
                                     OpPassManager &passManager) final {
-    buildSPIRVCodegenPassPipeline(passManager);
+    GPUCodegenOptions gpuOpts;
+    buildSPIRVCodegenPassPipeline(passManager, targetAttr, gpuOpts);
   }
 
   void buildLinkingPassPipeline(OpPassManager &passManager) final {

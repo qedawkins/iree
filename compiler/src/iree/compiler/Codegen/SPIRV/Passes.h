@@ -13,6 +13,8 @@
 #define IREE_COMPILER_CODEGEN_SPIRV_PASSES_H_
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Utils/CodegenOptions.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Pass/Pass.h"
 
 namespace mlir::iree_compiler {
@@ -60,7 +62,10 @@ void buildSPIRVCodegenConfigurationPassPipeline(
 
 /// Populates passes needed to lower linalg/arith/math ops to SPIR-V ops via
 /// the structured ops path.
-void buildSPIRVCodegenPassPipeline(OpPassManager &variantPassManager);
+void buildSPIRVCodegenPassPipeline(
+    OpPassManager &variantPassManager,
+    IREE::HAL::ExecutableTargetAttr target,
+    const GPUCodegenOptions &gpuOpts);
 
 /// Populates passes needed to link HAL executables across SPIRV targets.
 void buildSPIRVLinkingPassPipeline(OpPassManager &modulePassManager);

@@ -12,7 +12,9 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
+#include "iree/compiler/Codegen/LLVMCPU/Utils.h"
 #include "iree/compiler/Codegen/Utils/CodegenOptions.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Utils/PassUtils.h"
@@ -652,9 +654,15 @@ void buildLLVMCPUCodegenConfigurationPassPipeline(
   buildLLVMCPUCodegenConfigurationPassPipelineImpl(modulePassManager, cpuOpts);
 }
 
-void buildLLVMCPUCodegenPassPipeline(OpPassManager &variantPassManager,
-                                     const CPUCodegenOptions &cpuOpts,
-                                     bool enableAArch64SME) {
+void buildLLVMCPUCodegenPassPipeline(
+    OpPassManager &variantPassManager,
+    IREE::HAL::ExecutableTargetAttr target,
+    const CPUCodegenOptions &cpuOpts) {
+  // Derive enableAArch64SME from target configuration, with optional override.
+  DictionaryAttr targetConfig = target ? target.getConfiguration() : nullptr;
+  bool enableAArch64SME = cpuOpts.forAArch64SME.value_or(
+      targetConfig && isAArch64(targetConfig) &&
+      hasAnySVEFeature(targetConfig) && hasSMEFeature(targetConfig));
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
@@ -745,23 +753,25 @@ void registerCodegenLLVMCPUPasses() {
       });
 
   struct LinalgToLLVMPipelineOptions
-      : public PassPipelineOptions<LinalgToLLVMPipelineOptions> {
+      : PassPipelineOptions<LinalgToLLVMPipelineOptions> {
     Option<bool> enableArmSME{
         *this, "enable-arm-sme",
-        llvm::cl::desc("Enable the ArmSME lowering pipeline.")};
+        llvm::cl::desc("Enable AArch64 SME lowering passes."),
+        llvm::cl::init(false)};
   };
-
   static PassPipelineRegistration<LinalgToLLVMPipelineOptions>
       LinalgLLVMPipeline(
           "iree-codegen-linalg-to-llvm-pipeline",
           "Runs the progressive lowering pipeline from Linalg to LLVM",
           [](OpPassManager &variantPassManager,
-             LinalgToLLVMPipelineOptions const &options) {
-            // Use global codegen options for pipeline registration.
-            const CPUCodegenOptions &cpuOpts =
-                CPUCodegenOptions::FromFlags::get();
-            buildLLVMCPUCodegenPassPipeline(variantPassManager, cpuOpts,
-                                            options.enableArmSME);
+             const LinalgToLLVMPipelineOptions &options) {
+            CPUCodegenOptions cpuOpts = CPUCodegenOptions::FromFlags::get();
+            if (options.enableArmSME) {
+              cpuOpts.forAArch64SME = true;
+            }
+            buildLLVMCPUCodegenPassPipeline(
+                variantPassManager,
+                /*target=*/IREE::HAL::ExecutableTargetAttr{}, cpuOpts);
           });
 
   static PassPipelineRegistration<> LLVMCPULinkingPipeline(

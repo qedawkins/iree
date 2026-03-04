@@ -656,7 +656,10 @@ void buildSPIRVCodegenConfigurationPassPipeline(
   buildSPIRVCodegenConfigurationPassPipelineImpl(modulePassManager);
 }
 
-void buildSPIRVCodegenPassPipeline(OpPassManager &variantPassManager) {
+void buildSPIRVCodegenPassPipeline(
+    OpPassManager &variantPassManager,
+    IREE::HAL::ExecutableTargetAttr target,
+    const GPUCodegenOptions &gpuOpts) {
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(
@@ -731,7 +734,11 @@ void registerCodegenSPIRVPasses() {
       "iree-codegen-linalg-to-spirv-pipeline",
       "Runs the progressive lowering pipeline from linalg to SPIR-V",
       [](OpPassManager &variantPassManager) {
-        buildSPIRVCodegenPassPipeline(variantPassManager);
+        const GPUCodegenOptions &gpuOpts =
+            GPUCodegenOptions::FromFlags::get();
+        buildSPIRVCodegenPassPipeline(
+            variantPassManager,
+            /*target=*/IREE::HAL::ExecutableTargetAttr{}, gpuOpts);
       });
 }
 

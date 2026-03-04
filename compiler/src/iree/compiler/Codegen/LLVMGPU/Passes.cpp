@@ -1152,8 +1152,15 @@ void buildLLVMGPUCodegenConfigurationPassPipeline(
       variantPassManager.nest<ModuleOp>());
 }
 
-void buildLLVMGPUCodegenPassPipeline(OpPassManager &variantPassManager,
-                                     bool useROCM, bool preserveDebugInfo) {
+void buildLLVMGPUCodegenPassPipeline(
+    OpPassManager &variantPassManager,
+    IREE::HAL::ExecutableTargetAttr target,
+    const GPUCodegenOptions &gpuOpts) {
+  // Derive backend-specific flags from target, with optional override.
+  bool useROCM = gpuOpts.forROCM.value_or(
+      target && target.getBackend() == "rocm");
+  bool preserveDebugInfo = gpuOpts.preserveDebugInfo;
+
   // LLVMGPUSelectLoweringStrategyPass may have created ExecutableObjectAttr.
   // Hoisting them now deduplicates them and ensures that rewrite patterns don't
   // need to think about explicitly copying them over to new ops.
@@ -1247,16 +1254,21 @@ void registerCodegenLLVMGPUPasses() {
       "iree-codegen-linalg-to-nvvm-pipeline",
       "Runs the progressive lowering pipeline from Linalg to NVVM",
       [](OpPassManager &passManager, const LLVMGPUPipelineOptions &options) {
-        buildLLVMGPUCodegenPassPipeline(passManager, false,
-                                        options.preserveDebugInfo);
+        GPUCodegenOptions gpuOpts;
+        gpuOpts.preserveDebugInfo = options.preserveDebugInfo;
+        buildLLVMGPUCodegenPassPipeline(
+            passManager, /*target=*/IREE::HAL::ExecutableTargetAttr{}, gpuOpts);
       });
 
   static PassPipelineRegistration<LLVMGPUPipelineOptions> LinalgROCDLPipeline(
       "iree-codegen-linalg-to-rocdl-pipeline",
       "Runs the progressive lowering pipeline from Linalg to ROCDL",
       [](OpPassManager &passManager, const LLVMGPUPipelineOptions &options) {
-        buildLLVMGPUCodegenPassPipeline(passManager, true,
-                                        options.preserveDebugInfo);
+        GPUCodegenOptions gpuOpts;
+        gpuOpts.forROCM = true;
+        gpuOpts.preserveDebugInfo = options.preserveDebugInfo;
+        buildLLVMGPUCodegenPassPipeline(
+            passManager, /*target=*/IREE::HAL::ExecutableTargetAttr{}, gpuOpts);
       });
 
   static PassPipelineRegistration<> LLVMGPULinkingPipeline(
