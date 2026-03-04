@@ -30,6 +30,7 @@
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRV.h"
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRVPass.h"
 #include "mlir/Conversion/TosaToArith/TosaToArith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
@@ -657,6 +658,24 @@ void buildSPIRVCodegenConfigurationPassPipeline(
   buildSPIRVCodegenConfigurationPassPipelineImpl(modulePassManager);
 }
 
+/// Returns a condition function that matches operations with the given
+/// dispatch lowering pass pipeline enum value.
+static auto hasPipeline(
+    IREE::Codegen::DispatchLoweringPassPipeline expected) {
+  return [expected](Operation *op) -> bool {
+    auto funcOp = dyn_cast<FunctionOpInterface>(op);
+    if (!funcOp) {
+      return false;
+    }
+    IREE::Codegen::TranslationInfoAttr translationInfo =
+        getTranslationInfo(funcOp);
+    if (!translationInfo) {
+      return false;
+    }
+    return translationInfo.getDispatchLoweringPassPipeline() == expected;
+  };
+}
+
 void buildSPIRVCodegenPassPipeline(
     OpPassManager &variantPassManager,
     IREE::HAL::ExecutableTargetAttr target,
@@ -665,8 +684,53 @@ void buildSPIRVCodegenPassPipeline(
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(
         createSPIRVLowerExecutableUsingTransformDialectPass());
+
+    using Pipeline = IREE::Codegen::DispatchLoweringPassPipeline;
+    StringRef funcOpName = func::FuncOp::getOperationName();
+
+    // Static pipelines: no per-function software pipelining config needed.
+    MultiPipelineNest nest(modulePassManager);
+
+    addSPIRVBaseLoweringPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::SPIRVBaseLowering), funcOpName));
+    addSPIRVBaseDistributePassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::SPIRVBaseDistribute), funcOpName));
+    addSPIRVBaseVectorizePassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::SPIRVBaseVectorize), funcOpName));
+    addSPIRVSubgroupReducePassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::SPIRVSubgroupReduce), funcOpName));
+    addSPIRVWinogradVectorizePassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::SPIRVWinogradVectorize),
+                    funcOpName));
+
+    // Fallback: LowerExecutableTargetPass for dynamic pipelines
+    // (SPIRVCooperativeMatrixVectorize, SPIRVMatmulPromoteVectorize need
+    // per-function software pipelining config) and custom attrs.
+    auto fallbackCondition = [](Operation *op) -> bool {
+      auto funcOp = dyn_cast<FunctionOpInterface>(op);
+      if (!funcOp) {
+        return false;
+      }
+      IREE::Codegen::TranslationInfoAttr translationInfo =
+          getTranslationInfo(funcOp);
+      if (!translationInfo) {
+        return false;
+      }
+      Attribute pipelineAttr = translationInfo.getPassPipeline();
+      // Custom (non-enum) pipeline attrs.
+      if (!isa<IREE::Codegen::DispatchLoweringPassPipelineAttr>(pipelineAttr)) {
+        return true;
+      }
+      // Dynamic enum pipelines that need per-function information.
+      Pipeline pipeline = translationInfo.getDispatchLoweringPassPipeline();
+      return pipeline == Pipeline::SPIRVCooperativeMatrixVectorize ||
+             pipeline == Pipeline::SPIRVMatmulPromoteVectorize;
+    };
+    nest.nestIf(fallbackCondition, funcOpName)
+        .addPass(createSPIRVLowerExecutableTargetPass());
+    nest.commitPass();
+
     FunctionLikeNest(modulePassManager)
-        .addPass(createSPIRVLowerExecutableTargetPass)
         .addPass(createVerifyWorkgroupDistributionPass);
     addMemRefLoweringPasses(modulePassManager);
     FunctionLikeNest(modulePassManager).addPass(createGpuEliminateBarriers);
