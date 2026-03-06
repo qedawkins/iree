@@ -84,7 +84,8 @@ void addVMVXDefaultPassPipeline(OpPassManager &funcPassManager,
 
 LogicalResult buildVMVXDispatchPassPipeline(
     IREE::Codegen::DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm) {
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options) {
   switch (pipeline) {
   case IREE::Codegen::DispatchLoweringPassPipeline::VMVXDefault: {
     bool enableUKernels = target && hasUkernel(target.getConfiguration());

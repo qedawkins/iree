@@ -113,9 +113,11 @@ ArrayAttr ExportConfigAttr::getWorkgroupSizeIndexArray() {
 // iree_codegen.pass_pipeline
 //===----------------------------------------------------------------------===//
 
-LogicalResult PassPipelineAttr::buildPipeline(
-    OpPassManager &pm, IREE::HAL::ExecutableTargetAttr target) const {
-  // Textual pipelines ignore the target attribute.
+LogicalResult
+PassPipelineAttr::buildPipeline(OpPassManager &pm,
+                                IREE::HAL::ExecutableTargetAttr target,
+                                const CodegenPipelineOptions *options) const {
+  // Textual pipelines ignore both the target attribute and options.
   if (failed(parsePassPipeline(getPipeline(), pm))) {
     return failure();
   }

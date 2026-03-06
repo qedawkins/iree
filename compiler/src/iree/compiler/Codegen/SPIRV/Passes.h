@@ -72,7 +72,8 @@ void buildSPIRVCodegenPassPipeline(
 /// pipeline or requires per-operation information not available at this level.
 LogicalResult buildSPIRVDispatchPassPipeline(
     IREE::Codegen::DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm);
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options);
 
 /// Populates passes needed to link HAL executables across SPIRV targets.
 void buildSPIRVLinkingPassPipeline(OpPassManager &modulePassManager);

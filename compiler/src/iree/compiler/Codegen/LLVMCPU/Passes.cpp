@@ -805,8 +805,16 @@ void buildLLVMCPUCodegenPassPipeline(
 
 LogicalResult buildLLVMCPUDispatchPassPipeline(
     IREE::Codegen::DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm) {
-  LLVMCPUPipelineOptions opts = assemblePipelineOptionsFromTarget(target);
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options) {
+  // Use provided options if available, otherwise derive from target.
+  LLVMCPUPipelineOptions opts = [&]() -> LLVMCPUPipelineOptions {
+    if (const auto *cpuOpts =
+            options ? options->getAs<CPUCodegenPipelineOptions>() : nullptr) {
+      return cpuOpts->options;
+    }
+    return assemblePipelineOptionsFromTarget(target);
+  }();
   switch (pipeline) {
   case IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault:
     addCPUDefaultPassPipeline(pm, opts);

@@ -81,7 +81,8 @@ void VMVXLowerExecutableTargetPass::runOnOperation() {
   if (!isa<IREE::Codegen::DispatchLoweringPassPipelineAttr>(pipelineAttr)) {
     if (auto customPipeline =
             dyn_cast<IREE::Codegen::PipelineAttrInterface>(pipelineAttr)) {
-      if (failed(customPipeline.buildPipeline(pipeline, target))) {
+      if (failed(customPipeline.buildPipeline(pipeline, target,
+                                              /*options=*/nullptr))) {
         funcOp.emitOpError("failed to build custom pass pipeline");
         return signalPassFailure();
       }

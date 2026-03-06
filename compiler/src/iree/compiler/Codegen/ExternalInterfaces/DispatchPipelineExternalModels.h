@@ -12,6 +12,10 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/Pass/PassManager.h"
 
+namespace mlir::iree_compiler {
+struct CodegenPipelineOptions;
+} // namespace mlir::iree_compiler
+
 namespace mlir::iree_compiler::IREE::Codegen {
 
 /// Callback type for per-backend dispatch pipeline builders.
@@ -19,7 +23,8 @@ namespace mlir::iree_compiler::IREE::Codegen {
 /// tried by another backend.
 using DispatchPipelineBuilder = llvm::function_ref<LogicalResult(
     DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm)>;
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options)>;
 
 /// Registers a backend-specific dispatch pipeline builder.
 /// Backends call this during their pass registration to make their
@@ -28,8 +33,8 @@ using DispatchPipelineBuilder = llvm::function_ref<LogicalResult(
 void registerDispatchPipelineBuilder(
     llvm::StringRef name,
     LogicalResult (*builder)(DispatchLoweringPassPipeline,
-                             IREE::HAL::ExecutableTargetAttr,
-                             OpPassManager &));
+                             IREE::HAL::ExecutableTargetAttr, OpPassManager &,
+                             const CodegenPipelineOptions *));
 
 /// Registers the ExternalModel that makes DispatchLoweringPassPipelineAttr
 /// implement PipelineAttrInterface, dispatching to registered builders.

@@ -17,6 +17,7 @@
 #include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Utils/CodegenOptions.h"
+#include "iree/compiler/Codegen/Utils/CodegenPipelineOptions.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Pass/Pass.h"
 
@@ -87,6 +88,14 @@ struct LLVMCPUPipelineOptions {
   bool lowerToAVX2 = false;
 };
 
+/// Wraps LLVMCPUPipelineOptions for passing through PipelineAttrInterface.
+struct CPUCodegenPipelineOptions final : CodegenPipelineOptions {
+  CPUCodegenPipelineOptions(const LLVMCPUPipelineOptions &options)
+      : CodegenPipelineOptions(TypeID::get<CPUCodegenPipelineOptions>()),
+        options(options) {}
+  LLVMCPUPipelineOptions options;
+};
+
 /// Populates the passes to lower linalg ops on buffers. Currently this
 /// pipeline is only used for dispatches that just copy data from input
 /// interfaces to output interface.
@@ -141,7 +150,8 @@ void buildLLVMCPUCodegenPassPipeline(
 /// or requires per-operation information not available at this level.
 LogicalResult buildLLVMCPUDispatchPassPipeline(
     IREE::Codegen::DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm);
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options);
 
 //----------------------------------------------------------------------------//
 // LLVMCPU Linking Passes and Pipelines

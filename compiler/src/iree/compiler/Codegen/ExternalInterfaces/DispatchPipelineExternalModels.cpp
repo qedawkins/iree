@@ -20,7 +20,8 @@ namespace {
 struct BuilderEntry {
   llvm::StringRef name;
   LogicalResult (*builder)(DispatchLoweringPassPipeline,
-                           IREE::HAL::ExecutableTargetAttr, OpPassManager &);
+                           IREE::HAL::ExecutableTargetAttr, OpPassManager &,
+                           const CodegenPipelineOptions *);
 };
 
 /// Returns the global mutable list of registered builders.
@@ -36,8 +37,8 @@ SmallVector<BuilderEntry> &getBuilderRegistry() {
 void registerDispatchPipelineBuilder(
     llvm::StringRef name,
     LogicalResult (*builder)(DispatchLoweringPassPipeline,
-                             IREE::HAL::ExecutableTargetAttr,
-                             OpPassManager &)) {
+                             IREE::HAL::ExecutableTargetAttr, OpPassManager &,
+                             const CodegenPipelineOptions *)) {
   getBuilderRegistry().push_back({name, builder});
 }
 
@@ -52,7 +53,8 @@ struct DispatchLoweringPipelineExternalModel final
           DispatchLoweringPipelineExternalModel,
           DispatchLoweringPassPipelineAttr> {
   LogicalResult buildPipeline(Attribute attr, OpPassManager &pm,
-                              IREE::HAL::ExecutableTargetAttr target) const {
+                              IREE::HAL::ExecutableTargetAttr target,
+                              const CodegenPipelineOptions *options) const {
     auto enumAttr = cast<DispatchLoweringPassPipelineAttr>(attr);
     DispatchLoweringPassPipeline pipeline = enumAttr.getValue();
 
@@ -63,7 +65,7 @@ struct DispatchLoweringPipelineExternalModel final
 
     // Try each registered backend builder.
     for (const BuilderEntry &entry : getBuilderRegistry()) {
-      if (succeeded(entry.builder(pipeline, target, pm))) {
+      if (succeeded(entry.builder(pipeline, target, pm, options))) {
         return success();
       }
     }

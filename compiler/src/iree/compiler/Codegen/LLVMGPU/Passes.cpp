@@ -1268,8 +1268,8 @@ void buildLLVMGPUCodegenPassPipeline(
 
 LogicalResult buildLLVMGPUDispatchPassPipeline(
     IREE::Codegen::DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm) {
-  // Pipelines that don't need per-function GPUPipelineOptions or forROCDL.
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options) {
   switch (pipeline) {
   case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUBaseLowering:
     addGPUBaseLoweringPassPipeline(pm);
@@ -1284,9 +1284,26 @@ LogicalResult buildLLVMGPUDispatchPassPipeline(
     addGPUWinogradVectorizePassPipeline(pm);
     return success();
   case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUDefault:
+    if (const auto *gpuOpts =
+            options ? options->getAs<GPUCodegenPipelineOptions>() : nullptr) {
+      addGPUDefaultPassPipeline(pm, gpuOpts->options);
+      return success();
+    }
+    return failure();
   case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUVectorDistribute:
+    if (const auto *gpuOpts =
+            options ? options->getAs<GPUCodegenPipelineOptions>() : nullptr) {
+      addGPUVectorDistributePassPipeline(pm, gpuOpts->options,
+                                         gpuOpts->forROCDL);
+      return success();
+    }
+    return failure();
   case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse:
-    // Needs per-function GPUPipelineOptions or forROCDL — dynamic only.
+    if (const auto *gpuOpts =
+            options ? options->getAs<GPUCodegenPipelineOptions>() : nullptr) {
+      addGPUTileAndFusePassPipeline(pm, gpuOpts->options, gpuOpts->forROCDL);
+      return success();
+    }
     return failure();
   default:
     // Not a GPU pipeline.

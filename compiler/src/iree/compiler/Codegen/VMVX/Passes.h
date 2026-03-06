@@ -19,6 +19,8 @@
 
 namespace mlir::iree_compiler {
 
+struct CodegenPipelineOptions;
+
 //------------------------------------------------------------------------------
 // VMVX Pass Pipelines
 //------------------------------------------------------------------------------
@@ -33,7 +35,8 @@ void addVMVXDefaultPassPipeline(OpPassManager &funcPassManager,
 /// or requires per-operation information not available at this level.
 LogicalResult buildVMVXDispatchPassPipeline(
     IREE::Codegen::DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm);
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options);
 
 //----------------------------------------------------------------------------//
 // VMVX Linking Passes and Pipelines

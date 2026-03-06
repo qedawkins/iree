@@ -754,7 +754,8 @@ void buildSPIRVCodegenPassPipeline(
 
 LogicalResult buildSPIRVDispatchPassPipeline(
     IREE::Codegen::DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm) {
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options) {
   switch (pipeline) {
   case IREE::Codegen::DispatchLoweringPassPipeline::SPIRVBaseLowering:
     addSPIRVBaseLoweringPassPipeline(pm);

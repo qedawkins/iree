@@ -767,11 +767,16 @@ def IREECodegen_PipelineAttrInterface :
         attribute provides information about the executable target (backend,
         configuration dictionary with target features). May be null when
         the target is not available.
+
+        The options parameter carries backend-specific pipeline options
+        (e.g., GPU bank conflict reduction, CPU vectorization flags).
+        May be null when no backend options are available.
       }],
       /*retTy=*/"::mlir::LogicalResult",
       /*methodName=*/"buildPipeline",
       /*args=*/(ins "::mlir::OpPassManager &":$pm,
-                    "::mlir::iree_compiler::IREE::HAL::ExecutableTargetAttr":$target)
+                    "::mlir::iree_compiler::IREE::HAL::ExecutableTargetAttr":$target,
+                    "const ::mlir::iree_compiler::CodegenPipelineOptions *":$options)
     >
   ];
 }

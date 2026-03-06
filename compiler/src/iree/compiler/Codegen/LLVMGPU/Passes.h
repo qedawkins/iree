@@ -18,6 +18,7 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/ConfigUtils.h"
 #include "iree/compiler/Codegen/Utils/CodegenOptions.h"
+#include "iree/compiler/Codegen/Utils/CodegenPipelineOptions.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Pass/Pass.h"
 
@@ -85,12 +86,23 @@ void buildLLVMGPUCodegenPassPipeline(
 LogicalResult verifyLLVMGPUVectorDistributePipeline(
     Operation *op, IREE::GPU::LoweringConfigAttr loweringConfig);
 
+/// Wraps GPUPipelineOptions + forROCDL for passing through
+/// PipelineAttrInterface.
+struct GPUCodegenPipelineOptions final : CodegenPipelineOptions {
+  GPUCodegenPipelineOptions(const GPUPipelineOptions &options, bool forROCDL)
+      : CodegenPipelineOptions(TypeID::get<GPUCodegenPipelineOptions>()),
+        options(options), forROCDL(forROCDL) {}
+  GPUPipelineOptions options;
+  bool forROCDL = false;
+};
+
 /// Builds a function-level pass pipeline for the given dispatch lowering
 /// pipeline enum value. Returns failure if the pipeline is not a GPU pipeline
 /// or requires per-operation information not available at this level.
 LogicalResult buildLLVMGPUDispatchPassPipeline(
     IREE::Codegen::DispatchLoweringPassPipeline pipeline,
-    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm);
+    IREE::HAL::ExecutableTargetAttr target, OpPassManager &pm,
+    const CodegenPipelineOptions *options);
 
 //----------------------------------------------------------------------------//
 // LLVMGPU Linking Passes and Pipelines
