@@ -12,6 +12,7 @@
 #include "iree/compiler/Codegen/Common/CombineLayoutTransformation.h"
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/Passes.h"
@@ -1152,6 +1153,24 @@ void buildLLVMGPUCodegenConfigurationPassPipeline(
       variantPassManager.nest<ModuleOp>());
 }
 
+/// Returns a condition function that matches operations with the given
+/// dispatch lowering pass pipeline enum value.
+static auto
+hasPipeline(IREE::Codegen::DispatchLoweringPassPipeline expected) {
+  return [expected](Operation *op) -> bool {
+    auto funcOp = dyn_cast<FunctionOpInterface>(op);
+    if (!funcOp) {
+      return false;
+    }
+    IREE::Codegen::TranslationInfoAttr translationInfo =
+        getTranslationInfo(funcOp);
+    if (!translationInfo) {
+      return false;
+    }
+    return translationInfo.getDispatchLoweringPassPipeline() == expected;
+  };
+}
+
 void buildLLVMGPUCodegenPassPipeline(OpPassManager &variantPassManager,
                                      bool useROCM, bool preserveDebugInfo) {
   // LLVMGPUSelectLoweringStrategyPass may have created ExecutableObjectAttr.
@@ -1161,11 +1180,55 @@ void buildLLVMGPUCodegenPassPipeline(OpPassManager &variantPassManager,
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
+
+    using Pipeline = IREE::Codegen::DispatchLoweringPassPipeline;
+    StringRef funcOpName = func::FuncOp::getOperationName();
+
+    // Static pipelines: no per-function GPUPipelineOptions needed.
+    MultiPipelineNest nest(modulePassManager);
+
+    addGPUBaseLoweringPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::LLVMGPUBaseLowering), funcOpName));
+    addGPUSimpleDistributePassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::LLVMGPUDistribute), funcOpName));
+    addGPUVectorizationPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::LLVMGPUVectorize), funcOpName));
+    addGPUWinogradVectorizePassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::LLVMGPUWinogradVectorize),
+                    funcOpName));
+
+    // Fallback: LowerExecutableTargetPass for dynamic pipelines that need
+    // per-function GPUPipelineOptions (LLVMGPUDefault, LLVMGPUTileAndFuse,
+    // LLVMGPUVectorDistribute) and custom PipelineAttrInterface attrs.
+    auto fallbackCondition = [](Operation *op) -> bool {
+      auto funcOp = dyn_cast<FunctionOpInterface>(op);
+      if (!funcOp) {
+        return false;
+      }
+      IREE::Codegen::TranslationInfoAttr translationInfo =
+          getTranslationInfo(funcOp);
+      if (!translationInfo) {
+        return false;
+      }
+      Attribute pipelineAttr = translationInfo.getPassPipeline();
+      // Custom (non-enum) pipeline attrs.
+      if (!isa<IREE::Codegen::DispatchLoweringPassPipelineAttr>(
+              pipelineAttr)) {
+        return true;
+      }
+      // Dynamic enum pipelines that need per-function information.
+      Pipeline pipeline = translationInfo.getDispatchLoweringPassPipeline();
+      return pipeline == Pipeline::LLVMGPUDefault ||
+             pipeline == Pipeline::LLVMGPUTileAndFuse ||
+             pipeline == Pipeline::LLVMGPUVectorDistribute;
+    };
     LLVMGPULowerExecutableTargetPassOptions options;
     options.forROCDL = useROCM;
+    nest.nestIf(fallbackCondition, funcOpName)
+        .addPass(createLLVMGPULowerExecutableTargetPass(options));
+    nest.commitPass();
+
     FunctionLikeNest(modulePassManager)
-        .addPass(
-            [&] { return createLLVMGPULowerExecutableTargetPass(options); })
         .addPass(createVerifyWorkgroupDistributionPass)
         .addPass(createRemoveIndexHintsPass);
     if (clPatchFuncOps) {

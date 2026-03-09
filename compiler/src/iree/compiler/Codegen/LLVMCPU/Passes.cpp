@@ -652,17 +652,94 @@ void buildLLVMCPUCodegenConfigurationPassPipeline(
   buildLLVMCPUCodegenConfigurationPassPipelineImpl(modulePassManager, cpuOpts);
 }
 
+/// Returns a condition function that matches operations with the given
+/// dispatch lowering pass pipeline enum value.
+static auto
+hasPipeline(IREE::Codegen::DispatchLoweringPassPipeline expected) {
+  return [expected](Operation *op) -> bool {
+    auto funcOp = dyn_cast<FunctionOpInterface>(op);
+    if (!funcOp) {
+      return false;
+    }
+    IREE::Codegen::TranslationInfoAttr translationInfo =
+        getTranslationInfo(funcOp);
+    if (!translationInfo) {
+      return false;
+    }
+    return translationInfo.getDispatchLoweringPassPipeline() == expected;
+  };
+}
+
 void buildLLVMCPUCodegenPassPipeline(OpPassManager &variantPassManager,
                                      const CPUCodegenOptions &cpuOpts,
                                      bool enableAArch64SME) {
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
+
+    using Pipeline = IREE::Codegen::DispatchLoweringPassPipeline;
+    StringRef funcOpName = func::FuncOp::getOperationName();
+
+    // Pipeline options assembled without per-function information.
+    // Per-function overrides (decomposition, peeling) are handled by the
+    // fallback LowerExecutableTargetPass.
+    LLVMCPUPipelineOptions pipelineOpts;
+    pipelineOpts.cpuOpts = cpuOpts;
+
+    // Static pipelines: conditioned on TranslationInfo enum value.
+    MultiPipelineNest nest(modulePassManager);
+
+    addCPUDefaultPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPUDefault), funcOpName),
+        pipelineOpts);
+    addCPUBufferOpsTileAndVectorizePipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPUBufferOpsTileAndVectorize),
+                    funcOpName),
+        pipelineOpts);
+    addConvTileAndDecomposeExpertPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPUConvTileAndDecomposeExpert),
+                    funcOpName),
+        pipelineOpts);
+    addMmt4dTilingExpertPassPipeline(
+        nest.nestIf(hasPipeline(Pipeline::Mmt4dTilingExpert), funcOpName),
+        pipelineOpts);
+    addCPUDataTilingPipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPUDataTiling), funcOpName),
+        pipelineOpts);
+    addCPULinalgExtTileAndVectorizePipeline(
+        nest.nestIf(hasPipeline(Pipeline::CPULinalgExtTileAndVectorize),
+                    funcOpName),
+        pipelineOpts);
+
+    // Fallback: LowerExecutableTargetPass for dynamic pipelines
+    // (CPUDoubleTilingExpert needs per-op loweringConfig) and custom
+    // PipelineAttrInterface attrs.
+    auto fallbackCondition = [](Operation *op) -> bool {
+      auto funcOp = dyn_cast<FunctionOpInterface>(op);
+      if (!funcOp) {
+        return false;
+      }
+      IREE::Codegen::TranslationInfoAttr translationInfo =
+          getTranslationInfo(funcOp);
+      if (!translationInfo) {
+        return false;
+      }
+      Attribute pipelineAttr = translationInfo.getPassPipeline();
+      // Custom (non-enum) pipeline attrs.
+      if (!isa<IREE::Codegen::DispatchLoweringPassPipelineAttr>(
+              pipelineAttr)) {
+        return true;
+      }
+      // Dynamic enum pipelines that need per-op information.
+      Pipeline pipeline = translationInfo.getDispatchLoweringPassPipeline();
+      return pipeline == Pipeline::CPUDoubleTilingExpert;
+    };
+    nest.nestIf(fallbackCondition, funcOpName)
+        .addPass(createLLVMCPULowerExecutableTargetPass(
+            LLVMCPULowerExecutableTargetPassOptions{cpuOpts}));
+    nest.commitPass();
+
     FunctionLikeNest(modulePassManager)
-        .addPass([&]() {
-          return createLLVMCPULowerExecutableTargetPass(
-              LLVMCPULowerExecutableTargetPassOptions{cpuOpts});
-        })
         .addPass(createVerifyWorkgroupDistributionPass);
     if (clPatchFuncOps) {
       modulePassManager.addPass(createPatchFuncOpsPass());
