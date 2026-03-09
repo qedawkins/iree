@@ -733,6 +733,133 @@ def PCF_GetMemrefOp : PCF_Op<"get_memref", [
 } // OpGroupReadOps
 
 //===----------------------------------------------------------------------===//
+// Shape Ops
+//===----------------------------------------------------------------------===//
+
+def OpGroupShapeOps : OpDocGroup {
+  let summary = "Shape manipulation ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupShapeOps in {
+
+//===----------------------------------------------------------------------===//
+// ExpandShapeOp
+//===----------------------------------------------------------------------===//
+
+def PCF_ExpandShapeOp : PCF_Op<"expand_shape", [Pure]> {
+  let summary = [{
+    Reshape an sref by expanding dimensions according to a reassociation map.
+  }];
+  let description = [{
+    The `pcf.expand_shape` operation reshapes a `pcf.sref` by expanding
+    dimensions according to a reassociation map, analogous to
+    `tensor.expand_shape`. The scope and element type of the result must
+    match those of the source.
+
+    Example:
+    ```mlir
+      %expanded = pcf.expand_shape %src [[0, 1], [2]]
+        : !pcf.sref<128x4xf16, #scope> into !pcf.sref<8x16x4xf16, #scope>
+    ```
+  }];
+
+  let arguments = (ins
+    PCF_AnyShapedRef:$src,
+    IndexListArrayAttr:$reassociation,
+    Variadic<Index>:$output_shape
+  );
+  let results = (outs PCF_AnyShapedRef:$result);
+
+  let assemblyFormat = [{
+    $src $reassociation
+    (`output_shape` `[` $output_shape^ `]`)?
+    attr-dict `:` type($src) `into` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// SubviewOp
+//===----------------------------------------------------------------------===//
+
+def PCF_SubviewOp : PCF_Op<"subview", [
+       Pure, AttrSizedOperandSegments, OffsetSizeAndStrideOpInterface,
+  ]> {
+  let summary = [{
+    Extract a sub-region of an sref as a new sref.
+  }];
+  let description = [{
+    The `pcf.subview` operation extracts a sub-region of a `pcf.sref`,
+    analogous to `tensor.extract_slice` or `memref.subview`. The scope
+    and element type of the result must match those of the source.
+
+    Example:
+    ```mlir
+      %sub = pcf.subview %src[%i, 0, 0] [1, 16, 4] [1, 1, 1]
+        : !pcf.sref<8x16x4xf16, #scope> to !pcf.sref<16x4xf16, #scope>
+    ```
+  }];
+
+  let arguments = (ins
+    PCF_AnyShapedRef:$source,
+    Variadic<Index>:$offsets,
+    Variadic<Index>:$sizes,
+    Variadic<Index>:$strides,
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides
+  );
+  let results = (outs PCF_AnyShapedRef:$result);
+
+  let assemblyFormat = [{
+    $source ``
+    custom<DynamicIndexList>($offsets, $static_offsets)
+    custom<DynamicIndexList>($sizes, $static_sizes)
+    custom<DynamicIndexList>($strides, $static_strides)
+    attr-dict `:` type($source) `to` type($result)
+  }];
+
+  let extraClassDeclaration = [{
+    PCF::ShapedRefType getSourceType() {
+      return ::llvm::cast<PCF::ShapedRefType>(getSource().getType());
+    }
+
+    PCF::ShapedRefType getResultType() {
+      return ::llvm::cast<PCF::ShapedRefType>(getResult().getType());
+    }
+
+    /// Return the expected rank of each of the `static_offsets`, `static_sizes`
+    /// and `static_strides` attributes.
+    std::array<unsigned, 3> getArrayAttrMaxRanks() {
+      unsigned rank = getSourceType().getRank();
+      return {rank, rank, rank};
+    }
+
+    /// Return the number of leading operands before `offsets`, `sizes` and
+    /// `strides` operands.
+    static unsigned getOffsetSizeAndStrideStartOperandIndex() { return 1; }
+  }];
+
+  let builders = [
+    // Build a SubviewOp with mixed static and dynamic entries.
+    OpBuilder<(ins "Type":$resultType, "Value":$source,
+      "ArrayRef<OpFoldResult>":$offsets, "ArrayRef<OpFoldResult>":$sizes,
+      "ArrayRef<OpFoldResult>":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+    // Build a SubviewOp with dynamic entries.
+    OpBuilder<(ins "Type":$resultType, "Value":$source,
+      "ValueRange":$offsets, "ValueRange":$sizes, "ValueRange":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>
+  ];
+
+  let hasFolder = 1;
+}
+
+} // OpGroupShapeOps
+
+//===----------------------------------------------------------------------===//
 // Misc
 //===----------------------------------------------------------------------===//
 

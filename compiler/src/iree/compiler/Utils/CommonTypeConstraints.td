@@ -39,4 +39,10 @@ class RankedTensorOrVectorOrMemRefOf<list<Type> allowedTypes> :
           And<[IsMemRefTypePred, HasRankPred]>]>,
   "ranked tensor or vector or memref", "::mlir::ShapedType">;
 
+def AnyNonVectorShaped : TypeConstraint<
+  And<[CPred<"::llvm::isa<::mlir::ShapedType>($_self)">,
+       Neg<CPred<"::llvm::isa<::mlir::VectorType>($_self)">>]>,
+  "non-vector shaped type (tensor, memref, sref, etc.)",
+  "::mlir::ShapedType">;
+
 #endif // IREE_CODEGEN_UTILS_COMMONTYPECONSTRAINTS

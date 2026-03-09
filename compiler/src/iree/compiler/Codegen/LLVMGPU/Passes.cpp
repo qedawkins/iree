@@ -584,6 +584,9 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createCleanupBufferAllocViewPass());
   funcPassManager.addPass(createGPUCombineValueSemanticBarriersPass());
 
+  // Step 6b. Convert thread foralls and barrier chains to PCF ops.
+  funcPassManager.addPass(createGPUConvertThreadForallToSubgroupLanePCFPass());
+
   // Step 7. Bufferize.
   addGPUBufferizePasses(funcPassManager);
 
@@ -611,6 +614,7 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createFlattenSwizzleHintAllocsPass());
   funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
   funcPassManager.addPass(IREE::GPU::createLowerIREEGPUOpsPass());
+  funcPassManager.addPass(createForallToForPass());
   funcPassManager.addPass(createUnrollAnnotatedLoopsPass());
   funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
   if (pipelineOptions.enableReduceSharedMemoryBankConflicts) {

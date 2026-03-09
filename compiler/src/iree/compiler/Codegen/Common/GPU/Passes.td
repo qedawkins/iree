@@ -56,6 +56,28 @@ def GPUCombineValueSemanticBarriersPass :
   let dependentDialects = ["::mlir::iree_compiler::IREE::GPU::IREEGPUDialect"];
 }
 
+def GPUConvertThreadForallToSubgroupLanePCFPass :
+    InterfacePass<"iree-codegen-gpu-convert-thread-forall-to-subgroup-lane-pcf",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Convert thread-mapped scf.forall to nested pcf.generic with subgroup+lane scopes.";
+  let description = [{
+    Converts `scf.forall` ops with `gpu.thread` mapping attributes to nested
+    `pcf.generic` ops. The outer generic uses `#iree_gpu.subgroup_scope` and
+    the inner generic uses `#iree_gpu.lane_scope`.
+
+    Also converts barrier_region chains (alloc_tensor + barrier_region +
+    consumer ops) to PCF equivalents (pcf.alloc, pcf.expand_shape,
+    pcf.subview, pcf.read_slice).
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::scf::SCFDialect"
+  ];
+}
+
 def GPUCreateFastSlowPathPass :
     InterfacePass<"iree-codegen-gpu-create-fast-slow-path", "mlir::FunctionOpInterface"> {
   let summary = "Create separate fast and slow paths to handle padding";

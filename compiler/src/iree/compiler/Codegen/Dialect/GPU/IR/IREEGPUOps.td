@@ -334,7 +334,7 @@ def IREEGPU_CoalescedGatherDMAOp : Op<IREEGPU_Dialect, "coalesced_gather_dma", [
   let arguments = (ins
     AnyRankedTensorOrMemRef:$source,
     Variadic<RankedTensorOrVectorOrMemRefOf<[I32, Index]>>:$indices,
-    AnyRankedTensorOrMemRef:$init,
+    AnyNonVectorShaped:$init,
     Index:$lane,
     OptionalAttr<BoolArrayAttr>:$in_bounds
   );
