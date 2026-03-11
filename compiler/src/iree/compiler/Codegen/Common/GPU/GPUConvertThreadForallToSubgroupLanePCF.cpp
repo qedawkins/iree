@@ -132,17 +132,30 @@ static void convertSrefConsumerChain(IRRewriter &rewriter, Value srefVal,
   }
 }
 
+/// Find the outermost ancestor pcf.generic and return its scope.
+/// For workgroup shared memory, we want the outermost scope (e.g.
+/// subgroup_scope) rather than the innermost (e.g. lane_scope).
+static IREE::PCF::ScopeAttrInterface findOutermostScope(Operation *op) {
+  IREE::PCF::ScopeAttrInterface result;
+  Operation *parent = op->getParentOp();
+  while (parent) {
+    if (auto genericOp = dyn_cast<IREE::PCF::GenericOp>(parent)) {
+      result = genericOp.getScope();
+    }
+    parent = parent->getParentOp();
+  }
+  return result;
+}
+
 /// Convert barrier_region chains from tensor to sref semantics.
 /// Pattern: bufferization.alloc_tensor → barrier_region → consumer chain.
 /// Converts to: pcf.alloc → barrier_region(sref) → pcf ops.
-static void
-convertBarrierChainToSref(IRRewriter &rewriter,
-                          IREE::PCF::GenericOp outerGeneric) {
-  IREE::PCF::ScopeAttrInterface scope = outerGeneric.getScope();
-
-  // Find all workgroup-scoped alloc_tensor ops inside the generic.
+/// The alloc_tensor may live outside the pcf.generic (e.g. at workgroup
+/// scope) while the barrier_region consumers live inside it.
+static void convertBarrierChainToSref(IRRewriter &rewriter, Operation *funcOp) {
+  // Find all workgroup-scoped alloc_tensor ops in the function.
   SmallVector<bufferization::AllocTensorOp> allocOps;
-  outerGeneric->walk([&](bufferization::AllocTensorOp allocOp) {
+  funcOp->walk([&](bufferization::AllocTensorOp allocOp) {
     std::optional<Attribute> memSpace = allocOp.getMemorySpace();
     if (!memSpace) {
       return;
@@ -157,6 +170,23 @@ convertBarrierChainToSref(IRRewriter &rewriter,
 
   for (bufferization::AllocTensorOp allocOp : allocOps) {
     RankedTensorType tensorType = allocOp.getType();
+
+    // Determine the scope from the first barrier_region user's enclosing
+    // pcf.generic. The alloc may be outside the generic (e.g. at workgroup
+    // level) while barriers are inside it.
+    IREE::PCF::ScopeAttrInterface scope;
+    for (Operation *user : allocOp->getUsers()) {
+      if (auto barrierOp = dyn_cast<IREE::GPU::BarrierRegionOp>(user)) {
+        scope = findOutermostScope(barrierOp);
+        if (scope) {
+          break;
+        }
+      }
+    }
+    if (!scope) {
+      continue;
+    }
+
     IREE::PCF::ShapedRefType srefType =
         getSrefTypeFromTensor(tensorType, scope);
 
@@ -175,17 +205,12 @@ convertBarrierChainToSref(IRRewriter &rewriter,
 
       int64_t inputIdx = use.getOperandNumber();
 
-      // Update the barrier_region input from tensor to sref.
-      barrierOp.setOperand(inputIdx, srefAlloc);
-
-      // Update the block argument type from tensor to sref.
       Block &body = barrierOp.getRegion().front();
       BlockArgument blockArg = body.getArgument(inputIdx);
-      blockArg.setType(srefType);
 
-      // Convert ops inside the barrier body that write to the shared arg.
-      // Look for scf.forall with parallel_insert_slice writing to the
-      // shared out.
+      // Phase A: Fix inner foralls BEFORE changing the block arg type.
+      // The scf.forall verifier requires tensor shared_outs, so we must
+      // decouple the forall from the block arg while it's still tensor-typed.
       SmallVector<scf::ForallOp> innerForalls;
       body.walk([&](scf::ForallOp forallOp) {
         for (auto [idx, output] : llvm::enumerate(forallOp.getOutputs())) {
@@ -206,7 +231,11 @@ convertBarrierChainToSref(IRRewriter &rewriter,
           BlockArgument sharedOut =
               innerForall.getRegionIterArgs()[outputIdx];
 
-          // Convert parallel_insert_slice ops that write to this output.
+          // Convert parallel_insert_slice ops to pcf.write_slice, writing
+          // directly to the sref alloc (bypassing the forall's DPS).
+          // Place write_slice in the forall body (before the in_parallel
+          // terminator), not inside in_parallel which only allows
+          // ParallelCombiningOpInterface ops.
           scf::InParallelOp terminator = innerForall.getTerminator();
           for (Operation &op :
                llvm::make_early_inc_range(*terminator.getBody())) {
@@ -215,17 +244,30 @@ convertBarrierChainToSref(IRRewriter &rewriter,
               continue;
             }
 
-            rewriter.setInsertionPoint(insertOp);
+            // Insert the write_slice before the in_parallel terminator.
+            rewriter.setInsertionPoint(terminator);
             IREE::PCF::WriteSliceOp::create(
-                rewriter, insertOp.getLoc(), insertOp.getSource(), blockArg,
+                rewriter, insertOp.getLoc(), insertOp.getSource(), srefAlloc,
                 insertOp.getMixedOffsets(), insertOp.getMixedSizes(),
                 insertOp.getMixedStrides());
             rewriter.eraseOp(insertOp);
           }
+
+          // Replace the forall's shared_out operand with a tensor.empty
+          // so the forall stays valid in tensor land.
+          rewriter.setInsertionPoint(innerForall);
+          Value emptyTensor = tensor::EmptyOp::create(
+              rewriter, innerForall.getLoc(), tensorType.getShape(),
+              tensorType.getElementType());
+          innerForall.getOutputsMutable()[outputIdx].assign(emptyTensor);
         }
       }
 
-      // Update the yield op and barrier result types.
+      // Phase B: Now safe to change the block arg type and barrier operand.
+      barrierOp.setOperand(inputIdx, srefAlloc);
+      blockArg.setType(srefType);
+
+      // Update the yield op to yield the sref block arg.
       auto yieldOp = cast<IREE::GPU::YieldOp>(body.getTerminator());
       for (auto [idx, yieldOperand] :
            llvm::enumerate(yieldOp.getOperands())) {
@@ -288,9 +330,9 @@ struct GPUConvertThreadForallToSubgroupLanePCFPass final
     }
 
     // Phase 2: Convert barrier_region chains to PCF ops.
-    for (IREE::PCF::GenericOp genericOp : createdGenerics) {
-      convertBarrierChainToSref(rewriter, genericOp);
-    }
+    // Walk the whole function since alloc_tensors may live outside the
+    // pcf.generic nests (e.g. at workgroup scope).
+    convertBarrierChainToSref(rewriter, getOperation());
   }
 };
 

@@ -61,6 +61,9 @@ getEquivalentMappingConsumerLoopNest(scf::ForallOp producer,
             llvm::all_of(r, llvm::IsaPred<gpu::GPUWarpMappingAttr>));
   };
 
+  if (!producer.getMappingAttr() || !consumer.getMappingAttr()) {
+    return failure();
+  }
   ArrayRef<Attribute> producerMapping = producer.getMappingAttr().getValue();
   ArrayRef<Attribute> consumerMapping = consumer.getMappingAttr().getValue();
 
@@ -247,28 +250,37 @@ LogicalResult fuseForallIntoConsumer(RewriterBase &rewriter,
       staticConsumerCount && staticProducerCount &&
       staticProducerCount.value() % staticConsumerCount.value() == 0;
 
-  // Step 5. Create the `scf.for` loop for the producer.
-  // If the consumer worker count perfectly divides the producer worker count,
-  // then we can use a lower bound of 0 and keep the loop bounds static.
-  Value lb = perfectlyDivides ? arith::ConstantIndexOp::create(rewriter, loc, 0)
-                              : linearConsumerIdVal;
-  Value ub =
-      getValueOrCreateConstantIndexOp(rewriter, loc, producerWorkerCount);
-  Value step =
-      getValueOrCreateConstantIndexOp(rewriter, loc, consumerWorkerCount);
-  auto newProducer = scf::ForOp::create(rewriter, loc, lb, ub, step,
-                                        barrierOp.getBody()->getArgument(0));
+  // Step 5. Create the `scf.forall` loop for the producer (no mapping).
+  // Trip count = ceilDiv(producerCount - lb, consumerCount).
+  // For the common (perfectlyDivides) case, this is a static constant.
+  OpFoldResult tripCount;
+  if (perfectlyDivides) {
+    tripCount =
+        rewriter.getIndexAttr(*staticProducerCount / *staticConsumerCount);
+  } else {
+    tripCount = affine::makeComposedFoldedAffineApply(
+        rewriter, loc, (d0 - d2).ceilDiv(d1),
+        {producerWorkerCount, consumerWorkerCount, linearId});
+  }
+
+  SmallVector<OpFoldResult> forallLbs = {rewriter.getIndexAttr(0)};
+  SmallVector<OpFoldResult> forallUbs = {tripCount};
+  SmallVector<OpFoldResult> forallSteps = {rewriter.getIndexAttr(1)};
+  auto newProducer = scf::ForallOp::create(
+      rewriter, loc, forallLbs, forallUbs, forallSteps,
+      /*outputs=*/ValueRange{barrierOp.getBody()->getArgument(0)},
+      /*mapping=*/std::nullopt);
   setLoopUnrollMarker(newProducer);
   Block *loopBody = newProducer.getBody();
 
   // Get the replacement IDs for the producer loop.
+  // flat_id = iter_var * consumerCount + linearConsumerId.
   rewriter.setInsertionPointToStart(loopBody);
-  Value newFlatProducerId =
-      perfectlyDivides
-          ? affine::makeComposedAffineApply(
-                rewriter, loc, d0 + d1,
-                {newProducer.getInductionVar(), linearConsumerIdVal})
-          : newProducer.getInductionVar();
+  Value newFlatProducerId = affine::makeComposedAffineApply(
+      rewriter, loc, d0 * d1 + d2,
+      {newProducer.getInductionVars()[0],
+       getValueOrCreateConstantIndexOp(rewriter, loc, consumerWorkerCount),
+       linearConsumerIdVal});
 
   // We require a descending relative mapping and scf.forall loop ranges are
   // listed from outer most to inner most, so we can use the ranges directly
@@ -276,86 +288,16 @@ LogicalResult fuseForallIntoConsumer(RewriterBase &rewriter,
   auto delinearize = affine::AffineDelinearizeIndexOp::create(
       rewriter, loc, newFlatProducerId, llvm::to_vector(producerRanges));
 
-  SmallVector<Value> newBlockArgs = delinearize.getResults();
-  newBlockArgs.append(newProducer.getRegionIterArgs().begin(),
-                      newProducer.getRegionIterArgs().end());
-
-  // Step 6. Inline the region of the producer and replace the terminator.
-  scf::InParallelOp terminator = producer.getTerminator();
-  rewriter.mergeBlocks(producer.getBody(), loopBody, newBlockArgs);
-
-  rewriter.setInsertionPointAfter(terminator);
-  if (isa<tensor::ParallelInsertSliceOp>(
-          *terminator.getYieldingOps().begin())) {
-    auto parallelInsert = cast<tensor::ParallelInsertSliceOp>(
-        *terminator.getYieldingOps().begin());
-
-    // Create an insert_slice to yield from the loop body.
-    SmallVector<OpFoldResult, 4> sourceOffsets =
-        parallelInsert.getMixedOffsets();
-    SmallVector<OpFoldResult, 4> sourceSizes = parallelInsert.getMixedSizes();
-    SmallVector<OpFoldResult, 4> sourceStrides =
-        parallelInsert.getMixedStrides();
-    Value insertedSlice = tensor::InsertSliceOp::create(
-        rewriter, loc, parallelInsert.getSource(), parallelInsert.getDest(),
-        parallelInsert.getMixedOffsets(), parallelInsert.getMixedSizes(),
-        parallelInsert.getMixedStrides());
-    scf::YieldOp::create(rewriter, loc, insertedSlice);
-    rewriter.eraseOp(parallelInsert);
-    rewriter.eraseOp(terminator);
-  } else {
-    assert(isa<IREE::GPU::CoalescedGatherDMAOp>(
-               *terminator.getYieldingOps().begin()) &&
-           "expected coalesced gather dma op");
-    // Create the new CoalescedGatherDMAOp outside the in_parallel region
-    // and remove the in_parallel terminator.
-    auto coalescedGather = cast<IREE::GPU::CoalescedGatherDMAOp>(
-        *terminator.getYieldingOps().begin());
-
-    // Create the new CoalescedGatherDMAOp with a result outside the in_parallel
-    rewriter.setInsertionPoint(terminator);
-    auto newGatherOp = IREE::GPU::CoalescedGatherDMAOp::create(
-        rewriter, loc, coalescedGather.getInit().getType(),
-        coalescedGather.getSource(), coalescedGather.getIndices(),
-        coalescedGather.getInit(), coalescedGather.getLane(),
-        coalescedGather.getInBoundsAttr());
-    Value gatherResult = newGatherOp.getResult();
-
-    // Use a tensor.insert_slice to insert the gather result back into the
-    // shared memory destination. Extract offsets from the init's extract_slice.
-    SmallVector<OpFoldResult> destIndices;
-    SmallVector<OpFoldResult> sizes;
-    SmallVector<OpFoldResult> strides;
-
-    // Get offsets, sizes, and strides from the init's extract_slice op
-    auto extractSlice =
-        coalescedGather.getInit().getDefiningOp<tensor::ExtractSliceOp>();
-    if (extractSlice) {
-      destIndices = extractSlice.getMixedOffsets();
-      sizes = extractSlice.getMixedSizes();
-      strides = extractSlice.getMixedStrides();
-    } else {
-      // Fallback: use offset 0 if init is not from an extract_slice
-      auto initType = cast<ShapedType>(coalescedGather.getInit().getType());
-      int64_t rank = initType.getRank();
-      destIndices.assign(rank, rewriter.getIndexAttr(0));
-      sizes =
-          getAsIndexOpFoldResult(rewriter.getContext(), initType.getShape());
-      strides.assign(rank, rewriter.getIndexAttr(1));
-    }
-
-    // Get the destination tensor from the loop's iter_args
-    Value dest = newProducer.getRegionIterArgs()[0];
-    Value insertedSlice = tensor::InsertSliceOp::create(
-        rewriter, loc, gatherResult, dest, destIndices, sizes, strides);
-
-    // Yield the result with the inserted slice
-    scf::YieldOp::create(rewriter, loc, insertedSlice);
-
-    // Erase the old coalesced gather op and the in_parallel terminator
-    rewriter.eraseOp(coalescedGather);
-    rewriter.eraseOp(terminator);
-  }
+  // Step 6. Inline the producer body into the new forall. Erase the new
+  // forall's empty terminator first, then merge the producer body (including
+  // its in_parallel terminator) into the new forall body. This is safe because
+  // the producer's in_parallel becomes the new forall's terminator.
+  SmallVector<Value> argReplacements;
+  llvm::append_range(argReplacements, delinearize.getResults());
+  llvm::append_range(argReplacements, newProducer.getRegionOutArgs());
+  newProducer.getTerminator()->erase();
+  rewriter.mergeBlocks(producer.getBody(), newProducer.getBody(),
+                       argReplacements);
 
   // Step 7. Yield the result of the loop from the barrier op and replace the
   // producer.

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -78,8 +79,19 @@ static LogicalResult forallToForLoop(RewriterBase &rewriter,
     }
     return yieldedValues;
   };
+  // Propagate the unroll_loop marker from the forall to the generated for
+  // loops so that later passes can unroll them.
+  bool shouldUnroll = getLoopUnrollMarker(forallOp) != nullptr;
+
   scf::LoopNest loopNest = scf::buildLoopNest(rewriter, forallOp->getLoc(), lbs,
                                               ubs, steps, iterArgs, buildBody);
+
+  if (shouldUnroll) {
+    for (scf::ForOp loop : loopNest.loops) {
+      setLoopUnrollMarker(loop);
+    }
+  }
+
   rewriter.replaceOp(forallOp, loopNest.results);
   return success();
 }
