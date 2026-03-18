@@ -10,6 +10,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Support/LogicalResult.h"
 
 namespace mlir::iree_compiler::IREE::PCF {
@@ -43,6 +44,21 @@ public:
                     const ClusterEquivalenceInfo &equivalenceInfo,
                     const DenseSet<Operation *> &opsToSkip) = 0;
 };
+
+/// Factory function type for creating distribution interfaces.
+/// Used to break the circular dependency between PCF/Transforms and
+/// Common/GPU: Common/GPU registers a factory that creates
+/// VectorDistributionImpl, and PCF/Transforms calls it.
+using DistributionFactory =
+    std::function<std::unique_ptr<DistributionInterface>(
+        int64_t subgroupSize, ArrayRef<int64_t> workgroupSize)>;
+
+/// Register a global distribution factory. Called by Common/GPU dialect
+/// extension during initialization.
+void registerDistributionFactory(DistributionFactory factory);
+
+/// Get the registered distribution factory, or nullptr if none.
+DistributionFactory getDistributionFactory();
 
 } // namespace mlir::iree_compiler::IREE::PCF
 

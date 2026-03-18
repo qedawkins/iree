@@ -45,6 +45,20 @@ struct TestDistributionImpl final : public DistributionInterface {
 };
 
 //===----------------------------------------------------------------------===//
+// VectorDistributionImpl
+//===----------------------------------------------------------------------===//
+
+// Note: The VectorDistributionImpl is defined in
+// Codegen/Common/GPU/GPUPCFDistribution.cpp to avoid circular dependencies
+// (PCF/Transforms cannot depend on Common/GPU which already depends on
+// PCF/Transforms). The implementation is registered via the
+// DistributionInterface pointer on the pass, set by pipeline construction
+// code.
+//
+// For standalone testing, use --test-distribution which uses the no-op
+// TestDistributionImpl above.
+
+//===----------------------------------------------------------------------===//
 // Helpers
 //===----------------------------------------------------------------------===//
 
@@ -668,6 +682,17 @@ struct DistributeAndLowerPass final
     std::unique_ptr<DistributionInterface> distInterface;
     if (useTestDistribution) {
       distInterface = std::make_unique<TestDistributionImpl>();
+    } else if (useVectorDistribution) {
+      // Create VectorDistributionImpl via the factory callback if registered.
+      DistributionFactory factory = getDistributionFactory();
+      if (factory) {
+        distInterface = factory(subgroupSize, workgroupSize);
+      } else {
+        getOperation()->emitOpError(
+            "vector-distribution requested but no factory registered; "
+            "ensure the GPU dialect extension is loaded");
+        return signalPassFailure();
+      }
     }
 
     // Phase 1: Distribute children within tile_groups.

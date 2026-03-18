@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
+#include "iree/compiler/Codegen/Common/GPU/GPUPCFDistribution.h"
 #include "mlir/Pass/PassManager.h"
 
 namespace mlir::iree_compiler {
@@ -17,5 +18,7 @@ namespace {
 void registerCodegenCommonGPUPasses() {
   // Generated.
   registerPasses();
+  // Register the PCF vector distribution factory.
+  registerPCFVectorDistribution();
 }
 } // namespace mlir::iree_compiler

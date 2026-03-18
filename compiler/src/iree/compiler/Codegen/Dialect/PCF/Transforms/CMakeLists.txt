@@ -33,6 +33,7 @@ iree_cc_library(
     "ConvertForallToLoops.cpp"
     "ConvertSRefToMemRef.cpp"
     "DistributeAndLower.cpp"
+    "DistributionInterface.cpp"
     "EquivalenceAnalysis.cpp"
     "FuseConsumers.cpp"
     "FusePCFWrites.cpp"
