@@ -482,3 +482,143 @@ util.func private @two_run_clusters_same_id(
 // requires constructing valid IR where a cluster-typed value passes through
 // scf.for iter_args, which is complex due to run_cluster result-to-source
 // dependency ordering in eraseNonMatchingRunClusters.
+
+// -----
+
+// Four-cluster tile_group with 3 split points. Produces an index_switch
+// with 3 cases + default.
+//
+// CHECK-LABEL: util.func private @four_cluster_tile_group
+// CHECK:         scf.index_switch
+// CHECK-NEXT:    case 0 {
+// CHECK:           scf.yield
+// CHECK:         }
+// CHECK-NEXT:    case 1 {
+// CHECK:           scf.yield
+// CHECK:         }
+// CHECK-NEXT:    case 2 {
+// CHECK:           scf.yield
+// CHECK:         }
+// CHECK-NEXT:    default {
+// CHECK:         }
+// CHECK-NOT:     pcf.shared_executor.tile_group
+util.func private @four_cluster_tile_group(
+    %tg: !pcf.threadgroup<#pcf.test_scope>,
+    %k0: index, %k1: index, %k2: index) {
+  pcf.shared_executor.tile_group %tg split [[%k0, %k1, %k2]]
+      (%c0: !pcf.cluster<#pcf.test_scope, (0 -> d0), c0>,
+       %c1: !pcf.cluster<#pcf.test_scope, (d0 -> d1), c1>,
+       %c2: !pcf.cluster<#pcf.test_scope, (d1 -> d2), c2>,
+       %c3: !pcf.cluster<#pcf.test_scope, (d2 -> s0), c3>) {
+    "test.body"() : () -> ()
+    pcf.return
+  } : !pcf.threadgroup<#pcf.test_scope>
+  util.return
+}
+
+// -----
+
+// Two run_cluster ops targeting different clusters. Each should appear only
+// in its own case. This verifies multi-cluster-ID grouping.
+//
+// CHECK-LABEL: util.func private @multi_cluster_id_groups
+// CHECK:         scf.index_switch
+// CHECK-NEXT:    case 0 {
+// CHECK:           pcf.shared_executor.run_cluster
+// CHECK:           "test.left_body"
+// CHECK-NOT:       "test.right_body"
+// CHECK:           scf.yield
+// CHECK:         }
+// CHECK-NEXT:    default {
+// CHECK:           pcf.shared_executor.run_cluster
+// CHECK:           "test.right_body"
+// CHECK-NOT:       "test.left_body"
+// CHECK:         }
+util.func private @multi_cluster_id_groups(
+    %tg: !pcf.threadgroup<#pcf.test_scope>, %k: index) {
+  pcf.shared_executor.tile_group %tg split [[%k]]
+      (%left: !pcf.cluster<#pcf.test_scope, (0 -> d0), left>,
+       %right: !pcf.cluster<#pcf.test_scope, (d0 -> s0), right>) {
+    pcf.shared_executor.run_cluster(%left)[%k]
+        () {
+      "test.left_body"() : () -> ()
+      pcf.cluster_yield
+    } : (!pcf.cluster<#pcf.test_scope, (0 -> d0), left>)
+    pcf.shared_executor.run_cluster(%right)[%k]
+        () {
+      "test.right_body"() : () -> ()
+      pcf.cluster_yield
+    } : (!pcf.cluster<#pcf.test_scope, (d0 -> s0), right>)
+    pcf.return
+  } : !pcf.threadgroup<#pcf.test_scope>
+  util.return
+}
+
+// -----
+
+// run_thread inside nested tile_group. The inner tile_group further splits
+// a cluster, and a run_thread operates within the inner split.
+//
+// CHECK-LABEL: util.func private @run_thread_in_nested_tile_group
+// CHECK:         scf.index_switch
+// CHECK:           scf.index_switch
+// CHECK:             arith.subi
+// CHECK:             "test.inner_thread"
+// CHECK-NOT:     pcf.shared_executor.run_thread
+util.func private @run_thread_in_nested_tile_group(
+    %tg: !pcf.threadgroup<#pcf.test_scope>, %k: index, %j: index) {
+  pcf.shared_executor.tile_group %tg ns(outer) split [[%k]]
+      (%left: !pcf.cluster<#pcf.test_scope, (0 -> d0), outer.left>,
+       %right: !pcf.cluster<#pcf.test_scope, (d0 -> s0), outer.right>) {
+    pcf.shared_executor.tile_group %left ns(inner) split [[%j]]
+        (%top: !pcf.cluster<#pcf.test_scope, (0 -> d0), inner.top>,
+         %bot: !pcf.cluster<#pcf.test_scope, (d0 -> s0), inner.bot>) {
+      pcf.shared_executor.run_thread(%top)[%j]
+          ()[%tid: index] {
+        "test.inner_thread"(%tid) : (index) -> ()
+        pcf.cluster_yield
+      } : (!pcf.cluster<#pcf.test_scope, (0 -> d0), inner.top>)
+      pcf.return
+    } : !pcf.cluster<#pcf.test_scope, (0 -> d0), outer.left>
+    pcf.return
+  } : !pcf.threadgroup<#pcf.test_scope>
+  util.return
+}
+
+// -----
+
+// shared_executor with both initializer and mixed readonly + readwrite.
+// Verifies that the lowering handles all three operand kinds together.
+//
+// CHECK-LABEL: util.func private @shared_executor_mixed
+// CHECK-SAME:    (%[[INPUT:.+]]: tensor<64x256xf16>, %[[OUTPUT:.+]]: tensor<64x64xf32>)
+// CHECK:         pcf.generic scope(#pcf.test_scope) initialize {
+// CHECK:             %[[SMEM:.+]] = pcf.alloc()
+// CHECK:             pcf.yield %[[SMEM]]
+// CHECK:           }
+// CHECK:           execute(%{{.+}} = %[[OUTPUT]])
+// CHECK:             %[[SREF:.+]] = pcf.to_sref %[[INPUT]]
+// CHECK:             "test.use_all"
+// CHECK:           pcf.return
+// CHECK-NOT:     pcf.shared_executor
+util.func private @shared_executor_mixed(
+    %input: tensor<64x256xf16>, %output: tensor<64x64xf32>) {
+  %0 = pcf.shared_executor scope(#pcf.test_scope)
+    initialize {
+      %smem = pcf.alloc() : !pcf.sref<64x32xf16, #pcf.test_scope>
+      pcf.yield %smem : !pcf.sref<64x32xf16, #pcf.test_scope>
+    } -> (%smem: !pcf.sref<64x32xf16, #pcf.test_scope>)
+    execute(%in_ref <- %input, %out_ref = %output)
+        [%tg: !pcf.threadgroup<#pcf.test_scope>]
+         : (!pcf.sref<64x256xf16, #pcf.test_scope>,
+            !pcf.sref<64x64xf32, #pcf.test_scope>)
+        -> (tensor<64x64xf32>) {
+    "test.use_all"(%smem, %in_ref, %out_ref)
+        : (!pcf.sref<64x32xf16, #pcf.test_scope>,
+           !pcf.sref<64x256xf16, #pcf.test_scope>,
+           !pcf.sref<64x64xf32, #pcf.test_scope>) -> ()
+    pcf.return
+  }
+  util.optimization_barrier %0 : tensor<64x64xf32>
+  util.return
+}
