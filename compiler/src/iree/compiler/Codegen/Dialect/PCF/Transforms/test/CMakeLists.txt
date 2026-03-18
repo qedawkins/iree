@@ -21,6 +21,8 @@ iree_lit_test_suite(
     "fuse_pcf_writes.mlir"
     "fuse_producers.mlir"
     "lower_structural_pcf.mlir"
+    "namespace_resolution.mlir"
+    "namespace_resolution_failures.mlir"
     "resolve_tokens.mlir"
   TOOLS
     FileCheck

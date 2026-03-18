@@ -179,4 +179,15 @@ def ResolveTokensPass : Pass<"iree-pcf-resolve-tokens", ""> {
   }];
 }
 
+def TestNamespaceResolutionPass
+    : Pass<"iree-pcf-test-namespace-resolution", ""> {
+  let summary = "Test pass for namespace symbol resolution.";
+  let description = [{
+    Walks all operations, resolves cluster IDs via resolveNamespacedSymbol(),
+    and emits remarks with results. Also resolves explicit test.resolve
+    string attributes on ops. Used exclusively for testing.
+  }];
+  let dependentDialects = ["::mlir::iree_compiler::IREE::PCF::PCFDialect"];
+}
+
 #endif // IREE_CODEGEN_DIALECT_PCF_TRANSFORMS_PASSES

@@ -406,6 +406,78 @@ util.func private @run_thread_wrong_thread_id_count(
 
 // -----
 
+// run_cluster: ID mismatch between sources.
+util.func private @run_cluster_id_mismatch(
+    %c0: !pcf.cluster<#pcf.sequential, (0 -> s0), a>,
+    %c1: !pcf.cluster<#pcf.sequential, (0 -> s0), b>) {
+  // expected-error@+1 {{all source clusters must have the same ID}}
+  pcf.shared_executor.run_cluster(%c0, %c1)[]
+      () {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), a>,
+       !pcf.cluster<#pcf.sequential, (0 -> s0), b>)
+  util.return
+}
+
+// -----
+
+// run_cluster: result cluster ID mismatch.
+util.func private @run_cluster_result_id_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, a>) {
+  %cst = arith.constant 0.0 : f32
+  // expected-error@+1 {{result cluster ID does not match source cluster ID}}
+  %r = pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32) {
+    pcf.cluster_yield %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, a>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, wrong>
+  util.return
+}
+
+// -----
+
+// Tile group namespace: duplicate leaf names.
+util.func private @tile_group_duplicate_leaf(
+    %tg: !pcf.threadgroup<#pcf.sequential>, %k: index) {
+  // expected-error@+1 {{duplicate leaf symbol name 'dup' in namespace}}
+  pcf.shared_executor.tile_group %tg split [[%k]]
+      (%a: !pcf.cluster<#pcf.sequential, (0 -> d0), dup>,
+       %b: !pcf.cluster<#pcf.sequential, (d0 -> s0), dup>) {
+    pcf.return
+  } : !pcf.threadgroup<#pcf.sequential>
+  util.return
+}
+
+// -----
+
+// Tile group namespace: leaf-only ID in named namespace.
+util.func private @tile_group_leaf_in_named_ns(
+    %tg: !pcf.threadgroup<#pcf.sequential>, %k: index) {
+  // expected-error@+1 {{cluster ID 'left' must be qualified with namespace name 'tg'}}
+  pcf.shared_executor.tile_group %tg ns(tg) split [[%k]]
+      (%a: !pcf.cluster<#pcf.sequential, (0 -> d0), left>,
+       %b: !pcf.cluster<#pcf.sequential, (d0 -> s0), tg.right>) {
+    pcf.return
+  } : !pcf.threadgroup<#pcf.sequential>
+  util.return
+}
+
+// -----
+
+// Tile group namespace: wrong namespace prefix.
+util.func private @tile_group_wrong_ns_prefix(
+    %tg: !pcf.threadgroup<#pcf.sequential>, %k: index) {
+  // expected-error@+1 {{cluster ID first segment 'wrong' does not match namespace name 'tg'}}
+  pcf.shared_executor.tile_group %tg ns(tg) split [[%k]]
+      (%a: !pcf.cluster<#pcf.sequential, (0 -> d0), wrong.left>,
+       %b: !pcf.cluster<#pcf.sequential, (d0 -> s0), tg.right>) {
+    pcf.return
+  } : !pcf.threadgroup<#pcf.sequential>
+  util.return
+}
+
+// -----
+
 // to_sref: shape mismatch.
 util.func private @to_sref_shape_mismatch(%input: tensor<128x256xf16>) {
   // expected-error@+1 {{result sref shape}}
@@ -427,6 +499,35 @@ util.func private @to_sref_eltype_mismatch(%input: tensor<128x256xf16>) {
 // Note: The "expected at least one source cluster" verifier check on
 // run_cluster/run_thread is only reachable via programmatic construction,
 // because the parser requires at least one source type in the type list.
+
+// run_thread: source ID mismatch between sources.
+util.func private @run_thread_id_mismatch(
+    %c0: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, a>,
+    %c1: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {i32}, b>) {
+  // expected-error@+1 {{'pcf.shared_executor.run_thread' op all source clusters must have the same ID}}
+  pcf.shared_executor.run_thread(%c0, %c1)[]
+      (%p0: f32, %p1: i32)[%tid: index] {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, a>,
+       !pcf.cluster<#pcf.sequential, (0 -> s0), private: {i32}, b>)
+  util.return
+}
+
+// -----
+
+// run_thread: result cluster ID mismatch.
+util.func private @run_thread_result_id_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, a>) {
+  // expected-error@+1 {{'pcf.shared_executor.run_thread' op result cluster ID does not match source cluster ID}}
+  %r = pcf.shared_executor.run_thread(%c)[]
+      (%p: f32)[%tid: index] {
+    pcf.cluster_yield %p : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, a>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, wrong>
+  util.return
+}
+
+// -----
 
 // run_thread: yield uniform type mismatch.
 util.func private @run_thread_yield_uniform_mismatch(
@@ -455,4 +556,16 @@ util.func private @run_thread_yield_value_mismatch(
   util.return
 }
 
+// -----
 
+// Tile group namespace: qualified ID in anonymous namespace.
+util.func private @tile_group_qualified_in_anon_ns(
+    %tg: !pcf.threadgroup<#pcf.sequential>, %k: index) {
+  // expected-error@+1 {{cluster ID 'tg.left' must be leaf-only in anonymous namespace}}
+  pcf.shared_executor.tile_group %tg split [[%k]]
+      (%a: !pcf.cluster<#pcf.sequential, (0 -> d0), tg.left>,
+       %b: !pcf.cluster<#pcf.sequential, (d0 -> s0), right>) {
+    pcf.return
+  } : !pcf.threadgroup<#pcf.sequential>
+  util.return
+}
