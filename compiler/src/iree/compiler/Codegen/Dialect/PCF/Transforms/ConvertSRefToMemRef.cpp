@@ -327,6 +327,16 @@ ChangeStatus StridedLayoutValueElement::updateOpResult(
           return;
         }
       })
+      .Case([&](PCF::ToSrefOp toSrefOp) {
+        // The input is a memref after bufferization. Use its type directly.
+        auto inputType = dyn_cast<MemRefType>(toSrefOp.getInput().getType());
+        if (!inputType) {
+          newState.invalidate();
+          return;
+        }
+        newState.setAssumed(inputType);
+        newState.indicateOptimisticFixpoint();
+      })
       .Case([&](Util::OptimizationBarrierOp barrierOp) {
         auto returnState = solver.getElementFor<StridedLayoutValueElement>(
             *this,
@@ -915,6 +925,22 @@ struct ConvertAllocOp final : OpConversionPattern<PCF::AllocOp> {
   }
 };
 
+/// Converts `pcf.to_sref` to a no-op. After bufferization, the input is
+/// already a memref. The sref result converts to a memref, so the op simply
+/// forwards the input memref.
+struct ConvertToSrefOp final : OpConversionPattern<PCF::ToSrefOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(PCF::ToSrefOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // After bufferization, the input is a memref. The sref result converts
+    // to a memref. The to_sref op is effectively a type cast.
+    rewriter.replaceOp(op, adaptor.getInput());
+    return success();
+  }
+};
+
 struct ConvertOptimizationBarrier final
     : OpConversionPattern<Util::OptimizationBarrierOp> {
   using Base::Base;
@@ -1193,7 +1219,8 @@ void ConvertSRefToMemRefPass::runOnOperation() {
 
   patterns.add<ConvertGenericOp, ConvertLoopOp, ConvertWriteSliceOp,
                ConvertReadSliceOp, ConvertGetMemrefOp, ConvertAllocOp,
-               ConvertOptimizationBarrier>(typeConverter, context);
+               ConvertToSrefOp, ConvertOptimizationBarrier>(typeConverter,
+                                                            context);
 
   // Function related conversion patterns need the analysis to lookup function
   // type conversions.
