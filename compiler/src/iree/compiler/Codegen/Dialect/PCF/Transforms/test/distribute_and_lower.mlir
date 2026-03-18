@@ -480,8 +480,12 @@ util.func private @two_run_clusters_same_id(
 // TODO: Test equivalence tracing through scf.for iter_args (run_cluster
 // result flowing through loop-carried values to another run_cluster). This
 // requires constructing valid IR where a cluster-typed value passes through
-// scf.for iter_args, which is complex due to run_cluster result-to-source
-// dependency ordering in eraseNonMatchingRunClusters.
+// scf.for iter_args. While scf.for accepts cluster-typed iter_args, the
+// tile_group lowering converts cluster types to 0 types (erasure), which
+// would require an scf.for conversion pattern to handle the type change
+// on iter_args. The equivalence analysis itself works (tested separately
+// in equivalence_analysis.mlir), but end-to-end lowering of cluster values
+// through scf.for is not yet supported.
 
 // -----
 
@@ -620,5 +624,45 @@ util.func private @shared_executor_mixed(
     pcf.return
   }
   util.optimization_barrier %0 : tensor<64x64xf32>
+  util.return
+}
+
+// -----
+
+// run_thread with struct block arguments (from source cluster with uniform
+// types). The structural lowering creates unrealized_conversion_cast for
+// struct args when inlining the run_thread body.
+//
+// CHECK-LABEL: util.func private @run_thread_with_struct_args
+// CHECK:         scf.index_switch
+// CHECK-NEXT:    case 0 {
+// CHECK:           %[[CAST:.+]] = builtin.unrealized_conversion_cast to index
+// CHECK:           arith.subi
+// CHECK:           "test.use_uniform"
+// CHECK:           scf.yield
+// CHECK:         }
+// CHECK-NEXT:    default {
+// CHECK:         }
+// CHECK-NOT:     pcf.shared_executor.run_thread
+util.func private @run_thread_with_struct_args(
+    %tg: !pcf.threadgroup<#pcf.test_scope>, %k: index) {
+  pcf.shared_executor.tile_group %tg split [[%k]]
+      (%left: !pcf.cluster<#pcf.test_scope, (0 -> d0), left>,
+       %right: !pcf.cluster<#pcf.test_scope, (d0 -> s0), right>) {
+    // A run_cluster produces a cluster with uniform types.
+    %c1 = pcf.shared_executor.run_cluster(%left)[%k]
+        () {
+      %idx = arith.constant 42 : index
+      pcf.cluster_yield uniform(%idx : index)
+    } : (!pcf.cluster<#pcf.test_scope, (0 -> d0), left>)
+      -> !pcf.cluster<#pcf.test_scope, (0 -> d0), uniform: {index}, left>
+    // run_thread consumes the uniform value as a struct arg.
+    pcf.shared_executor.run_thread(%c1)[%k]
+        (%u: index)[%tid: index] {
+      "test.use_uniform"(%u, %tid) : (index, index) -> ()
+      pcf.cluster_yield
+    } : (!pcf.cluster<#pcf.test_scope, (0 -> d0), uniform: {index}, left>)
+    pcf.return
+  } : !pcf.threadgroup<#pcf.test_scope>
   util.return
 }
