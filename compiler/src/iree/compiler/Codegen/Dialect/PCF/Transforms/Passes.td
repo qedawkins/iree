@@ -179,6 +179,39 @@ def ResolveTokensPass : Pass<"iree-pcf-resolve-tokens", ""> {
   }];
 }
 
+def DistributeAndLowerPass
+    : Pass<"iree-pcf-distribute-and-lower", ""> {
+  let summary = "Distributes and lowers shared_executor and tile_group ops.";
+  let description = [{
+    Recursively distributes run_cluster ops within tile_groups to run_thread
+    ops, then lowers tile_group to branching control flow and shared_executor
+    to pcf.generic. Uses a pluggable DistributionInterface for op-level
+    distribution.
+
+    Phase 1: Recurse into tile_groups. For each, run equivalence analysis,
+    emit unrealized casts for cluster thread IDs, and call the distribution
+    interface to convert run_cluster -> run_thread.
+
+    Phase 2: Distribute threadgroup-level ops in the shared_executor body
+    via the same interface, skipping already-distributed run_thread bodies.
+
+    Phase 3: One-shot structural lowering of all tile_groups (to
+    scf.index_switch) and shared_executor (to pcf.generic), resolving all
+    unrealized casts.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+  ];
+  let options = [
+    Option<"useTestDistribution", "test-distribution", "bool",
+           /*default=*/"false",
+           "Use test distribution interface (for testing only).">,
+  ];
+}
+
 def TestNamespaceResolutionPass
     : Pass<"iree-pcf-test-namespace-resolution", ""> {
   let summary = "Test pass for namespace symbol resolution.";

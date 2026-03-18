@@ -12,6 +12,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinOps.h"
 
 #define GET_ATTRDEF_CLASSES
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h.inc" // IWYU pragma: keep
