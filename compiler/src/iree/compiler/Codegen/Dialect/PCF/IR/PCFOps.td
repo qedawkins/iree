@@ -73,6 +73,42 @@ def AllocOp : PCF_Op<"alloc", []> {
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// ToSrefOp
+//===----------------------------------------------------------------------===//
+
+def ToSrefOp : PCF_Op<"to_sref", [Pure]> {
+  let summary = [{
+    Create a readonly sref view of a tensor or memref.
+  }];
+  let description = [{
+    Creates a `pcf.sref` that provides a readonly view of the input tensor or
+    memref within a scope's execution context. The input is captured from the
+    enclosing scope. The result sref's shape and element type must match the
+    input's shape and element type.
+
+    Example:
+    ```mlir
+      %sref = pcf.to_sref %input : tensor<128x256xf16> -> !pcf.sref<128x256xf16, #scope>
+    ```
+  }];
+
+  let arguments = (ins AnyRankedTensorOrMemRef:$input);
+  let results = (outs PCF_AnyShapedRef:$result);
+
+  let assemblyFormat = [{
+    $input attr-dict `:` type($input) `->` type($result)
+  }];
+
+  let extraClassDeclaration = [{
+    ShapedRefType getResultType() {
+      return cast<ShapedRefType>(getResult().getType());
+    }
+  }];
+
+  let hasVerifier = 1;
+}
+
 } // OpGroupAllocOps
 
 //===----------------------------------------------------------------------===//
@@ -507,6 +543,266 @@ def SharedExecutorOp : PCF_Op<"shared_executor", [
   }];
 }
 
+def TileGroupOp : PCF_Op<"shared_executor.tile_group", [
+       RecursiveMemoryEffects,
+       SingleBlock,
+     ]> {
+  let summary = [{
+    Partition a threadgroup or cluster into sub-clusters at split points.
+  }];
+  let description = [{
+    Destructures a source threadgroup or cluster into sub-clusters that
+    collectively cover the source's full worker grid. Split points are
+    provided per dimension as a nested list of index values.
+
+    The number of resulting clusters is:
+      product(num_splits_in_dim_i + 1) for all dimensions i
+
+    Block arguments are ordered in row-major order over the partition grid.
+
+    The source must not have struct elements (destructuring with struct is
+    currently illegal). All result clusters have no struct elements.
+
+    Example:
+    ```mlir
+    pcf.shared_executor.tile_group %tg split [[%k]]
+        (%left: !pcf.cluster<#scope, (0 -> d0)>,
+         %right: !pcf.cluster<#scope, (d0 -> s0)>) {
+      pcf.return
+    } : !pcf.threadgroup<#scope>
+    ```
+  }];
+
+  let arguments = (ins
+      AnyType:$source,
+      Variadic<Index>:$splitPoints,
+      DenseI64ArrayAttr:$numSplitsPerDim);
+
+  let regions = (region MinSizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+
+  let builders = [
+      OpBuilder<(ins
+          "Value":$source,
+          "ArrayRef<SmallVector<Value>>":$splitPointsPerDim,
+          "ArrayRef<ClusterType>":$resultClusterTypes)>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns the scope from the source type.
+    ScopeAttrInterface getScope();
+
+    /// Returns the split points organized per dimension.
+    SmallVector<SmallVector<Value>> getSplitPointsPerDim();
+
+    /// Returns the cluster block arguments.
+    ArrayRef<BlockArgument> getClusterArgs() {
+      return getBody().getArguments();
+    }
+  }];
+}
+
+def ClusterYieldOp : PCF_Op<"cluster_yield", [
+  ParentOneOf<[
+    "IREE::PCF::RunClusterOp",
+    "IREE::PCF::RunThreadOp",
+  ]>,
+  AttrSizedOperandSegments,
+  Pure,
+  ReturnLike,
+  Terminator,
+]> {
+  let summary = [{Yields values from a cluster execution region.}];
+  let description = [{
+    Terminates the body of `run_cluster` or `run_thread`. Separates
+    uniform return values from non-uniform (shared or private) values.
+
+    The `uniform` operands populate the result cluster's `uniformTypes`.
+    The remaining operands populate the result cluster's `sharedTypes`
+    (if parent is `run_cluster`) or `privateTypes` (if parent is
+    `run_thread`).
+
+    Example:
+    ```mlir
+    pcf.cluster_yield uniform(%u : index) %v : f32
+    pcf.cluster_yield %v : f32
+    pcf.cluster_yield uniform(%u : index)
+    pcf.cluster_yield
+    ```
+  }];
+
+  let arguments = (ins
+    Variadic<AnyType>:$uniformValues,
+    Variadic<AnyType>:$values);
+
+  let hasCustomAssemblyFormat = 1;
+}
+
+def RunClusterOp : PCF_Op<"shared_executor.run_cluster", [
+       AttrSizedOperandSegments,
+       RecursiveMemoryEffects,
+       SingleBlock,
+       SingleBlockImplicitTerminator<"mlir::iree_compiler::IREE::PCF::ClusterYieldOp">,
+     ]> {
+  let summary = [{
+    Execute a cluster region collectively with shared and uniform values.
+  }];
+  let description = [{
+    Executes a region where all workers in the cluster cooperate. The body
+    receives shared and uniform struct values from the input clusters as
+    block arguments, grouped per cluster in operand order.
+
+    All input clusters must have identical `boundsMap` and `scope`. The
+    dependent values for the range bounds are provided as `rangeValues`.
+
+    Optionally produces a result cluster with the same scope and bounds
+    but new shared/uniform struct elements. The result cluster cannot have
+    private elements (collective execution cannot produce per-thread data).
+
+    Example:
+    ```mlir
+    %result = pcf.shared_executor.run_cluster(%c0, %c1)[%k]
+        (%s0: tensor<64xf32>, %u0: index, %s1: f32) {
+      pcf.cluster_yield uniform(%new_u : index) %new_s : tensor<64xf32>
+    } : (!pcf.cluster<...>, !pcf.cluster<...>) -> !pcf.cluster<...>
+    ```
+  }];
+
+  let arguments = (ins
+      Variadic<PCF_AnyCluster>:$sources,
+      Variadic<Index>:$rangeValues);
+
+  let results = (outs Optional<PCF_AnyCluster>:$result);
+  let regions = (region MinSizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+
+  let builders = [
+      OpBuilder<(ins
+          "ValueRange":$sources,
+          "ValueRange":$rangeValues,
+          "ArrayRef<Type>":$bodyArgTypes,
+          CArg<"ClusterType", "{}">:$resultType)>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns the scope from the first source cluster.
+    ScopeAttrInterface getScope() {
+      return cast<ClusterType>(getSources().front().getType()).getScope();
+    }
+
+    /// Returns the boundsMap from the first source cluster.
+    AffineMap getBoundsMap() {
+      return cast<ClusterType>(getSources().front().getType()).getBoundsMap();
+    }
+
+    /// Returns the result cluster type, or nullptr if no result.
+    ClusterType getResultClusterType() {
+      if (getResult()) {
+        return cast<ClusterType>(getResult().getType());
+      }
+      return {};
+    }
+  }];
+}
+
+def RunThreadOp : PCF_Op<"shared_executor.run_thread", [
+       AttrSizedOperandSegments,
+       RecursiveMemoryEffects,
+       SingleBlock,
+       SingleBlockImplicitTerminator<"mlir::iree_compiler::IREE::PCF::ClusterYieldOp">,
+     ]> {
+  let summary = [{
+    Execute a cluster region per-thread with private and uniform values.
+  }];
+  let description = [{
+    Executes a region from the perspective of a single worker in the
+    cluster. The body receives private and uniform struct values from the
+    input clusters as block arguments (grouped per cluster in operand
+    order), followed by per-dimension thread IDs.
+
+    Thread IDs are tile-relative: each ranges from 0 to tile_size-1,
+    where tile_size = upper_bound - lower_bound. Thread ID 0 corresponds
+    to the scope worker at the cluster's lower bound.
+
+    All input clusters must have identical `boundsMap` and `scope`. The
+    dependent values for the range bounds are provided as `rangeValues`.
+
+    Optionally produces a result cluster with the same scope and bounds
+    but new private/uniform struct elements. The result cluster cannot
+    have shared elements (per-thread execution cannot produce collective
+    data).
+
+    Example:
+    ```mlir
+    %result = pcf.shared_executor.run_thread(%c0)[%k]
+        (%priv: f32, %u: index)[%tid0: index, %tid1: index] {
+      pcf.cluster_yield uniform(%new_u : index) %new_p : f32
+    } : (!pcf.cluster<...>) -> !pcf.cluster<...>
+    ```
+  }];
+
+  let arguments = (ins
+      Variadic<PCF_AnyCluster>:$sources,
+      Variadic<Index>:$rangeValues);
+
+  let results = (outs Optional<PCF_AnyCluster>:$result);
+  let regions = (region MinSizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+
+  let builders = [
+      OpBuilder<(ins
+          "ValueRange":$sources,
+          "ValueRange":$rangeValues,
+          "ArrayRef<Type>":$bodyArgTypes,
+          "int64_t":$numThreadIds,
+          CArg<"ClusterType", "{}">:$resultType)>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns the scope from the first source cluster.
+    ScopeAttrInterface getScope() {
+      return cast<ClusterType>(getSources().front().getType()).getScope();
+    }
+
+    /// Returns the boundsMap from the first source cluster.
+    AffineMap getBoundsMap() {
+      return cast<ClusterType>(getSources().front().getType()).getBoundsMap();
+    }
+
+    /// Returns the result cluster type, or nullptr if no result.
+    ClusterType getResultClusterType() {
+      if (getResult()) {
+        return cast<ClusterType>(getResult().getType());
+      }
+      return {};
+    }
+
+    /// Returns the number of thread ID block arguments.
+    int64_t getNumThreadIds() {
+      return getScope().getNativeNumIds();
+    }
+
+    /// Returns the thread ID block arguments.
+    MutableArrayRef<BlockArgument> getThreadIdArgs() {
+      return getBody().getArguments().take_back(getNumThreadIds());
+    }
+
+    /// Returns the struct value block arguments (excluding thread IDs).
+    MutableArrayRef<BlockArgument> getStructArgs() {
+      return getBody().getArguments().drop_back(getNumThreadIds());
+    }
+  }];
+}
+
 } // OpGroupParallelOps
 
 
@@ -886,6 +1182,7 @@ def PCF_ReturnOp : PCF_Op<"return", [
     "IREE::PCF::GenericOp",
     "IREE::PCF::LoopOp",
     "IREE::PCF::SharedExecutorOp",
+    "IREE::PCF::TileGroupOp",
   ]>,
   Pure,
   Terminator,

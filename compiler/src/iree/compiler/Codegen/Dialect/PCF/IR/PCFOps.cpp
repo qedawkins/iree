@@ -34,6 +34,28 @@ SmallVector<OpFoldResult> AllocOp::getMixedSizes() {
 }
 
 //===----------------------------------------------------------------------===//
+// ToSrefOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ToSrefOp::verify() {
+  ShapedType inputType = cast<ShapedType>(getInput().getType());
+  ShapedRefType resultType = getResultType();
+
+  if (inputType.getShape() != resultType.getShape()) {
+    return emitOpError("result sref shape ")
+           << resultType << " does not match input shape " << inputType;
+  }
+  if (inputType.getElementType() != resultType.getElementType()) {
+    return emitOpError("result sref element type ")
+           << resultType.getElementType()
+           << " does not match input element type "
+           << inputType.getElementType();
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // StructuralOps
 //===----------------------------------------------------------------------===//
 
@@ -905,9 +927,9 @@ ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
   Properties &props = result.getOrAddProperties<Properties>();
   props.setOperandSegmentSizes({static_cast<int32_t>(readonlyInits.size()),
                                 static_cast<int32_t>(readwriteInits.size())});
-  props.setSyncOnReturn(syncOnReturn);
   props.setNumLeadingArgs(leadingArgs.size());
   props.setNumReadonlyRefs(readonlyRefArgs.size());
+  props.setSyncOnReturn(syncOnReturn);
 
   return success();
 }
@@ -1101,7 +1123,8 @@ LogicalResult SharedExecutorOp::verify() {
 
 void SharedExecutorOp::build(OpBuilder &b, OperationState &result,
                              ScopeAttrInterface scope,
-                             ValueRange readwriteInits, bool syncOnReturn) {
+                             ValueRange readwriteInits,
+                             bool syncOnReturn) {
   SharedExecutorOp::build(b, result, scope, /*readonlyInits=*/ValueRange(),
                           readwriteInits, syncOnReturn);
 }
@@ -1120,9 +1143,9 @@ void SharedExecutorOp::build(OpBuilder &b, OperationState &result,
   Properties &props = result.getOrAddProperties<Properties>();
   props.setOperandSegmentSizes({static_cast<int32_t>(readonlyInits.size()),
                                 static_cast<int32_t>(readwriteInits.size())});
-  props.setSyncOnReturn(syncOnReturn);
   props.setNumLeadingArgs(0);
   props.setNumReadonlyRefs(readonlyInits.size());
+  props.setSyncOnReturn(syncOnReturn);
 
   // Add empty initializer region.
   result.addRegion();
@@ -1163,16 +1186,692 @@ void SharedExecutorOp::getAsmBlockArgumentNames(Region &region,
   }
 
   assert(&region == &getRegion() && "Unexpected region");
+  for (Value v : getLeadingArgs()) {
+    setNameFn(v, "leading");
+  }
   for (Value v : getReadonlyRefArgs()) {
     setNameFn(v, "ref");
   }
   for (Value v : getReadwriteRefArgs()) {
     setNameFn(v, "ref");
   }
-  for (Value v : getLeadingArgs()) {
-    setNameFn(v, "leading");
-  }
   setNameFn(getThreadGroup(), "tg");
+}
+
+//===----------------------------------------------------------------------===//
+// TileGroupOp
+//===----------------------------------------------------------------------===//
+
+ScopeAttrInterface TileGroupOp::getScope() {
+  Type sourceType = getSource().getType();
+  if (auto tg = dyn_cast<ThreadGroupType>(sourceType)) {
+    return tg.getScope();
+  }
+  return cast<ClusterType>(sourceType).getScope();
+}
+
+SmallVector<SmallVector<Value>> TileGroupOp::getSplitPointsPerDim() {
+  ArrayRef<int64_t> numSplits = getNumSplitsPerDim();
+  SmallVector<SmallVector<Value>> result;
+  int64_t offset = 0;
+  for (int64_t n : numSplits) {
+    SmallVector<Value> dimSplits;
+    for (int64_t i = 0; i < n; ++i) {
+      dimSplits.push_back(getSplitPoints()[offset + i]);
+    }
+    result.push_back(std::move(dimSplits));
+    offset += n;
+  }
+  return result;
+}
+
+void TileGroupOp::build(OpBuilder &builder, OperationState &result,
+                        Value source,
+                        ArrayRef<SmallVector<Value>> splitPointsPerDim,
+                        ArrayRef<ClusterType> resultClusterTypes) {
+  result.addOperands(source);
+  SmallVector<Value> flatSplits;
+  SmallVector<int64_t> numSplits;
+  for (const SmallVector<Value> &dimSplits : splitPointsPerDim) {
+    numSplits.push_back(dimSplits.size());
+    llvm::append_range(flatSplits, dimSplits);
+  }
+  result.addOperands(flatSplits);
+  result.addAttribute("numSplitsPerDim",
+                      builder.getDenseI64ArrayAttr(numSplits));
+  Region *body = result.addRegion();
+  Block *block = new Block();
+  body->push_back(block);
+  for (ClusterType ct : resultClusterTypes) {
+    block->addArgument(ct, result.location);
+  }
+}
+
+// Parse format:
+//   pcf.shared_executor.tile_group %source split [[%v0, %v1], [%v2], []]
+//       (%arg0: !pcf.cluster<...>, %arg1: !pcf.cluster<...>, ...) {
+//     ...
+//   } : source_type
+ParseResult TileGroupOp::parse(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand source;
+  if (parser.parseOperand(source)) {
+    return failure();
+  }
+
+  // Parse "split".
+  if (parser.parseKeyword("split")) {
+    return failure();
+  }
+
+  // Parse nested split point list: [[%v0, %v1], [%v2], []].
+  SmallVector<SmallVector<OpAsmParser::UnresolvedOperand>> splitPointsPerDim;
+  SmallVector<int64_t> numSplitsPerDim;
+
+  if (parser.parseLSquare()) {
+    return failure();
+  }
+
+  // Parse comma-separated inner brackets.
+  bool first = true;
+  while (true) {
+    if (!first) {
+      if (failed(parser.parseOptionalComma())) {
+        break;
+      }
+    }
+    first = false;
+
+    if (parser.parseLSquare()) {
+      return failure();
+    }
+    SmallVector<OpAsmParser::UnresolvedOperand> dimSplits;
+    // Parse optional comma-separated operand list inside brackets.
+    if (failed(parser.parseOptionalRSquare())) {
+      if (parser.parseOperandList(dimSplits) || parser.parseRSquare()) {
+        return failure();
+      }
+    }
+    numSplitsPerDim.push_back(dimSplits.size());
+    splitPointsPerDim.push_back(std::move(dimSplits));
+  }
+
+  if (parser.parseRSquare()) {
+    return failure();
+  }
+
+  // Parse block argument list with types: (%name: type, ...).
+  SmallVector<OpAsmParser::Argument> blockArgs;
+  if (parser.parseArgumentList(blockArgs, OpAsmParser::Delimiter::Paren,
+                               /*allowType=*/true)) {
+    return failure();
+  }
+
+  // Parse the region body.
+  Region *body = result.addRegion();
+  if (parser.parseRegion(*body, blockArgs)) {
+    return failure();
+  }
+
+  // Parse trailing ": source_type".
+  Type sourceType;
+  if (parser.parseColon() || parser.parseType(sourceType)) {
+    return failure();
+  }
+
+  // Resolve the source operand.
+  if (parser.resolveOperand(source, sourceType, result.operands)) {
+    return failure();
+  }
+
+  // Flatten and resolve split point operands.
+  Type indexType = parser.getBuilder().getIndexType();
+  for (SmallVector<OpAsmParser::UnresolvedOperand> &dimSplits :
+       splitPointsPerDim) {
+    if (parser.resolveOperands(dimSplits, indexType, result.operands)) {
+      return failure();
+    }
+  }
+
+  // Set the numSplitsPerDim attribute.
+  result.addAttribute(
+      "numSplitsPerDim",
+      parser.getBuilder().getDenseI64ArrayAttr(numSplitsPerDim));
+
+  // Parse optional attr-dict.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  return success();
+}
+
+void TileGroupOp::print(OpAsmPrinter &p) {
+  p << " " << getSource() << " split [";
+
+  SmallVector<SmallVector<Value>> splitsPerDim = getSplitPointsPerDim();
+  for (int64_t i = 0, e = splitsPerDim.size(); i < e; ++i) {
+    if (i > 0) {
+      p << ", ";
+    }
+    p << "[";
+    llvm::interleaveComma(splitsPerDim[i], p, [&](Value v) { p << v; });
+    p << "]";
+  }
+  p << "]";
+
+  // Print block arguments with types.
+  p.printNewline();
+  p << "    (";
+  llvm::interleaveComma(getBody().getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
+  p << ") ";
+
+  // Print the region body without entry block args (already printed above).
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+
+  // Print trailing source type.
+  p << " : " << getSource().getType();
+
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          /*elidedAttrs=*/{"numSplitsPerDim"});
+}
+
+LogicalResult TileGroupOp::verify() {
+  Type sourceType = getSource().getType();
+
+  // Source must be threadgroup or cluster.
+  ThreadGroupType tgType = dyn_cast<ThreadGroupType>(sourceType);
+  ClusterType clusterType = dyn_cast<ClusterType>(sourceType);
+  if (!tgType && !clusterType) {
+    return emitOpError("source must be !pcf.threadgroup or !pcf.cluster");
+  }
+
+  // Source must not have struct elements.
+  bool hasStruct =
+      tgType ? tgType.hasStructElements() : clusterType.hasStructElements();
+  if (hasStruct) {
+    return emitOpError("source must not have struct elements");
+  }
+
+  // Determine source rank.
+  int64_t sourceRank =
+      tgType ? tgType.getScope().getNativeNumIds() : clusterType.getRank();
+
+  // Number of split dimension lists must match source rank.
+  ArrayRef<int64_t> numSplits = getNumSplitsPerDim();
+  if (static_cast<int64_t>(numSplits.size()) != sourceRank) {
+    return emitOpError("expected ")
+           << sourceRank << " split dimension lists but got "
+           << numSplits.size();
+  }
+
+  // Verify total split point count matches the flat variadic.
+  int64_t totalSplits = 0;
+  for (int64_t n : numSplits) {
+    totalSplits += n;
+  }
+  if (static_cast<int64_t>(getSplitPoints().size()) != totalSplits) {
+    return emitOpError("expected ")
+           << totalSplits << " total split points but got "
+           << getSplitPoints().size();
+  }
+
+  // Expected number of block args: product(numSplits[i] + 1).
+  int64_t expectedArgs = 1;
+  for (int64_t n : numSplits) {
+    expectedArgs *= (n + 1);
+  }
+  int64_t actualArgs = getBody().getNumArguments();
+  if (actualArgs != expectedArgs) {
+    return emitOpError("expected ")
+           << expectedArgs << " cluster block arguments but got " << actualArgs;
+  }
+
+  // All block args must be ClusterType with matching scope.
+  ScopeAttrInterface scope = getScope();
+  for (BlockArgument arg : getBody().getArguments()) {
+    ClusterType ct = dyn_cast<ClusterType>(arg.getType());
+    if (!ct) {
+      return emitOpError("block argument must be !pcf.cluster");
+    }
+    if (ct.getScope() != scope) {
+      return emitOpError("cluster scope mismatch");
+    }
+    if (ct.hasStructElements()) {
+      return emitOpError("result clusters must not have struct elements");
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ClusterYieldOp
+//===----------------------------------------------------------------------===//
+
+// Parse format:
+//   pcf.cluster_yield
+//   pcf.cluster_yield uniform(%u : index) %v : f32
+//   pcf.cluster_yield %v : f32
+//   pcf.cluster_yield uniform(%u : index)
+ParseResult ClusterYieldOp::parse(OpAsmParser &parser, OperationState &result) {
+  SmallVector<OpAsmParser::UnresolvedOperand> uniformOperands;
+  SmallVector<Type> uniformTypes;
+  SmallVector<OpAsmParser::UnresolvedOperand> valueOperands;
+  SmallVector<Type> valueTypes;
+
+  // Try parsing "uniform(...)".
+  if (succeeded(parser.parseOptionalKeyword("uniform"))) {
+    if (parser.parseLParen() || parser.parseOperandList(uniformOperands) ||
+        parser.parseColonTypeList(uniformTypes) || parser.parseRParen()) {
+      return failure();
+    }
+  }
+
+  // Try parsing remaining (non-uniform) operands: %v0, %v1 : type0, type1.
+  OpAsmParser::UnresolvedOperand firstOperand;
+  OptionalParseResult optResult = parser.parseOptionalOperand(firstOperand);
+  if (optResult.has_value() && succeeded(*optResult)) {
+    valueOperands.push_back(firstOperand);
+    while (succeeded(parser.parseOptionalComma())) {
+      if (parser.parseOperand(valueOperands.emplace_back())) {
+        return failure();
+      }
+    }
+    if (parser.parseColonTypeList(valueTypes)) {
+      return failure();
+    }
+  }
+
+  // Resolve operands.
+  if (parser.resolveOperands(uniformOperands, uniformTypes,
+                             parser.getCurrentLocation(), result.operands) ||
+      parser.resolveOperands(valueOperands, valueTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  // Set operand segment sizes.
+  result.addAttribute("operandSegmentSizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(uniformOperands.size()),
+                           static_cast<int32_t>(valueOperands.size())}));
+
+  return success();
+}
+
+void ClusterYieldOp::print(OpAsmPrinter &p) {
+  if (!getUniformValues().empty()) {
+    p << " uniform(";
+    llvm::interleaveComma(getUniformValues(), p, [&](Value v) { p << v; });
+    p << " : ";
+    llvm::interleaveComma(getUniformValues().getTypes(), p);
+    p << ")";
+  }
+  if (!getValues().empty()) {
+    p << " ";
+    llvm::interleaveComma(getValues(), p, [&](Value v) { p << v; });
+    p << " : ";
+    llvm::interleaveComma(getValues().getTypes(), p);
+  }
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          /*elidedAttrs=*/{"operandSegmentSizes"});
+}
+
+//===----------------------------------------------------------------------===//
+// RunClusterOp / RunThreadOp
+//===----------------------------------------------------------------------===//
+
+/// Shared verifier for RunClusterOp and RunThreadOp.
+/// `isClusterMode` is true for RunClusterOp, false for RunThreadOp.
+static LogicalResult verifyRunOp(Operation *op, ValueRange sources,
+                                 ValueRange rangeValues, Region &body,
+                                 Value result, bool isClusterMode) {
+  if (sources.empty()) {
+    return op->emitOpError("expected at least one source cluster");
+  }
+
+  // All sources must be ClusterType.
+  SmallVector<ClusterType> sourceTypes;
+  for (Value src : sources) {
+    ClusterType ct = dyn_cast<ClusterType>(src.getType());
+    if (!ct) {
+      return op->emitOpError("source must be !pcf.cluster");
+    }
+    sourceTypes.push_back(ct);
+  }
+
+  // All sources must have identical scope and boundsMap.
+  ScopeAttrInterface scope = sourceTypes[0].getScope();
+  AffineMap boundsMap = sourceTypes[0].getBoundsMap();
+  for (int64_t i = 1, e = static_cast<int64_t>(sourceTypes.size()); i < e;
+       ++i) {
+    if (sourceTypes[i].getScope() != scope) {
+      return op->emitOpError("all source clusters must have the same scope");
+    }
+    if (sourceTypes[i].getBoundsMap() != boundsMap) {
+      return op->emitOpError(
+          "all source clusters must have the same boundsMap");
+    }
+  }
+
+  // rangeValues count must match boundsMap dependent values (dims only).
+  // Symbols are implicit scope grid sizes, not SSA operands.
+  int64_t expectedRangeValues = boundsMap.getNumDims();
+  if (static_cast<int64_t>(rangeValues.size()) != expectedRangeValues) {
+    return op->emitOpError("expected ")
+           << expectedRangeValues << " range values but got "
+           << rangeValues.size();
+  }
+
+  // Build expected block arg types.
+  SmallVector<Type> expectedArgTypes;
+  for (ClusterType ct : sourceTypes) {
+    if (isClusterMode) {
+      llvm::append_range(expectedArgTypes, ct.getSharedTypes());
+      llvm::append_range(expectedArgTypes, ct.getUniformTypes());
+    } else {
+      llvm::append_range(expectedArgTypes, ct.getPrivateTypes());
+      llvm::append_range(expectedArgTypes, ct.getUniformTypes());
+    }
+  }
+
+  // For RunThreadOp, add thread ID args.
+  int64_t numThreadIds = 0;
+  if (!isClusterMode) {
+    numThreadIds = scope.getNativeNumIds();
+    for (int64_t i = 0; i < numThreadIds; ++i) {
+      expectedArgTypes.push_back(IndexType::get(op->getContext()));
+    }
+  }
+
+  // Verify block arg count and types.
+  Block &block = body.front();
+  if (block.getNumArguments() != expectedArgTypes.size()) {
+    return op->emitOpError("expected ")
+           << expectedArgTypes.size() << " block arguments but got "
+           << block.getNumArguments();
+  }
+  for (int64_t i = 0, e = static_cast<int64_t>(expectedArgTypes.size()); i < e;
+       ++i) {
+    if (block.getArgument(i).getType() != expectedArgTypes[i]) {
+      return op->emitOpError("block argument ")
+             << i << " type mismatch: expected " << expectedArgTypes[i]
+             << " but got " << block.getArgument(i).getType();
+    }
+  }
+
+  // Verify yield against result.
+  ClusterYieldOp yield = cast<ClusterYieldOp>(body.front().getTerminator());
+  if (!result) {
+    // No result cluster — yield must be empty.
+    if (!yield.getUniformValues().empty() || !yield.getValues().empty()) {
+      return op->emitOpError(
+          "cluster_yield must have no operands when parent has no result");
+    }
+    return success();
+  }
+
+  // Verify result cluster constraints.
+  ClusterType resultType = cast<ClusterType>(result.getType());
+  if (resultType.getScope() != scope) {
+    return op->emitOpError("result cluster scope mismatch");
+  }
+  if (resultType.getBoundsMap() != boundsMap) {
+    return op->emitOpError("result cluster boundsMap mismatch");
+  }
+  if (isClusterMode && !resultType.getPrivateTypes().empty()) {
+    return op->emitOpError("run_cluster result must not have private types");
+  }
+  if (!isClusterMode && !resultType.getSharedTypes().empty()) {
+    return op->emitOpError("run_thread result must not have shared types");
+  }
+
+  // Verify yield types match result.
+  if (yield.getUniformValues().getTypes() != resultType.getUniformTypes()) {
+    return op->emitOpError("yield uniform types do not match result");
+  }
+  ArrayRef<Type> expectedValueTypes = isClusterMode
+                                          ? resultType.getSharedTypes()
+                                          : resultType.getPrivateTypes();
+  if (yield.getValues().getTypes() != expectedValueTypes) {
+    return op->emitOpError("yield value types do not match result");
+  }
+
+  return success();
+}
+
+LogicalResult RunClusterOp::verify() {
+  return verifyRunOp(*this, getSources(), getRangeValues(), getBody(),
+                     getResult(), /*isClusterMode=*/true);
+}
+
+void RunClusterOp::build(OpBuilder &builder, OperationState &result,
+                         ValueRange sources, ValueRange rangeValues,
+                         ArrayRef<Type> bodyArgTypes, ClusterType resultType) {
+  result.addOperands(sources);
+  result.addOperands(rangeValues);
+  result.addAttribute(
+      "operandSegmentSizes",
+      builder.getDenseI32ArrayAttr({static_cast<int32_t>(sources.size()),
+                                    static_cast<int32_t>(rangeValues.size())}));
+  if (resultType) {
+    result.addTypes(resultType);
+  }
+  Region *body = result.addRegion();
+  Block *block = new Block();
+  body->push_back(block);
+  for (Type t : bodyArgTypes) {
+    block->addArgument(t, result.location);
+  }
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(block);
+  ClusterYieldOp::create(builder, result.location, ValueRange{}, ValueRange{});
+}
+
+LogicalResult RunThreadOp::verify() {
+  return verifyRunOp(*this, getSources(), getRangeValues(), getBody(),
+                     getResult(), /*isClusterMode=*/false);
+}
+
+void RunThreadOp::build(OpBuilder &builder, OperationState &result,
+                        ValueRange sources, ValueRange rangeValues,
+                        ArrayRef<Type> bodyArgTypes, int64_t numThreadIds,
+                        ClusterType resultType) {
+  result.addOperands(sources);
+  result.addOperands(rangeValues);
+  result.addAttribute(
+      "operandSegmentSizes",
+      builder.getDenseI32ArrayAttr({static_cast<int32_t>(sources.size()),
+                                    static_cast<int32_t>(rangeValues.size())}));
+  if (resultType) {
+    result.addTypes(resultType);
+  }
+  Region *body = result.addRegion();
+  Block *block = new Block();
+  body->push_back(block);
+  for (Type t : bodyArgTypes) {
+    block->addArgument(t, result.location);
+  }
+  Type indexType = builder.getIndexType();
+  for (int64_t i = 0; i < numThreadIds; ++i) {
+    block->addArgument(indexType, result.location);
+  }
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(block);
+  ClusterYieldOp::create(builder, result.location, ValueRange{}, ValueRange{});
+}
+
+/// Shared parse helper for RunClusterOp and RunThreadOp.
+static ParseResult parseRunOp(OpAsmParser &parser, OperationState &result,
+                              bool isThreadMode) {
+  // Parse "(" source operands ")".
+  SmallVector<OpAsmParser::UnresolvedOperand> sourceOperands;
+  if (parser.parseLParen() || parser.parseOperandList(sourceOperands) ||
+      parser.parseRParen()) {
+    return failure();
+  }
+
+  // Parse "[" range value operands "]".
+  SmallVector<OpAsmParser::UnresolvedOperand> rangeOperands;
+  if (parser.parseLSquare() || parser.parseOperandList(rangeOperands) ||
+      parser.parseRSquare()) {
+    return failure();
+  }
+
+  // Parse struct block args: "(" %name: type, ... ")".
+  SmallVector<OpAsmParser::Argument> structArgs;
+  if (parser.parseArgumentList(structArgs, OpAsmParser::Delimiter::Paren,
+                               /*allowType=*/true)) {
+    return failure();
+  }
+
+  // For RunThreadOp, parse thread ID block args: "[" %name: type, ... "]".
+  SmallVector<OpAsmParser::Argument> threadIdArgs;
+  if (isThreadMode) {
+    if (parser.parseArgumentList(threadIdArgs, OpAsmParser::Delimiter::Square,
+                                 /*allowType=*/true)) {
+      return failure();
+    }
+  }
+
+  // Combine all block args and parse the region.
+  SmallVector<OpAsmParser::Argument> allArgs;
+  llvm::append_range(allArgs, structArgs);
+  llvm::append_range(allArgs, threadIdArgs);
+  Region *body = result.addRegion();
+  if (parser.parseRegion(*body, allArgs)) {
+    return failure();
+  }
+
+  // Parse ": " followed by functional type annotation.
+  // "(" source_types ")" optional("-> " result_type).
+  if (parser.parseColon()) {
+    return failure();
+  }
+
+  SmallVector<Type> sourceTypes;
+  if (parser.parseLParen() || parser.parseTypeList(sourceTypes) ||
+      parser.parseRParen()) {
+    return failure();
+  }
+
+  // Parse optional result type.
+  if (succeeded(parser.parseOptionalArrow())) {
+    Type resultType;
+    if (parser.parseType(resultType)) {
+      return failure();
+    }
+    result.addTypes(resultType);
+  }
+
+  // Resolve source operands.
+  if (parser.resolveOperands(sourceOperands, sourceTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  // Resolve range value operands as index.
+  Type indexType = parser.getBuilder().getIndexType();
+  if (parser.resolveOperands(rangeOperands, indexType,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  // Set operand segment sizes.
+  result.addAttribute("operandSegmentSizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(sourceOperands.size()),
+                           static_cast<int32_t>(rangeOperands.size())}));
+
+  // Parse optional attr-dict.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  return success();
+}
+
+/// Shared print helper for RunClusterOp and RunThreadOp.
+static void printRunOp(OpAsmPrinter &p, Operation *op, ValueRange sources,
+                       ValueRange rangeValues, Region &body, Value result,
+                       bool isThreadMode) {
+  // Print sources.
+  p << "(";
+  llvm::interleaveComma(sources, p, [&](Value v) { p << v; });
+  p << ")";
+
+  // Print range values.
+  p << "[";
+  llvm::interleaveComma(rangeValues, p, [&](Value v) { p << v; });
+  p << "]";
+
+  // Print struct block args.
+  Block &block = body.front();
+  int64_t numStructArgs = block.getNumArguments();
+  if (isThreadMode) {
+    ScopeAttrInterface scope =
+        cast<ClusterType>(sources.front().getType()).getScope();
+    numStructArgs -= scope.getNativeNumIds();
+  }
+
+  p.printNewline();
+  p << "    (";
+  for (int64_t i = 0; i < numStructArgs; ++i) {
+    if (i > 0) {
+      p << ", ";
+    }
+    p.printRegionArgument(block.getArgument(i));
+  }
+  p << ")";
+
+  // Print thread IDs if RunThreadOp.
+  if (isThreadMode) {
+    p << "[";
+    for (int64_t i = numStructArgs,
+                 e = static_cast<int64_t>(block.getNumArguments());
+         i < e; ++i) {
+      if (i > numStructArgs) {
+        p << ", ";
+      }
+      p.printRegionArgument(block.getArgument(i));
+    }
+    p << "]";
+  }
+
+  p << " ";
+  p.printRegion(body, /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+
+  // Print functional type: (source_types) -> result_type.
+  p << " : (";
+  llvm::interleaveComma(sources.getTypes(), p);
+  p << ")";
+  if (result) {
+    p << " -> " << result.getType();
+  }
+
+  p.printOptionalAttrDict(op->getAttrs(),
+                          /*elidedAttrs=*/{"operandSegmentSizes"});
+}
+
+ParseResult RunClusterOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseRunOp(parser, result, /*isThreadMode=*/false);
+}
+
+void RunClusterOp::print(OpAsmPrinter &p) {
+  printRunOp(p, *this, getSources(), getRangeValues(), getBody(), getResult(),
+             /*isThreadMode=*/false);
+}
+
+ParseResult RunThreadOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseRunOp(parser, result, /*isThreadMode=*/true);
+}
+
+void RunThreadOp::print(OpAsmPrinter &p) {
+  printRunOp(p, *this, getSources(), getRangeValues(), getBody(), getResult(),
+             /*isThreadMode=*/true);
 }
 
 //===----------------------------------------------------------------------===//
