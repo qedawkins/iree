@@ -24,12 +24,16 @@ iree_cc_library(
     Transforms
   HDRS
     "ConversionDialectInterface.h"
+    "DistributionInterface.h"
+    "EquivalenceAnalysis.h"
     "Passes.h"
     "Passes.h.inc"
     "Transforms.h"
   SRCS
     "ConvertForallToLoops.cpp"
     "ConvertSRefToMemRef.cpp"
+    "DistributeAndLower.cpp"
+    "EquivalenceAnalysis.cpp"
     "FuseConsumers.cpp"
     "FusePCFWrites.cpp"
     "FuseProducers.cpp"

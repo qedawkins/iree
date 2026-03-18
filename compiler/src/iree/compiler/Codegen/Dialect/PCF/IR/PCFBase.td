@@ -298,13 +298,15 @@ def PCF_TestScopeAttr
   let assemblyFormat = [{}];
 
   let extraClassDeclaration = [{
-    SmallVector<Value> getWorkerCounts(OpBuilder&, Location, int64_t) {
-      assert(false && "why are you here?");
-      return {};
+    SmallVector<Value> getWorkerCounts(OpBuilder& builder, Location loc, int64_t numIds) {
+      SmallVector<Type> types(numIds, builder.getIndexType());
+      auto castOp = UnrealizedConversionCastOp::create(builder, loc, types, ValueRange{});
+      return SmallVector<Value>(castOp.getResults());
     }
-    SmallVector<Value> getWorkerIDs(OpBuilder&, Location, int64_t) {
-      assert(false && "why are you here?");
-      return {};
+    SmallVector<Value> getWorkerIDs(OpBuilder& builder, Location loc, int64_t numIds) {
+      SmallVector<Type> types(numIds, builder.getIndexType());
+      auto castOp = UnrealizedConversionCastOp::create(builder, loc, types, ValueRange{});
+      return SmallVector<Value>(castOp.getResults());
     }
     int64_t getNativeNumIds() { return 1; }
   }];

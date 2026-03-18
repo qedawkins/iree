@@ -37,6 +37,8 @@ iree_compiler_cc_library(
     srcs = [
         "ConvertForallToLoops.cpp",
         "ConvertSRefToMemRef.cpp",
+        "DistributeAndLower.cpp",
+        "EquivalenceAnalysis.cpp",
         "FuseConsumers.cpp",
         "FusePCFWrites.cpp",
         "FuseProducers.cpp",
@@ -48,6 +50,8 @@ iree_compiler_cc_library(
     ],
     hdrs = [
         "ConversionDialectInterface.h",
+        "DistributionInterface.h",
+        "EquivalenceAnalysis.h",
         "Passes.h",
         "Passes.h.inc",
         "Transforms.h",
