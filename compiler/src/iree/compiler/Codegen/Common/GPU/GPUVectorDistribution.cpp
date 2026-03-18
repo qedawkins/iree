@@ -127,10 +127,16 @@ static void applyVectorDistribution(Operation *root,
 
 /// Helper that sets signatures, applies distribution, canonicalizes, and
 /// verifies across one or more roots.
+///
+/// When \p useIsolatedCanonicalization is true, uses applyPatternsGreedily
+/// (requires IsolatedFromAbove) for the single-root case. Otherwise uses
+/// applyOpPatternsGreedily on collected ToSIMD/ToSIMT ops, which works for
+/// multi-root cases where roots may not be isolated.
 static LogicalResult distributeVectorOpsImpl(
     ArrayRef<Operation *> roots, RewritePatternSet &distributionPatterns,
     VectorLayoutOptions &options,
-    const llvm::MapVector<Value, VectorLayoutInterface> &layouts) {
+    const llvm::MapVector<Value, VectorLayoutInterface> &layouts,
+    bool useIsolatedCanonicalization) {
   assert(!roots.empty() && "Expected at least one root operation.");
   MLIRContext *ctx = roots.front()->getContext();
 
@@ -155,11 +161,30 @@ static LogicalResult distributeVectorOpsImpl(
     applyVectorDistribution(root, frozenPatterns);
   }
 
-  for (Operation *root : roots) {
+  // Canonicalize ToSIMD/ToSIMT ops.
+  if (useIsolatedCanonicalization) {
+    // Single root that is IsolatedFromAbove.
     RewritePatternSet patterns(ctx);
     IREE::VectorExt::ToSIMDOp::getCanonicalizationPatterns(patterns, ctx);
     IREE::VectorExt::ToSIMTOp::getCanonicalizationPatterns(patterns, ctx);
-    if (failed(applyPatternsGreedily(root, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(roots.front(), std::move(patterns)))) {
+      return failure();
+    }
+  } else {
+    // Multi-root, may not be IsolatedFromAbove.
+    SmallVector<Operation *> conversionOps;
+    for (Operation *root : roots) {
+      root->walk([&](Operation *op) {
+        if (isa<IREE::VectorExt::ToSIMDOp, IREE::VectorExt::ToSIMTOp>(op)) {
+          conversionOps.push_back(op);
+        }
+      });
+    }
+    RewritePatternSet patterns(ctx);
+    IREE::VectorExt::ToSIMDOp::getCanonicalizationPatterns(patterns, ctx);
+    IREE::VectorExt::ToSIMTOp::getCanonicalizationPatterns(patterns, ctx);
+    FrozenRewritePatternSet canonPatterns(std::move(patterns));
+    if (failed(applyOpPatternsGreedily(conversionOps, canonPatterns))) {
       return failure();
     }
   }
@@ -204,15 +229,16 @@ LogicalResult distributeVectorOps(Operation *root,
   LLVM_DEBUG(llvm::dbgs() << "Layout Analysis Succeeded\n");
   LLVM_DEBUG(llvm::dbgs() << "\n\n");
 
-  return distributeVectorOpsImpl({root}, distributionPatterns, options,
-                                 layouts);
+  return distributeVectorOpsImpl({root}, distributionPatterns, options, layouts,
+                                 /*useIsolatedCanonicalization=*/true);
 }
 
 LogicalResult distributeVectorOps(
     ArrayRef<Operation *> roots, RewritePatternSet &distributionPatterns,
     VectorLayoutOptions &options,
     const llvm::MapVector<Value, VectorLayoutInterface> &layouts) {
-  return distributeVectorOpsImpl(roots, distributionPatterns, options, layouts);
+  return distributeVectorOpsImpl(roots, distributionPatterns, options, layouts,
+                                 /*useIsolatedCanonicalization=*/false);
 }
 
 } // namespace mlir::iree_compiler
