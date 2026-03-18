@@ -27,6 +27,15 @@ LogicalResult
 distributeVectorOps(Operation *root, RewritePatternSet &distributionPatterns,
                     IREE::VectorExt::VectorLayoutOptions &options);
 
+/// Distribute vector operations with pre-computed layouts across multiple
+/// roots. The layout analysis must have already been run; this function
+/// sets signatures, applies distribution patterns, and cleans up.
+LogicalResult distributeVectorOps(
+    ArrayRef<Operation *> roots, RewritePatternSet &distributionPatterns,
+    IREE::VectorExt::VectorLayoutOptions &options,
+    const llvm::MapVector<Value, IREE::VectorExt::VectorLayoutInterface>
+        &layouts);
+
 } // namespace mlir::iree_compiler
 
 #endif // IREE_COMPILER_CODEGEN_COMMON_GPU_VECTOR_DISTRIBUTION_H_
