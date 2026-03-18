@@ -6,7 +6,9 @@
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include <numeric>
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -758,9 +760,6 @@ ValueRange LoopOp::getResultDims(int64_t i) {
 
 ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
                                     OperationState &result) {
-  // Parse optional "sync" keyword.
-  bool syncOnReturn = succeeded(parser.parseOptionalKeyword("sync"));
-
   // Parse "scope" "(" #attr ")".
   ScopeAttrInterface scope;
   if (parser.parseKeyword("scope") || parser.parseLParen() ||
@@ -902,11 +901,9 @@ ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
     return failure();
   }
 
-  // Resolve operands. Readonly inits are resolved using types inferred from
-  // the corresponding sref types (shape + element type as RankedTensorType).
-  // Readwrite init types equal result types.
+  // Resolve operands. Readonly init types are inferred from the corresponding
+  // sref types (as RankedTensorType). Readwrite init types equal result types.
   SmallVector<Type> readonlyInitTypes;
-  readonlyInitTypes.reserve(readonlyRefArgs.size());
   for (int64_t i = 0, e = readonlyRefArgs.size(); i < e; ++i) {
     ShapedRefType srefType = cast<ShapedRefType>(srefTypes[i]);
     readonlyInitTypes.push_back(
@@ -929,15 +926,11 @@ ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
                                 static_cast<int32_t>(readwriteInits.size())});
   props.setNumLeadingArgs(leadingArgs.size());
   props.setNumReadonlyRefs(readonlyRefArgs.size());
-  props.setSyncOnReturn(syncOnReturn);
 
   return success();
 }
 
 void SharedExecutorOp::print(OpAsmPrinter &p) {
-  if (getSyncOnReturn()) {
-    p << " sync";
-  }
   p << " scope(";
   p.printAttribute(getScope());
   p << ")";
@@ -1095,43 +1088,19 @@ LogicalResult SharedExecutorOp::verify() {
     }
   }
 
-  // Verify initializer yield matches leading args.
-  if (!getInitializer().empty()) {
-    Block &initBlock = getInitializer().front();
-    Operation *terminator = initBlock.getTerminator();
-    if (auto yieldOp = dyn_cast<YieldOp>(terminator)) {
-      if (static_cast<int64_t>(yieldOp.getNumOperands()) != numLeading) {
-        return emitOpError("initializer yield operand count (")
-               << yieldOp.getNumOperands()
-               << ") does not match num_leading_args (" << numLeading << ")";
-      }
-      for (auto [i, pair] : llvm::enumerate(
-               llvm::zip(yieldOp.getOperandTypes(), getLeadingArgs()))) {
-        Type yieldType = std::get<0>(pair);
-        Type argType = std::get<1>(pair).getType();
-        if (yieldType != argType) {
-          return emitOpError("initializer yield type ")
-                 << yieldType << " at index " << i
-                 << " does not match leading arg type " << argType;
-        }
-      }
-    }
-  }
-
   return success();
 }
 
 void SharedExecutorOp::build(OpBuilder &b, OperationState &result,
                              ScopeAttrInterface scope,
-                             ValueRange readwriteInits,
-                             bool syncOnReturn) {
+                             ValueRange readwriteInits) {
   SharedExecutorOp::build(b, result, scope, /*readonlyInits=*/ValueRange(),
-                          readwriteInits, syncOnReturn);
+                          readwriteInits);
 }
 
 void SharedExecutorOp::build(OpBuilder &b, OperationState &result,
                              ScopeAttrInterface scope, ValueRange readonlyInits,
-                             ValueRange readwriteInits, bool syncOnReturn) {
+                             ValueRange readwriteInits) {
   result.addAttribute(SharedExecutorOp::getScopeAttrName(result.name), scope);
   result.addOperands(readonlyInits);
   result.addOperands(readwriteInits);
@@ -1145,7 +1114,6 @@ void SharedExecutorOp::build(OpBuilder &b, OperationState &result,
                                 static_cast<int32_t>(readwriteInits.size())});
   props.setNumLeadingArgs(0);
   props.setNumReadonlyRefs(readonlyInits.size());
-  props.setSyncOnReturn(syncOnReturn);
 
   // Add empty initializer region.
   result.addRegion();
@@ -1186,9 +1154,6 @@ void SharedExecutorOp::getAsmBlockArgumentNames(Region &region,
   }
 
   assert(&region == &getRegion() && "Unexpected region");
-  for (Value v : getLeadingArgs()) {
-    setNameFn(v, "leading");
-  }
   for (Value v : getReadonlyRefArgs()) {
     setNameFn(v, "ref");
   }
@@ -1212,23 +1177,42 @@ ScopeAttrInterface TileGroupOp::getScope() {
 
 SmallVector<SmallVector<Value>> TileGroupOp::getSplitPointsPerDim() {
   ArrayRef<int64_t> numSplits = getNumSplitsPerDim();
+  OperandRange allSplits = getSplitPoints();
   SmallVector<SmallVector<Value>> result;
   int64_t offset = 0;
   for (int64_t n : numSplits) {
     SmallVector<Value> dimSplits;
-    for (int64_t i = 0; i < n; ++i) {
-      dimSplits.push_back(getSplitPoints()[offset + i]);
-    }
+    llvm::append_range(dimSplits, allSplits.slice(offset, n));
     result.push_back(std::move(dimSplits));
     offset += n;
   }
   return result;
 }
 
+std::optional<StringAttr> TileGroupOp::getNamespaceName() {
+  if (StringAttr name = getNsNameAttr()) {
+    return name;
+  }
+  return std::nullopt;
+}
+
+SmallVector<std::pair<Attribute, OpFoldResult>>
+TileGroupOp::getDefinedSymbols() {
+  SmallVector<std::pair<Attribute, OpFoldResult>> symbols;
+  for (BlockArgument arg : getBody().getArguments()) {
+    ClusterType ct = cast<ClusterType>(arg.getType());
+    NamespacedSymbolAttr id = ct.getId();
+    OpFoldResult def = TypeAttr::get(ct);
+    symbols.push_back({id, def});
+  }
+  return symbols;
+}
+
 void TileGroupOp::build(OpBuilder &builder, OperationState &result,
                         Value source,
                         ArrayRef<SmallVector<Value>> splitPointsPerDim,
-                        ArrayRef<ClusterType> resultClusterTypes) {
+                        ArrayRef<ClusterType> resultClusterTypes,
+                        StringAttr nsName) {
   result.addOperands(source);
   SmallVector<Value> flatSplits;
   SmallVector<int64_t> numSplits;
@@ -1239,6 +1223,9 @@ void TileGroupOp::build(OpBuilder &builder, OperationState &result,
   result.addOperands(flatSplits);
   result.addAttribute("numSplitsPerDim",
                       builder.getDenseI64ArrayAttr(numSplits));
+  if (nsName) {
+    result.addAttribute("nsName", nsName);
+  }
   Region *body = result.addRegion();
   Block *block = new Block();
   body->push_back(block);
@@ -1256,6 +1243,22 @@ ParseResult TileGroupOp::parse(OpAsmParser &parser, OperationState &result) {
   OpAsmParser::UnresolvedOperand source;
   if (parser.parseOperand(source)) {
     return failure();
+  }
+
+  // Parse optional namespace: ns(name).
+  StringAttr nsNameAttr;
+  if (succeeded(parser.parseOptionalKeyword("ns"))) {
+    if (parser.parseLParen()) {
+      return failure();
+    }
+    StringRef nsNameStr;
+    if (failed(parser.parseKeyword(&nsNameStr))) {
+      return failure();
+    }
+    nsNameAttr = StringAttr::get(parser.getContext(), nsNameStr);
+    if (parser.parseRParen()) {
+      return failure();
+    }
   }
 
   // Parse "split".
@@ -1337,6 +1340,11 @@ ParseResult TileGroupOp::parse(OpAsmParser &parser, OperationState &result) {
       "numSplitsPerDim",
       parser.getBuilder().getDenseI64ArrayAttr(numSplitsPerDim));
 
+  // Store the namespace name if present.
+  if (nsNameAttr) {
+    result.addAttribute("nsName", nsNameAttr);
+  }
+
   // Parse optional attr-dict.
   if (parser.parseOptionalAttrDict(result.attributes)) {
     return failure();
@@ -1346,7 +1354,11 @@ ParseResult TileGroupOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void TileGroupOp::print(OpAsmPrinter &p) {
-  p << " " << getSource() << " split [";
+  p << " " << getSource();
+  if (StringAttr nsAttr = getNsNameAttr()) {
+    p << " ns(" << nsAttr.getValue() << ")";
+  }
+  p << " split [";
 
   SmallVector<SmallVector<Value>> splitsPerDim = getSplitPointsPerDim();
   for (int64_t i = 0, e = splitsPerDim.size(); i < e; ++i) {
@@ -1374,7 +1386,7 @@ void TileGroupOp::print(OpAsmPrinter &p) {
   p << " : " << getSource().getType();
 
   p.printOptionalAttrDict((*this)->getAttrs(),
-                          /*elidedAttrs=*/{"numSplitsPerDim"});
+                          /*elidedAttrs=*/{"numSplitsPerDim", "nsName"});
 }
 
 LogicalResult TileGroupOp::verify() {
@@ -1440,6 +1452,50 @@ LogicalResult TileGroupOp::verify() {
     }
     if (ct.hasStructElements()) {
       return emitOpError("result clusters must not have struct elements");
+    }
+  }
+
+  // Verify namespace constraints on cluster IDs.
+  std::optional<StringAttr> nsName = getNamespaceName();
+  llvm::SmallDenseSet<StringAttr> leafNames;
+
+  for (BlockArgument arg : getBody().getArguments()) {
+    ClusterType ct = cast<ClusterType>(arg.getType());
+    NamespacedSymbolAttr id = ct.getId();
+
+    // Check leaf uniqueness.
+    if (!leafNames.insert(id.getLeaf()).second) {
+      return emitOpError("duplicate leaf symbol name '")
+             << id.getLeaf().getValue() << "' in namespace";
+    }
+
+    if (nsName) {
+      // Named namespace: ID must be qualified with the namespace name.
+      if (id.isLeafOnly()) {
+        return emitOpError("cluster ID '")
+               << id.getLeaf().getValue()
+               << "' must be qualified with namespace name '"
+               << nsName->getValue() << "'";
+      }
+      // First segment must match namespace name.
+      if (id.getPath().front() != *nsName) {
+        return emitOpError("cluster ID first segment '")
+               << id.getPath().front().getValue()
+               << "' does not match namespace name '" << nsName->getValue()
+               << "'";
+      }
+    } else {
+      // Anonymous namespace: ID must be leaf-only.
+      if (!id.isLeafOnly()) {
+        std::string fullPath =
+            llvm::join(llvm::map_range(id.getPath(),
+                                       [](StringAttr s) -> StringRef {
+                                         return s.getValue();
+                                       }),
+                       ".");
+        return emitOpError("cluster ID '")
+               << fullPath << "' must be leaf-only in anonymous namespace";
+      }
     }
   }
 
@@ -1556,6 +1612,15 @@ static LogicalResult verifyRunOp(Operation *op, ValueRange sources,
     }
   }
 
+  // All source clusters must have the same ID.
+  NamespacedSymbolAttr sourceId = sourceTypes[0].getId();
+  for (int64_t i = 1, e = static_cast<int64_t>(sourceTypes.size()); i < e;
+       ++i) {
+    if (sourceTypes[i].getId() != sourceId) {
+      return op->emitOpError("all source clusters must have the same ID");
+    }
+  }
+
   // rangeValues count must match boundsMap dependent values (dims only).
   // Symbols are implicit scope grid sizes, not SSA operands.
   int64_t expectedRangeValues = boundsMap.getNumDims();
@@ -1620,6 +1685,11 @@ static LogicalResult verifyRunOp(Operation *op, ValueRange sources,
   }
   if (resultType.getBoundsMap() != boundsMap) {
     return op->emitOpError("result cluster boundsMap mismatch");
+  }
+  // Result cluster ID must match source cluster ID.
+  if (resultType.getId() != sourceId) {
+    return op->emitOpError(
+        "result cluster ID does not match source cluster ID");
   }
   if (isClusterMode && !resultType.getPrivateTypes().empty()) {
     return op->emitOpError("run_cluster result must not have private types");

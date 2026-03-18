@@ -191,4 +191,47 @@ def PCF_SyncScopeAttrInterface : AttrInterface<"SyncScopeAttrInterface"> {
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// IREE::PCF::NamespaceOpInterface
+//===----------------------------------------------------------------------===//
+
+def PCF_NamespaceOpInterface : OpInterface<"NamespaceOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::PCF";
+
+  let description = [{
+    Defines private namespace boundaries for hierarchical symbols.
+
+    Operations implementing this interface define a namespace containing
+    privately-scoped symbols. Namespaces can be named (reachable by qualified
+    path) or anonymous (symbols reachable only by leaf name).
+
+    Symbols resolve upward through the parent chain -- never sideways to
+    siblings. This is the key property distinguishing private namespaces
+    from MLIR's standard symbol tables.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the namespace name, or nullopt for anonymous namespaces.
+      }],
+      /*retTy=*/"std::optional<StringAttr>",
+      /*methodName=*/"getNamespaceName",
+      /*args=*/(ins)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns all symbols defined in this namespace, each paired with its
+        definition as an OpFoldResult (attribute or SSA value). The symbol
+        attribute is a NamespacedSymbolAttr; callers should cast accordingly.
+        (The return type uses Attribute rather than NamespacedSymbolAttr to
+        avoid a circular include: PCFAttrs.h includes PCFInterfaces.h.)
+      }],
+      /*retTy=*/"SmallVector<std::pair<Attribute, OpFoldResult>>",
+      /*methodName=*/"getDefinedSymbols",
+      /*args=*/(ins)
+    >,
+  ];
+}
+
 #endif  // IREE_CODEGEN_DIALECT_PCF_INTERFACES
