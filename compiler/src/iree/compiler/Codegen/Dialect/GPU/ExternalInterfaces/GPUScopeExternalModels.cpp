@@ -84,6 +84,8 @@ struct SubgroupScopeModel
                                         MLIRContext *context) const {
     return gpu::AddressSpaceAttr::get(context, gpu::AddressSpace::Workgroup);
   }
+
+  int64_t getNativeNumIds(Attribute attr) const { return 1; }
 };
 
 /// External model for LaneScopeAttr implementing ScopeAttrInterface.
@@ -134,6 +136,8 @@ struct LaneScopeModel
     // logic to allocate + subview.
     return failure();
   }
+
+  int64_t getNativeNumIds(Attribute attr) const { return 1; }
 };
 
 } // namespace

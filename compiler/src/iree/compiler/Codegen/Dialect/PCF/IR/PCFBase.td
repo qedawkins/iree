@@ -181,6 +181,41 @@ def PCF_ShapedRef : TypeDef<PCF_Dialect, "ShapedRef", [
   }];
 }
 
+def PCF_ThreadGroupType : TypeDef<PCF_Dialect, "ThreadGroup", []> {
+  let mnemonic = "threadgroup";
+
+  let summary = [{A handle representing a group of cooperating workers.}];
+  let description = [{
+    Represents the group of workers executing a `pcf.shared_executor` region
+    at a specific scope level. The threadgroup carries optional struct element
+    types for attaching arbitrary data (workspace descriptors, accumulators,
+    etc.).
+
+    The threadgroup does not directly expose worker IDs — it represents the
+    collective group. Worker identity is accessed through scope-specific
+    mechanisms when the shared_executor is lowered to `pcf.generic`.
+
+    Examples:
+    ```
+    !pcf.threadgroup<#iree_gpu.subgroup_scope>
+    !pcf.threadgroup<#iree_gpu.subgroup_scope, {index, tensor<64x128xf32>}>
+    ```
+  }];
+
+  let parameters = (ins
+      AttrParameter<"ScopeAttrInterface", "scope">:$scope,
+      OptionalArrayRefParameter<"Type">:$structTypes);
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns true if the threadgroup carries struct elements.
+    bool hasStructElements() const { return !getStructTypes().empty(); }
+  }];
+}
+
+def PCF_AnyThreadGroup : AnyTypeOf<[PCF_ThreadGroupType]>;
+
 //===----------------------------------------------------------------------===//
 // Base pcf attributes
 //===----------------------------------------------------------------------===//
@@ -207,6 +242,7 @@ def PCF_TestScopeAttr
       assert(false && "why are you here?");
       return {};
     }
+    int64_t getNativeNumIds() { return 1; }
   }];
 }
 
@@ -234,6 +270,7 @@ def PCF_SequentialAttr
       SmallVector<Value> ids(numIds, zero);
       return ids;
     }
+    int64_t getNativeNumIds() { return 1; }
   }];
 }
 
