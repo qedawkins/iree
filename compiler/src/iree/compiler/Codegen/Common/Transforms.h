@@ -103,6 +103,21 @@ void propagateVectorLayoutInfo(
     Operation *root,
     llvm::MapVector<Value, IREE::VectorExt::VectorLayoutInterface> &layouts);
 
+/// Callback for equivalence-aware layout propagation. Given an OpOperand,
+/// returns the set of values that are equivalent to the value at that
+/// specific operand position. This allows layouts to propagate across
+/// region boundaries (e.g., between run_cluster ops sharing a cluster ID).
+using LayoutEquivalenceCallback =
+    std::function<SmallVector<Value>(OpOperand &)>;
+
+/// Overload that accepts multiple roots and an optional equivalence callback.
+/// Layouts are propagated across all roots, and the callback is used to
+/// propagate layouts to equivalent values across region boundaries.
+void propagateVectorLayoutInfo(
+    ArrayRef<Operation *> roots,
+    llvm::MapVector<Value, IREE::VectorExt::VectorLayoutInterface> &layouts,
+    LayoutEquivalenceCallback equivalenceCallback = nullptr);
+
 /// Transform a `scf.for` loop with a strictly positive step
 ///   for %i = %lb to %ub step %s
 /// into a 0-based loop with step 1

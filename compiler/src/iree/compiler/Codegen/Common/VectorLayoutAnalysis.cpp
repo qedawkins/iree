@@ -65,10 +65,15 @@ struct LayoutAnalysis {
   llvm::MapVector<Value, VectorLayoutInterface> resolved;
   /// Forward worklist (Phase 1 only).
   std::queue<Value> forward;
+  /// Optional equivalence callback for cross-region propagation.
+  LayoutEquivalenceCallback equivalenceCallback;
 
   //===--- Phase 1: Forward propagation ---===//
 
   bool addCandidate(Value val, VectorLayoutInterface layout);
+  /// Add a candidate and propagate to equivalent values via the callback.
+  bool addCandidateWithEquivalence(OpOperand &operand,
+                                   VectorLayoutInterface layout);
   VectorLayoutInterface getFirstCandidate(Value val) const;
   void seed(Operation *root);
   void propagateForward(Value val);
@@ -115,6 +120,20 @@ bool LayoutAnalysis::addCandidate(Value val, VectorLayoutInterface layout) {
   }
   forward.push(val);
   return true;
+}
+
+/// Add a candidate for the value at a specific operand position, and
+/// propagate to all equivalent values via the equivalence callback.
+bool LayoutAnalysis::addCandidateWithEquivalence(OpOperand &operand,
+                                                 VectorLayoutInterface layout) {
+  bool added = addCandidate(operand.get(), layout);
+  if (equivalenceCallback) {
+    SmallVector<Value> equivalents = equivalenceCallback(operand);
+    for (Value equiv : equivalents) {
+      added |= addCandidate(equiv, layout);
+    }
+  }
+  return added;
 }
 
 /// Return the first candidate layout for a value, or null.
@@ -167,6 +186,8 @@ void LayoutAnalysis::propagateOneForward(Value val,
     if (auto forOp = dyn_cast<scf::ForOp>(user)) {
       Value arg = forOp.getTiedLoopRegionIterArg(&use);
       Value result = forOp.getTiedLoopResult(&use);
+      // Propagate layout to equivalent values across PCF region boundaries.
+      addCandidateWithEquivalence(use, layout);
       addCandidate(arg, layout);
       addCandidate(result, layout);
       continue;
@@ -177,6 +198,8 @@ void LayoutAnalysis::propagateOneForward(Value val,
       if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
         Value arg = forOp.getRegionIterArg(operandIdx);
         Value result = forOp->getResult(operandIdx);
+        // Propagate layout to equivalent values across PCF region boundaries.
+        addCandidateWithEquivalence(use, layout);
         addCandidate(arg, layout);
         addCandidate(result, layout);
         continue;
@@ -185,6 +208,8 @@ void LayoutAnalysis::propagateOneForward(Value val,
         Value thenArg = ifOp.getThenRegion().getArgument(operandIdx);
         Value elseArg = ifOp.getElseRegion().getArgument(operandIdx);
         Value result = ifOp->getResult(operandIdx);
+        // Propagate layout to equivalent values across PCF region boundaries.
+        addCandidateWithEquivalence(use, layout);
         addCandidate(thenArg, layout);
         addCandidate(elseArg, layout);
         addCandidate(result, layout);
@@ -516,18 +541,30 @@ void LayoutAnalysis::setLayoutOrClone(OpOperand *val,
 
 void propagateVectorLayoutInfo(
     Operation *root, llvm::MapVector<Value, VectorLayoutInterface> &layouts) {
+  propagateVectorLayoutInfo({root}, layouts, /*equivalenceCallback=*/nullptr);
+}
+
+void propagateVectorLayoutInfo(
+    ArrayRef<Operation *> roots,
+    llvm::MapVector<Value, VectorLayoutInterface> &layouts,
+    LayoutEquivalenceCallback equivalenceCallback) {
   LayoutAnalysis analysis;
+  analysis.equivalenceCallback = std::move(equivalenceCallback);
 
   // Phase 1: Seed anchors and forward propagation (no IR mutation).
-  analysis.seed(root);
+  for (Operation *root : roots) {
+    analysis.seed(root);
+  }
   analysis.runForward();
 
   // Resolve: pick first candidate for each value.
   analysis.resolve();
 
   // Phase 2: Backward fixup (mutates IR).
-  for (Region &region : root->getRegions()) {
-    analysis.fixupRegion(region);
+  for (Operation *root : roots) {
+    for (Region &region : root->getRegions()) {
+      analysis.fixupRegion(region);
+    }
   }
 
   layouts = std::move(analysis.resolved);
