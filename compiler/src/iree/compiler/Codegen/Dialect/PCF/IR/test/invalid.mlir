@@ -569,3 +569,70 @@ util.func private @tile_group_qualified_in_anon_ns(
   } : !pcf.threadgroup<#pcf.sequential>
   util.return
 }
+
+// -----
+
+// shared_executor: last region arg is not threadgroup type.
+util.func private @shared_executor_last_arg_not_tg(%init: tensor<4x8xf32>) {
+  // expected-error@+1 {{expected last region argument to be !pcf.threadgroup, got 'index'}}
+  %0 = pcf.shared_executor scope(#pcf.test_scope)
+    execute(%ref = %init)
+        [%tg: index]
+         : (!pcf.sref<4x8xf32, #pcf.test_scope>)
+        -> (tensor<4x8xf32>) {
+    pcf.return
+  }
+  util.return
+}
+
+// -----
+
+// shared_executor: readwrite sref shape mismatch with result.
+util.func private @shared_executor_rw_shape_mismatch(%init: tensor<4x8xf32>) {
+  // expected-error@+1 {{readwrite sref at index 0 shape mismatch with result type}}
+  %0 = pcf.shared_executor scope(#pcf.test_scope)
+    execute(%ref = %init)
+        [%tg: !pcf.threadgroup<#pcf.test_scope>]
+         : (!pcf.sref<8x4xf32, #pcf.test_scope>)
+        -> (tensor<4x8xf32>) {
+    pcf.return
+  }
+  util.return
+}
+
+// -----
+
+// shared_executor: readwrite sref element type mismatch with result.
+util.func private @shared_executor_rw_eltype_mismatch(%init: tensor<4x8xf32>) {
+  // expected-error@+1 {{readwrite sref at index 0 element type mismatch with result type}}
+  %0 = pcf.shared_executor scope(#pcf.test_scope)
+    execute(%ref = %init)
+        [%tg: !pcf.threadgroup<#pcf.test_scope>]
+         : (!pcf.sref<4x8xf16, #pcf.test_scope>)
+        -> (tensor<4x8xf32>) {
+    pcf.return
+  }
+  util.return
+}
+
+// -----
+
+// Note: The "readwrite init type mismatch" verifier check is only reachable
+// via programmatic construction, because the parser resolves readwrite init
+// operands against result types (SharedExecutorOp::parse line 916), so a
+// type mismatch causes a parse-time error before the verifier runs.
+
+// shared_executor: readonly sref scope mismatch with op scope.
+util.func private @shared_executor_readonly_scope_mismatch(
+    %input: tensor<4x8xf32>, %output: tensor<4x8xf32>) {
+  // expected-error@+1 {{readonly sref scope must match op scope}}
+  %0 = pcf.shared_executor scope(#pcf.test_scope)
+    execute(%in_ref <- %input, %out_ref = %output)
+        [%tg: !pcf.threadgroup<#pcf.test_scope>]
+         : (!pcf.sref<4x8xf32, #pcf.sequential>,
+            !pcf.sref<4x8xf32, #pcf.test_scope>)
+        -> (tensor<4x8xf32>) {
+    pcf.return
+  }
+  util.return
+}
