@@ -209,6 +209,14 @@ def DistributeAndLowerPass
     Option<"useTestDistribution", "test-distribution", "bool",
            /*default=*/"false",
            "Use test distribution interface (for testing only).">,
+    Option<"useVectorDistribution", "vector-distribution", "bool",
+           /*default=*/"false",
+           "Use VectorDistribute-based distribution.">,
+    Option<"subgroupSize", "subgroup-size", "int64_t",
+           /*default=*/"64",
+           "Subgroup (warp/wave) size for vector distribution.">,
+    ListOption<"workgroupSize", "workgroup-size", "int64_t",
+               "Workgroup dimensions for vector distribution.">,
   ];
 }
 
