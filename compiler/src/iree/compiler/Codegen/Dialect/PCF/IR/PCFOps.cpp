@@ -731,6 +731,451 @@ ValueRange LoopOp::getResultDims(int64_t i) {
 }
 
 //===----------------------------------------------------------------------===//
+// SharedExecutorOp
+//===----------------------------------------------------------------------===//
+
+ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
+                                    OperationState &result) {
+  // Parse optional "sync" keyword.
+  bool syncOnReturn = succeeded(parser.parseOptionalKeyword("sync"));
+
+  // Parse "scope" "(" #attr ")".
+  ScopeAttrInterface scope;
+  if (parser.parseKeyword("scope") || parser.parseLParen() ||
+      parser.parseAttribute(scope) || parser.parseRParen()) {
+    return failure();
+  }
+  result.addAttribute(SharedExecutorOp::getScopeAttrName(result.name), scope);
+
+  // Parse optional initializer region + leading args binding.
+  Region *initializer = result.addRegion();
+  SmallVector<OpAsmParser::Argument> leadingArgs;
+  if (succeeded(parser.parseOptionalKeyword("initialize"))) {
+    if (parser.parseRegion(*initializer)) {
+      return failure();
+    }
+    if (succeeded(parser.parseOptionalArrow())) {
+      if (parser.parseArgumentList(leadingArgs, OpAsmParser::Delimiter::Paren,
+                                   /*allowType=*/true)) {
+        return failure();
+      }
+    }
+  }
+
+  // Parse "execute".
+  if (parser.parseKeyword("execute")) {
+    return failure();
+  }
+
+  // Parse ref args: "(" %name "<-" %operand | %name "=" %operand ")".
+  // "<-" denotes readonly, "=" denotes readwrite (tied to a result).
+  SmallVector<OpAsmParser::Argument> readonlyRefArgs;
+  SmallVector<OpAsmParser::Argument> readwriteRefArgs;
+  SmallVector<OpAsmParser::UnresolvedOperand> readonlyInits;
+  SmallVector<OpAsmParser::UnresolvedOperand> readwriteInits;
+  if (succeeded(parser.parseOptionalLParen())) {
+    do {
+      OpAsmParser::Argument refArg;
+      if (parser.parseArgument(refArg)) {
+        return failure();
+      }
+      // "<-" is parsed as two tokens: '<' then '-'.
+      if (succeeded(parser.parseOptionalLess())) {
+        if (parser.parseMinus()) {
+          return failure();
+        }
+        readonlyRefArgs.push_back(refArg);
+        readonlyInits.emplace_back();
+        if (parser.parseOperand(readonlyInits.back())) {
+          return failure();
+        }
+      } else if (succeeded(parser.parseOptionalEqual())) {
+        readwriteRefArgs.push_back(refArg);
+        readwriteInits.emplace_back();
+        if (parser.parseOperand(readwriteInits.back())) {
+          return failure();
+        }
+      } else {
+        return parser.emitError(parser.getCurrentLocation(),
+                                "expected '<-' or '=' after ref argument");
+      }
+    } while (succeeded(parser.parseOptionalComma()));
+    if (parser.parseRParen()) {
+      return failure();
+    }
+  }
+
+  // Parse "[%tg: !pcf.threadgroup<...>]".
+  SmallVector<OpAsmParser::Argument> tgArgs;
+  if (parser.parseArgumentList(tgArgs, OpAsmParser::Delimiter::Square,
+                               /*allowType=*/true)) {
+    return failure();
+  }
+  if (tgArgs.size() != 1) {
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected exactly one threadgroup argument");
+  }
+
+  // Parse sref types ": (sref_types)" and optional result types "-> (types)".
+  int64_t numRefs = readonlyRefArgs.size() + readwriteRefArgs.size();
+  SmallVector<Type> srefTypes;
+  SmallVector<Type> resultTypes;
+  if (numRefs != 0) {
+    if (parser.parseColon()) {
+      return failure();
+    }
+    if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::Paren,
+                                       [&]() -> ParseResult {
+                                         Type srefType;
+                                         if (parser.parseType(srefType)) {
+                                           return failure();
+                                         }
+                                         srefTypes.push_back(srefType);
+                                         return success();
+                                       })) {
+      return failure();
+    }
+    if (srefTypes.size() != static_cast<size_t>(numRefs)) {
+      return parser.emitError(parser.getCurrentLocation(),
+                              "sref type count does not match ref arg count");
+    }
+
+    // Assign sref types to ref block args.
+    for (auto [i, arg] : llvm::enumerate(readonlyRefArgs)) {
+      arg.type = srefTypes[i];
+    }
+    for (auto [i, arg] : llvm::enumerate(readwriteRefArgs)) {
+      arg.type = srefTypes[readonlyRefArgs.size() + i];
+    }
+
+    // Parse optional result types.
+    if (succeeded(parser.parseOptionalArrow())) {
+      if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::Paren,
+                                         [&]() -> ParseResult {
+                                           Type resType;
+                                           if (parser.parseType(resType)) {
+                                             return failure();
+                                           }
+                                           resultTypes.push_back(resType);
+                                           return success();
+                                         })) {
+        return failure();
+      }
+    }
+  }
+
+  // Parse the region body.
+  Region *body = result.addRegion();
+  SmallVector<OpAsmParser::Argument> allArgs;
+  allArgs.append(leadingArgs);
+  allArgs.append(readonlyRefArgs);
+  allArgs.append(readwriteRefArgs);
+  allArgs.append(tgArgs);
+  if (parser.parseRegion(*body, allArgs)) {
+    return failure();
+  }
+
+  // Parse optional attr-dict.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  // Resolve operands. Readonly inits are resolved using types inferred from
+  // the corresponding sref types (shape + element type as RankedTensorType).
+  // Readwrite init types equal result types.
+  SmallVector<Type> readonlyInitTypes;
+  readonlyInitTypes.reserve(readonlyRefArgs.size());
+  for (int64_t i = 0, e = readonlyRefArgs.size(); i < e; ++i) {
+    ShapedRefType srefType = cast<ShapedRefType>(srefTypes[i]);
+    readonlyInitTypes.push_back(
+        RankedTensorType::get(srefType.getShape(), srefType.getElementType()));
+  }
+  if (parser.resolveOperands(readonlyInits, readonlyInitTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+  if (parser.resolveOperands(readwriteInits, resultTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  result.addTypes(resultTypes);
+
+  // Set properties.
+  Properties &props = result.getOrAddProperties<Properties>();
+  props.setOperandSegmentSizes({static_cast<int32_t>(readonlyInits.size()),
+                                static_cast<int32_t>(readwriteInits.size())});
+  props.setSyncOnReturn(syncOnReturn);
+  props.setNumLeadingArgs(leadingArgs.size());
+  props.setNumReadonlyRefs(readonlyRefArgs.size());
+
+  return success();
+}
+
+void SharedExecutorOp::print(OpAsmPrinter &p) {
+  if (getSyncOnReturn()) {
+    p << " sync";
+  }
+  p << " scope(";
+  p.printAttribute(getScope());
+  p << ")";
+
+  // Print optional initializer region.
+  if (!getInitializer().empty()) {
+    p << " initialize ";
+    p.printRegion(getInitializer(), /*printEntryBlockArgs=*/false,
+                  /*printBlockTerminators=*/true);
+  }
+
+  int64_t numLeading = getNumLeadingArgs();
+  if (numLeading > 0) {
+    p << " -> (";
+    MutableArrayRef<BlockArgument> leadingArgRange =
+        getRegion().getArguments().take_front(numLeading);
+    llvm::interleaveComma(leadingArgRange, p, [&](BlockArgument arg) {
+      p.printRegionArgument(arg);
+    });
+    p << ")";
+  }
+
+  p.printNewline();
+  p << "  execute";
+
+  int64_t numReadonly = getNumReadonlyRefs();
+  int64_t numReadwrite = getNumResults();
+  int64_t numRefs = numReadonly + numReadwrite;
+
+  ArrayRef<BlockArgument> readonlyArgs = getReadonlyRefArgs();
+  ArrayRef<BlockArgument> readwriteArgs = getReadwriteRefArgs();
+  BlockArgument tgArg = getThreadGroup();
+
+  if (numRefs != 0) {
+    p << "(";
+    int64_t currReadonlyInit = 0;
+    int64_t currReadwriteInit = 0;
+    for (int64_t i = 0, e = numRefs; i < e; ++i) {
+      if (i > 0) {
+        p << ", ";
+      }
+      if (i < numReadonly) {
+        p << readonlyArgs[i] << " <- ";
+        p << getReadonlyInits()[currReadonlyInit];
+        ++currReadonlyInit;
+      } else {
+        p << readwriteArgs[i - numReadonly] << " = ";
+        p << getReadwriteInits()[currReadwriteInit];
+        ++currReadwriteInit;
+      }
+    }
+    p << ")";
+  }
+
+  p << "[";
+  p.printRegionArgument(tgArg);
+  p << "]";
+
+  // Print sref types and result types.
+  if (numRefs != 0) {
+    p.printNewline();
+    p << "       : (";
+    SmallVector<BlockArgument> allRefArgs;
+    allRefArgs.append(readonlyArgs.begin(), readonlyArgs.end());
+    allRefArgs.append(readwriteArgs.begin(), readwriteArgs.end());
+    llvm::interleaveComma(allRefArgs, p,
+                          [&](BlockArgument arg) { p << arg.getType(); });
+    p << ")";
+
+    if (numReadwrite > 0) {
+      p.printNewline();
+      p << "      -> (";
+      llvm::interleaveComma(getResultTypes(), p, [&](Type type) { p << type; });
+      p << ") ";
+    } else {
+      p << " ";
+    }
+  } else {
+    p << " ";
+  }
+
+  p.printRegion(getRegion(), /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+
+  p.printOptionalAttrDict(
+      (*this)->getAttrs(),
+      /*elidedAttrs=*/{getScopeAttrName(), getOperandSegmentSizesAttrName()});
+}
+
+LogicalResult SharedExecutorOp::verify() {
+  int64_t numLeading = getNumLeadingArgs();
+  int64_t numReadonly = getNumReadonlyRefs();
+  int64_t numReadwrite = getNumResults();
+  int64_t expectedArgs = numLeading + numReadonly + numReadwrite + 1;
+
+  if (static_cast<int64_t>(getRegion().getNumArguments()) != expectedArgs) {
+    return emitOpError("expected region to have ")
+           << expectedArgs << " arguments (leading=" << numLeading
+           << ", readonly=" << numReadonly << ", readwrite=" << numReadwrite
+           << ", threadgroup=1), got " << getRegion().getNumArguments();
+  }
+
+  ScopeAttrInterface scope = getScope();
+
+  // Verify threadgroup arg is last and has matching scope.
+  BlockArgument tgArg = getThreadGroup();
+  ThreadGroupType tgType = dyn_cast<ThreadGroupType>(tgArg.getType());
+  if (!tgType) {
+    return emitOpError("expected last region argument to be "
+                       "!pcf.threadgroup, got ")
+           << tgArg.getType();
+  }
+  if (tgType.getScope() != scope) {
+    return emitOpError("threadgroup scope must match op scope");
+  }
+
+  // Verify readonly sref args.
+  for (BlockArgument refArg : getReadonlyRefArgs()) {
+    ShapedRefType srefType = dyn_cast<ShapedRefType>(refArg.getType());
+    if (!srefType) {
+      return emitOpError("expected readonly region argument to be !pcf.sref");
+    }
+    if (srefType.getScope() != scope) {
+      return emitOpError("readonly sref scope must match op scope");
+    }
+  }
+
+  // Verify readwrite sref args and result type consistency.
+  for (auto [i, refArg] : llvm::enumerate(getReadwriteRefArgs())) {
+    ShapedRefType srefType = dyn_cast<ShapedRefType>(refArg.getType());
+    if (!srefType) {
+      return emitOpError("expected readwrite region argument to be !pcf.sref");
+    }
+    if (srefType.getScope() != scope) {
+      return emitOpError("readwrite sref scope must match op scope");
+    }
+
+    ShapedType resultType = getResultType(i);
+    if (resultType.getShape() != srefType.getShape()) {
+      return emitOpError("readwrite sref at index ")
+             << i << " shape mismatch with result type";
+    }
+    if (resultType.getElementType() != srefType.getElementType()) {
+      return emitOpError("readwrite sref at index ")
+             << i << " element type mismatch with result type";
+    }
+  }
+
+  // Verify readwrite inits match result types.
+  for (auto [i, init] : llvm::enumerate(getReadwriteInits())) {
+    if (init.getType() != getResultType(i)) {
+      return emitOpError("readwrite init at index ")
+             << i << " type " << init.getType()
+             << " does not match result type " << getResultType(i);
+    }
+  }
+
+  // Verify initializer yield matches leading args.
+  if (!getInitializer().empty()) {
+    Block &initBlock = getInitializer().front();
+    Operation *terminator = initBlock.getTerminator();
+    if (auto yieldOp = dyn_cast<YieldOp>(terminator)) {
+      if (static_cast<int64_t>(yieldOp.getNumOperands()) != numLeading) {
+        return emitOpError("initializer yield operand count (")
+               << yieldOp.getNumOperands()
+               << ") does not match num_leading_args (" << numLeading << ")";
+      }
+      for (auto [i, pair] : llvm::enumerate(
+               llvm::zip(yieldOp.getOperandTypes(), getLeadingArgs()))) {
+        Type yieldType = std::get<0>(pair);
+        Type argType = std::get<1>(pair).getType();
+        if (yieldType != argType) {
+          return emitOpError("initializer yield type ")
+                 << yieldType << " at index " << i
+                 << " does not match leading arg type " << argType;
+        }
+      }
+    }
+  }
+
+  return success();
+}
+
+void SharedExecutorOp::build(OpBuilder &b, OperationState &result,
+                             ScopeAttrInterface scope,
+                             ValueRange readwriteInits, bool syncOnReturn) {
+  SharedExecutorOp::build(b, result, scope, /*readonlyInits=*/ValueRange(),
+                          readwriteInits, syncOnReturn);
+}
+
+void SharedExecutorOp::build(OpBuilder &b, OperationState &result,
+                             ScopeAttrInterface scope, ValueRange readonlyInits,
+                             ValueRange readwriteInits, bool syncOnReturn) {
+  result.addAttribute(SharedExecutorOp::getScopeAttrName(result.name), scope);
+  result.addOperands(readonlyInits);
+  result.addOperands(readwriteInits);
+
+  SmallVector<Type> resultTypes = llvm::map_to_vector(
+      readwriteInits, [](Value v) -> Type { return v.getType(); });
+  result.addTypes(resultTypes);
+
+  Properties &props = result.getOrAddProperties<Properties>();
+  props.setOperandSegmentSizes({static_cast<int32_t>(readonlyInits.size()),
+                                static_cast<int32_t>(readwriteInits.size())});
+  props.setSyncOnReturn(syncOnReturn);
+  props.setNumLeadingArgs(0);
+  props.setNumReadonlyRefs(readonlyInits.size());
+
+  // Add empty initializer region.
+  result.addRegion();
+
+  // Add the main region.
+  Region *region = result.addRegion();
+  OpBuilder::InsertionGuard g(b);
+  b.createBlock(region);
+  Block &entryBlock = region->front();
+
+  // Readonly sref args.
+  for (Value init : readonlyInits) {
+    ShapedType shapedType = cast<ShapedType>(init.getType());
+    entryBlock.addArgument(
+        ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                           shapedType.getElementType(), scope),
+        result.location);
+  }
+
+  // Readwrite sref args.
+  for (Value init : readwriteInits) {
+    ShapedType shapedType = cast<ShapedType>(init.getType());
+    entryBlock.addArgument(
+        ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                           shapedType.getElementType(), scope),
+        result.location);
+  }
+
+  // Threadgroup arg.
+  entryBlock.addArgument(ThreadGroupType::get(b.getContext(), scope, {}),
+                         result.location);
+}
+
+void SharedExecutorOp::getAsmBlockArgumentNames(Region &region,
+                                                OpAsmSetValueNameFn setNameFn) {
+  if (&region == &getInitializer()) {
+    return;
+  }
+
+  assert(&region == &getRegion() && "Unexpected region");
+  for (Value v : getReadonlyRefArgs()) {
+    setNameFn(v, "ref");
+  }
+  for (Value v : getReadwriteRefArgs()) {
+    setNameFn(v, "ref");
+  }
+  for (Value v : getLeadingArgs()) {
+    setNameFn(v, "leading");
+  }
+  setNameFn(getThreadGroup(), "tg");
+}
+
+//===----------------------------------------------------------------------===//
 // Control Flow Ops
 //===----------------------------------------------------------------------===//
 

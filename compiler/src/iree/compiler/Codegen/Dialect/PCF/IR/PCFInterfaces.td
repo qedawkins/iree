@@ -115,6 +115,20 @@ def PCF_ScopeAttrInterface : AttrInterface<"ScopeAttrInterface"> {
         return b.getI64IntegerAttr(16);
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the native number of worker IDs for this scope. This is the
+        physical dimensionality of the worker grid. For example, a GPU lane
+        scope has 1 native ID (lane_id), while a 2D thread scope would have 2.
+      }],
+      /*retTy=*/"int64_t",
+      /*methodName=*/"getNativeNumIds",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return 1;
+      }]
+    >,
   ];
 }
 

@@ -381,6 +381,132 @@ def LoopOp : PCF_Op<"loop", [
   }];
 }
 
+def SharedExecutorOp : PCF_Op<"shared_executor", [
+       AttrSizedOperandSegments,
+       AutomaticAllocationScope,
+       RecursiveMemoryEffects,
+       DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmBlockArgumentNames"]>,
+     ]> {
+  let summary = [{
+    Execute a collective region where all workers cooperatively operate on
+    shared memory.
+  }];
+  let description = [{
+    Executes a region in collective/SIMD semantics at the specified scope.
+    Unlike `pcf.generic` where each worker gets an ID and executes
+    independently (SIMT), in `shared_executor` the body is conceptually
+    executed by all workers cooperatively. Individual ops in the body must
+    be distributed (e.g., via VectorDistribute) when lowering to SIMT.
+
+    The op takes two kinds of sref operands:
+    - **Readonly** (`<-`): Input tensor bound as a readonly sref. Does not
+      produce a result.
+    - **Readwrite** (`=`): Input tensor bound as a readwrite sref. Produces
+      a result tensor capturing the final state.
+
+    The execute region receives a `!pcf.threadgroup` block argument
+    representing the collective worker group. The threadgroup carries the
+    scope and optional struct elements.
+
+    Results are produced by snapshotting each readwrite sref once all
+    workers return, identical to `pcf.generic`.
+
+    The optional `initialize` region allocates shared memory. Values yielded
+    from the initializer become additional block arguments in the execute
+    region.
+
+    Example:
+    ```mlir
+      %result = pcf.shared_executor scope(#sg)
+        initialize {
+          %smem = pcf.alloc() : !pcf.sref<128x64xf16, #sg>
+          pcf.yield %smem : !pcf.sref<128x64xf16, #sg>
+        } -> (%smem: !pcf.sref<128x64xf16, #sg>)
+        execute(%in_ref <- %input, %out_ref = %output)
+            [%tg: !pcf.threadgroup<#sg>]
+             : (!pcf.sref<128x256xf16, #sg>,
+                !pcf.sref<128x128xf32, #sg>)
+            -> (tensor<128x128xf32>) {
+          pcf.return
+        }
+    ```
+  }];
+
+  let arguments = (ins PCF_ScopeAttrInterface:$scope,
+      Variadic<AnyRankedTensorOrMemRef>:$readonlyInits,
+      Variadic<AnyRankedTensorOrMemRef>:$readwriteInits,
+      DefaultValuedProp<BoolProp, "false">:$sync_on_return,
+      IntProp<"int64_t">:$num_leading_args,
+      IntProp<"int64_t">:$num_readonly_refs);
+
+  let results = (outs Variadic<AnyRankedTensorOrMemRef>:$results);
+  let regions = (region
+    MaxSizedRegion<1>:$initializer,
+    MinSizedRegion<1>:$region
+  );
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+      // Builder with readwrite inits only (results inferred from inits).
+      OpBuilder<(ins "ScopeAttrInterface":$scope,
+          "ValueRange":$readwriteInits,
+          CArg<"bool", "false">:$sync_on_return)>,
+      // Builder with readonly and readwrite inits.
+      OpBuilder<(ins "ScopeAttrInterface":$scope,
+          "ValueRange":$readonlyInits,
+          "ValueRange":$readwriteInits,
+          CArg<"bool", "false">:$sync_on_return)>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns the number of readwrite sref operands (equals num results).
+    int64_t getNumReadwrite() { return getNumResults(); }
+
+    MutableArrayRef<BlockArgument> getLeadingArgsMutable() {
+      return getRegion().getArguments().take_front(getNumLeadingArgs());
+    }
+    ArrayRef<BlockArgument> getLeadingArgs() {
+      return getLeadingArgsMutable();
+    }
+
+    /// Returns the threadgroup block argument (last arg in the region).
+    BlockArgument getThreadGroup() {
+      return getRegion().getArguments().back();
+    }
+
+    /// Returns the readonly sref block arguments.
+    MutableArrayRef<BlockArgument> getReadonlyRefArgsMutable() {
+      int64_t start = getNumLeadingArgs();
+      return getRegion().getArguments().slice(start, getNumReadonlyRefs());
+    }
+    ArrayRef<BlockArgument> getReadonlyRefArgs() {
+      return getReadonlyRefArgsMutable();
+    }
+
+    /// Returns the readwrite sref block arguments.
+    MutableArrayRef<BlockArgument> getReadwriteRefArgsMutable() {
+      int64_t start = getNumLeadingArgs() + getNumReadonlyRefs();
+      return getRegion().getArguments().slice(start, getNumResults());
+    }
+    ArrayRef<BlockArgument> getReadwriteRefArgs() {
+      return getReadwriteRefArgsMutable();
+    }
+
+    OpResult getTiedResult(BlockArgument b) {
+      int64_t readwriteStart = getNumLeadingArgs() + getNumReadonlyRefs();
+      assert(b.getArgNumber() >= readwriteStart && "not a readwrite arg");
+      return (*this)->getOpResult(b.getArgNumber() - readwriteStart);
+    }
+
+    ShapedType getResultType(int64_t i) {
+      return cast<ShapedType>(getResults()[i].getType());
+    }
+  }];
+}
+
 } // OpGroupParallelOps
 
 
@@ -736,7 +862,8 @@ def PCF_GetMemrefOp : PCF_Op<"get_memref", [
 // Misc
 //===----------------------------------------------------------------------===//
 
-def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp"]>, Pure,
+def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp",
+                                                 "IREE::PCF::SharedExecutorOp"]>, Pure,
                                    ReturnLike, Terminator,
 ]> {
   let summary = [{Yields results from a region.}];
@@ -758,6 +885,7 @@ def PCF_ReturnOp : PCF_Op<"return", [
   ParentOneOf<[
     "IREE::PCF::GenericOp",
     "IREE::PCF::LoopOp",
+    "IREE::PCF::SharedExecutorOp",
   ]>,
   Pure,
   Terminator,
