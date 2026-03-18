@@ -231,4 +231,17 @@ def TestNamespaceResolutionPass
   let dependentDialects = ["::mlir::iree_compiler::IREE::PCF::PCFDialect"];
 }
 
+def TestValueEquivalencesPass
+    : Pass<"iree-pcf-test-value-equivalences", ""> {
+  let summary = "Test pass for computeValueEquivalences().";
+  let description = [{
+    Finds all values marked with a `test.seed` unit attribute on their
+    defining op (or on a func argument via the func-level `test.seed_args`
+    attribute), calls `computeValueEquivalences` with those seeds and
+    a predicate that accepts all values, and emits remarks showing which
+    values are in the same equivalence class. Used exclusively for testing.
+  }];
+  let dependentDialects = ["::mlir::iree_compiler::IREE::PCF::PCFDialect"];
+}
+
 #endif // IREE_CODEGEN_DIALECT_PCF_TRANSFORMS_PASSES
