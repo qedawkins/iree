@@ -132,6 +132,62 @@ bool ShapedRefType::isReturnOnlySync() const {
 }
 
 //===----------------------------------------------------------------------===//
+// !pcf.threadgroup<...>
+//===----------------------------------------------------------------------===//
+
+Type ThreadGroupType::parse(AsmParser &parser) {
+  if (parser.parseLess()) {
+    return {};
+  }
+
+  Attribute scopeAttr;
+  SMLoc scopeLoc = parser.getCurrentLocation();
+  if (failed(parser.parseAttribute(scopeAttr))) {
+    parser.emitError(scopeLoc, "failed to parse parameter 'scope'");
+    return {};
+  }
+
+  ScopeAttrInterface scope = dyn_cast<ScopeAttrInterface>(scopeAttr);
+  if (!scope) {
+    parser.emitError(scopeLoc, "expected 'scope' parameter ")
+        << scopeAttr << " to implement ScopeAttrInterface";
+    return {};
+  }
+
+  SmallVector<Type> structTypes;
+  if (succeeded(parser.parseOptionalComma())) {
+    // Parse {type, type, ...}.
+    if (failed(parser.parseLBrace())) {
+      return {};
+    }
+    if (failed(parser.parseTypeList(structTypes))) {
+      return {};
+    }
+    if (failed(parser.parseRBrace())) {
+      return {};
+    }
+  }
+
+  if (parser.parseGreater()) {
+    return {};
+  }
+
+  return ThreadGroupType::get(parser.getContext(), scope, structTypes);
+}
+
+void ThreadGroupType::print(AsmPrinter &printer) const {
+  printer << "<";
+  printer << getScope();
+  if (hasStructElements()) {
+    printer << ", {";
+    llvm::interleaveComma(getStructTypes(), printer,
+                          [&](Type type) { printer << type; });
+    printer << "}";
+  }
+  printer << ">";
+}
+
+//===----------------------------------------------------------------------===//
 // Dialect registration
 //===----------------------------------------------------------------------===//
 
