@@ -125,3 +125,22 @@ func.func @index_switch(%idx: index) {
   "test.consume"(%result) : (f32) -> ()
   return
 }
+
+// -----
+
+// Value passing through scf.while. The seed flows through the before region
+// arg, the condition operand, and the after region arg back to the result.
+func.func @while_loop() {
+  // expected-remark @below {{equivalence class: {self}}}
+  // expected-remark @below {{seed is leader of its class}}
+  %seed = "test.produce"() {test.seed} : () -> (f32)
+  %result = scf.while (%arg = %seed) : (f32) -> f32 {
+    %cond = "test.cond"() : () -> i1
+    scf.condition(%cond) %arg : f32
+  } do {
+  ^bb0(%body_arg: f32):
+    scf.yield %body_arg : f32
+  }
+  "test.consume"(%result) : (f32) -> ()
+  return
+}
