@@ -41,6 +41,7 @@ iree_cc_library(
     "LowerStructuralPCF.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"
+    "TestEquivalenceAnalysis.cpp"
     "TestNamespaceResolution.cpp"
     "Transforms.cpp"
   DEPS
