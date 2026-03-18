@@ -33,3 +33,108 @@ util.func private @threadgroup_with_struct(!pcf.threadgroup<#pcf.test_scope, {in
 util.func private @threadgroup_sequential(!pcf.threadgroup<#pcf.sequential>)
 // CHECK: @threadgroup_sequential
 // CHECK-SAME: !pcf.threadgroup<#pcf.sequential>
+
+// -----
+
+// Cluster with one dim, one dependent value.
+util.func private @cluster_1d_one_dep(!pcf.cluster<#pcf.test_scope, (0 -> d0), c0>)
+// CHECK: @cluster_1d_one_dep
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), c0>
+
+// -----
+
+// Cluster with two dims, one shared dependent value.
+util.func private @cluster_2d_shared_dep(!pcf.cluster<#pcf.test_scope, (0 -> d0) x (d0 -> s1), c1>)
+// CHECK: @cluster_2d_shared_dep
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0) x (d0 -> s1), c1>
+
+// -----
+
+// Cluster with two dims, two dependent values.
+util.func private @cluster_2d_two_deps(!pcf.cluster<#pcf.test_scope, (0 -> d0) x (0 -> d1), c2>)
+// CHECK: @cluster_2d_two_deps
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0) x (0 -> d1), c2>
+
+// -----
+
+// Cluster with full grid (no dependent values).
+util.func private @cluster_full_grid(!pcf.cluster<#pcf.test_scope, (0 -> s0) x (0 -> s1), full>)
+// CHECK: @cluster_full_grid
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> s0) x (0 -> s1), full>
+
+// -----
+
+// Cluster with private struct elements.
+util.func private @cluster_private(!pcf.cluster<#pcf.test_scope, (0 -> s0), private: {f32}, c3>)
+// CHECK: @cluster_private
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> s0), private: {f32}, c3>
+
+// -----
+
+// Cluster with shared struct elements.
+util.func private @cluster_shared(!pcf.cluster<#pcf.test_scope, (0 -> s0), shared: {tensor<64xf32>}, c4>)
+// CHECK: @cluster_shared
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> s0), shared: {tensor<64xf32>}, c4>
+
+// -----
+
+// Cluster with uniform struct elements.
+util.func private @cluster_uniform(!pcf.cluster<#pcf.test_scope, (0 -> s0), uniform: {index}, c5>)
+// CHECK: @cluster_uniform
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> s0), uniform: {index}, c5>
+
+// -----
+
+// Cluster with all three struct kinds.
+util.func private @cluster_all_kinds(!pcf.cluster<#pcf.test_scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, uniform: {index}, c6>)
+// CHECK: @cluster_all_kinds
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, uniform: {index}, c6>
+
+// -----
+
+// Cluster with single-segment (leaf-only) ID.
+util.func private @cluster_leaf_id(!pcf.cluster<#pcf.test_scope, (0 -> d0), left>)
+// CHECK: @cluster_leaf_id
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), left>
+
+// -----
+
+// Cluster with multi-segment (qualified) ID.
+util.func private @cluster_qualified_id(!pcf.cluster<#pcf.test_scope, (0 -> d0), tg.left>)
+// CHECK: @cluster_qualified_id
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), tg.left>
+
+// -----
+
+// Cluster with deeply nested ID.
+util.func private @cluster_deep_id(!pcf.cluster<#pcf.test_scope, (0 -> d0), outer.inner.leaf>)
+// CHECK: @cluster_deep_id
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), outer.inner.leaf>
+
+// -----
+
+// Cluster with struct groups and ID.
+util.func private @cluster_struct_and_id(!pcf.cluster<#pcf.test_scope, (0 -> d0), shared: {f32}, tg.left>)
+// CHECK: @cluster_struct_and_id
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), shared: {f32}, tg.left>
+
+// -----
+
+// Standalone NamespacedSymbolAttr roundtrip (leaf-only).
+util.func private @ns_sym_leaf(!pcf.cluster<#pcf.test_scope, (0 -> d0), leaf>)
+// CHECK: @ns_sym_leaf
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), leaf>
+
+// -----
+
+// Standalone NamespacedSymbolAttr roundtrip (qualified).
+util.func private @ns_sym_qualified(!pcf.cluster<#pcf.test_scope, (0 -> d0), ns.child>)
+// CHECK: @ns_sym_qualified
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), ns.child>
+
+// -----
+
+// Standalone NamespacedSymbolAttr roundtrip (deeply nested).
+util.func private @ns_sym_deep(!pcf.cluster<#pcf.test_scope, (0 -> d0), a.b.c.d>)
+// CHECK: @ns_sym_deep
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), a.b.c.d>

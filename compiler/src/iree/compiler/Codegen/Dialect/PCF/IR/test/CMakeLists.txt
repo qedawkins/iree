@@ -18,6 +18,7 @@ iree_lit_test_suite(
     "folders.mlir"
     "invalid.mlir"
     "shared_executor.mlir"
+    "to_sref.mlir"
     "types.mlir"
     "write_ops.mlir"
   TOOLS
