@@ -125,6 +125,75 @@ static void applyVectorDistribution(Operation *root,
   }
 }
 
+/// Helper that sets signatures, applies distribution, canonicalizes, and
+/// verifies across one or more roots.
+static LogicalResult distributeVectorOpsImpl(
+    ArrayRef<Operation *> roots, RewritePatternSet &distributionPatterns,
+    VectorLayoutOptions &options,
+    const llvm::MapVector<Value, VectorLayoutInterface> &layouts) {
+  assert(!roots.empty() && "Expected at least one root operation.");
+  MLIRContext *ctx = roots.front()->getContext();
+
+  // Set distribution signatures on all operations under all roots.
+  LLVM_DEBUG(
+      llvm::dbgs() << "Setting distribution signatures for operations\n");
+  for (Operation *root : roots) {
+    root->walk([&](Operation *op) {
+      if (failed(IREE::VectorExt::setOpSignature(op, layouts, options))) {
+        LLVM_DEBUG({
+          llvm::dbgs() << "Skipping operation because not all vector "
+                          "operands/results have a layout:\n";
+          op->print(llvm::dbgs());
+        });
+      }
+    });
+  }
+  LLVM_DEBUG(llvm::dbgs() << "Distribution signatures set\n");
+
+  FrozenRewritePatternSet frozenPatterns(std::move(distributionPatterns));
+  for (Operation *root : roots) {
+    applyVectorDistribution(root, frozenPatterns);
+  }
+
+  for (Operation *root : roots) {
+    RewritePatternSet patterns(ctx);
+    IREE::VectorExt::ToSIMDOp::getCanonicalizationPatterns(patterns, ctx);
+    IREE::VectorExt::ToSIMTOp::getCanonicalizationPatterns(patterns, ctx);
+    if (failed(applyPatternsGreedily(root, std::move(patterns)))) {
+      return failure();
+    }
+  }
+
+  // Remove signatures and verify.
+  for (Operation *root : roots) {
+    root->walk([](Operation *op) { IREE::VectorExt::removeOpSignature(op); });
+  }
+
+  if (options.verifyConversion()) {
+    for (Operation *root : roots) {
+      WalkResult hasConversionOp = root->walk([](Operation *op) {
+        if (isa<IREE::VectorExt::ToSIMDOp, IREE::VectorExt::ToSIMTOp>(op)) {
+          for (auto user : op->getUsers()) {
+            if (!isa<IREE::VectorExt::ToSIMDOp, IREE::VectorExt::ToSIMTOp>(
+                    user)) {
+              LLVM_DEBUG({
+                llvm::dbgs() << "Found live cast op: " << *op << "\n";
+                llvm::dbgs() << "With live user: " << *user << "\n";
+              });
+              return WalkResult::interrupt();
+            }
+          }
+        }
+        return WalkResult::advance();
+      });
+      if (hasConversionOp.wasInterrupted()) {
+        return failure();
+      }
+    }
+  }
+  return success();
+}
+
 LogicalResult distributeVectorOps(Operation *root,
                                   RewritePatternSet &distributionPatterns,
                                   VectorLayoutOptions &options) {
@@ -135,58 +204,15 @@ LogicalResult distributeVectorOps(Operation *root,
   LLVM_DEBUG(llvm::dbgs() << "Layout Analysis Succeeded\n");
   LLVM_DEBUG(llvm::dbgs() << "\n\n");
 
-  // Go to each operation, and set its distribution signature.
-  LLVM_DEBUG(
-      llvm::dbgs() << "Setting distribution signatures for operations\n");
-  root->walk([&](Operation *op) {
-    if (failed(IREE::VectorExt::setOpSignature(op, layouts, options))) {
-      LLVM_DEBUG({
-        llvm::dbgs() << "Skipping operation because not all vector "
-                        "operands/results have a layout:\n";
-        op->print(llvm::dbgs());
-      });
-    }
-  });
-  LLVM_DEBUG(llvm::dbgs() << "Distribution signatures set\n");
-  LLVM_DEBUG(root->print(llvm::dbgs()));
-  LLVM_DEBUG(llvm::dbgs() << "\n\n");
+  return distributeVectorOpsImpl({root}, distributionPatterns, options,
+                                 layouts);
+}
 
-  FrozenRewritePatternSet frozenPatterns(std::move(distributionPatterns));
-  applyVectorDistribution(root, frozenPatterns);
-
-  RewritePatternSet patterns(root->getContext());
-  IREE::VectorExt::ToSIMDOp::getCanonicalizationPatterns(patterns,
-                                                         root->getContext());
-  IREE::VectorExt::ToSIMTOp::getCanonicalizationPatterns(patterns,
-                                                         root->getContext());
-  if (failed(applyPatternsGreedily(root, std::move(patterns)))) {
-    return failure();
-  }
-
-  // Remove signature after distribution.
-  root->walk([](Operation *op) { IREE::VectorExt::removeOpSignature(op); });
-
-  if (options.verifyConversion()) {
-    WalkResult hasConversionOp = root->walk([](Operation *op) {
-      if (isa<IREE::VectorExt::ToSIMDOp, IREE::VectorExt::ToSIMTOp>(op)) {
-        for (auto user : op->getUsers()) {
-          if (!isa<IREE::VectorExt::ToSIMDOp, IREE::VectorExt::ToSIMTOp>(
-                  user)) {
-            LLVM_DEBUG({
-              llvm::dbgs() << "Found live cast op: " << *op << "\n";
-              llvm::dbgs() << "With live user: " << *user << "\n";
-            });
-            return WalkResult::interrupt();
-          }
-        }
-      }
-      return WalkResult::advance();
-    });
-    if (hasConversionOp.wasInterrupted()) {
-      return failure();
-    }
-  }
-  return success();
+LogicalResult distributeVectorOps(
+    ArrayRef<Operation *> roots, RewritePatternSet &distributionPatterns,
+    VectorLayoutOptions &options,
+    const llvm::MapVector<Value, VectorLayoutInterface> &layouts) {
+  return distributeVectorOpsImpl(roots, distributionPatterns, options, layouts);
 }
 
 } // namespace mlir::iree_compiler
