@@ -141,20 +141,226 @@ util.func private @no_operands() {
 
 // -----
 
-// Shared executor with sync_on_return.
-util.func private @sync_shared_executor(%init: tensor<4x8xf32>) {
-  %0 = pcf.shared_executor sync scope(#pcf.sequential)
-    execute(%ref = %init)
-        [%tg: !pcf.threadgroup<#pcf.sequential>]
-         : (!pcf.sref<4x8xf32, #pcf.sequential>)
-        -> (tensor<4x8xf32>) {
+// Tile group: 1D split into 2 clusters.
+util.func private @tile_group_1d_split(%tg: !pcf.threadgroup<#pcf.sequential>,
+                                        %k: index) {
+  pcf.shared_executor.tile_group %tg split [[%k]]
+      (%left: !pcf.cluster<#pcf.sequential, (0 -> d0), left>,
+       %right: !pcf.cluster<#pcf.sequential, (d0 -> s0), right>) {
     pcf.return
-  }
-  util.optimization_barrier %0 : tensor<4x8xf32>
+  } : !pcf.threadgroup<#pcf.sequential>
   util.return
 }
 
-// CHECK-LABEL: @sync_shared_executor
-//       CHECK:   pcf.shared_executor sync scope(#pcf.sequential)
-//  CHECK-NEXT:     execute(%{{.*}} = %{{.*}})
-//  CHECK-SAME:         [%{{.*}}: !pcf.threadgroup<#pcf.sequential>]
+// CHECK-LABEL: @tile_group_1d_split
+//       CHECK:   pcf.shared_executor.tile_group
+//  CHECK-SAME:       split {{\[}}[%{{.*}}]]
+//  CHECK-NEXT:       (%{{.*}}: !pcf.cluster<#pcf.sequential, (0 -> d0), left>,
+//  CHECK-SAME:        %{{.*}}: !pcf.cluster<#pcf.sequential, (d0 -> s0), right>)
+
+// -----
+
+// Tile group: no splits (single cluster covering full range).
+util.func private @tile_group_no_split(%tg: !pcf.threadgroup<#pcf.sequential>) {
+  pcf.shared_executor.tile_group %tg split [[]]
+      (%full: !pcf.cluster<#pcf.sequential, (0 -> s0), full>) {
+    pcf.return
+  } : !pcf.threadgroup<#pcf.sequential>
+  util.return
+}
+
+// CHECK-LABEL: @tile_group_no_split
+//       CHECK:   pcf.shared_executor.tile_group
+//  CHECK-SAME:       split {{\[}}[]]
+
+// -----
+
+// Tile group from a 2D cluster, split dim0 only.
+util.func private @tile_group_from_cluster(
+    %cluster: !pcf.cluster<#pcf.test_scope, (0 -> s0) x (0 -> s1), src>,
+    %k: index) {
+  pcf.shared_executor.tile_group %cluster split [[%k], []]
+      (%top: !pcf.cluster<#pcf.test_scope, (0 -> d0) x (0 -> s1), top>,
+       %bot: !pcf.cluster<#pcf.test_scope, (d0 -> s0) x (0 -> s1), bot>) {
+    pcf.return
+  } : !pcf.cluster<#pcf.test_scope, (0 -> s0) x (0 -> s1), src>
+  util.return
+}
+
+// CHECK-LABEL: @tile_group_from_cluster
+//       CHECK:   pcf.shared_executor.tile_group
+//  CHECK-SAME:       split {{\[}}[%{{.*}}], []]
+
+// -----
+
+// Tile group: 2D full split -> 4 clusters.
+util.func private @tile_group_2d_full(
+    %cluster: !pcf.cluster<#pcf.test_scope, (0 -> s0) x (0 -> s1), src>,
+    %j: index, %k: index) {
+  pcf.shared_executor.tile_group %cluster split [[%j], [%k]]
+      (%c00: !pcf.cluster<#pcf.test_scope, (0 -> d0) x (0 -> d1), c00>,
+       %c01: !pcf.cluster<#pcf.test_scope, (0 -> d0) x (d1 -> s1), c01>,
+       %c10: !pcf.cluster<#pcf.test_scope, (d0 -> s0) x (0 -> d1), c10>,
+       %c11: !pcf.cluster<#pcf.test_scope, (d0 -> s0) x (d1 -> s1), c11>) {
+    pcf.return
+  } : !pcf.cluster<#pcf.test_scope, (0 -> s0) x (0 -> s1), src>
+  util.return
+}
+
+// CHECK-LABEL: @tile_group_2d_full
+//       CHECK:   pcf.shared_executor.tile_group
+//  CHECK-SAME:       split {{\[}}[%{{.*}}], [%{{.*}}]]
+
+// -----
+
+// run_cluster: basic with result.
+util.func private @run_cluster_basic(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>,
+    %k: index) {
+  %result = pcf.shared_executor.run_cluster(%c)[%k]
+      (%s: f32, %u: index) {
+    pcf.cluster_yield uniform(%u : index) %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>
+  util.return
+}
+
+// CHECK-LABEL: @run_cluster_basic
+//       CHECK:   pcf.shared_executor.run_cluster(%{{.*}})[%{{.*}}]
+//  CHECK-NEXT:       (%{{.*}}: f32, %{{.*}}: index)
+//       CHECK:     pcf.cluster_yield uniform(%{{.*}} : index) %{{.*}} : f32
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>
+
+// -----
+
+// run_cluster: no result.
+util.func private @run_cluster_void(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
+  pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32) {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+  util.return
+}
+
+// CHECK-LABEL: @run_cluster_void
+//       CHECK:   pcf.shared_executor.run_cluster(%{{.*}})[]
+//  CHECK-NEXT:       (%{{.*}}: f32)
+//       CHECK:     pcf.cluster_yield
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+
+// -----
+
+// run_cluster: multiple sources.
+util.func private @run_cluster_multi_source(
+    %c0: !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>,
+    %c1: !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>,
+    %k: index) {
+  pcf.shared_executor.run_cluster(%c0, %c1)[%k]
+      (%s0: f32, %u1: index) {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>,
+       !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>)
+  util.return
+}
+
+// CHECK-LABEL: @run_cluster_multi_source
+//       CHECK:   pcf.shared_executor.run_cluster(%{{.*}}, %{{.*}})[%{{.*}}]
+//  CHECK-NEXT:       (%{{.*}}: f32, %{{.*}}: index)
+//       CHECK:     pcf.cluster_yield
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>,
+//  CHECK-SAME:        !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>)
+
+// -----
+
+// run_thread: basic with result and thread IDs.
+util.func private @run_thread_basic(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>,
+    %k: index) {
+  %result = pcf.shared_executor.run_thread(%c)[%k]
+      (%p: f32, %u: index)[%tid: index] {
+    pcf.cluster_yield uniform(%u : index) %p : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>
+  util.return
+}
+
+// CHECK-LABEL: @run_thread_basic
+//       CHECK:   pcf.shared_executor.run_thread(%{{.*}})[%{{.*}}]
+//  CHECK-NEXT:       (%{{.*}}: f32, %{{.*}}: index)[%{{.*}}: index]
+//       CHECK:     pcf.cluster_yield uniform(%{{.*}} : index) %{{.*}} : f32
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>
+
+// -----
+
+// run_thread: no result, only thread ID.
+util.func private @run_thread_void(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), c0>) {
+  pcf.shared_executor.run_thread(%c)[]
+      ()[%tid: index] {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), c0>)
+  util.return
+}
+
+// CHECK-LABEL: @run_thread_void
+//       CHECK:   pcf.shared_executor.run_thread(%{{.*}})[]
+//  CHECK-NEXT:       ()[%{{.*}}: index]
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> s0), c0>)
+
+// -----
+
+// run_thread: multiple sources.
+util.func private @run_thread_multi_source(
+    %c0: !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>,
+    %c1: !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>,
+    %k: index) {
+  pcf.shared_executor.run_thread(%c0, %c1)[%k]
+      (%p0: f32, %u1: index)[%tid: index] {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>,
+       !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>)
+  util.return
+}
+
+// CHECK-LABEL: @run_thread_multi_source
+//       CHECK:   pcf.shared_executor.run_thread(%{{.*}}, %{{.*}})[%{{.*}}]
+//  CHECK-NEXT:       (%{{.*}}: f32, %{{.*}}: index)[%{{.*}}: index]
+//       CHECK:     pcf.cluster_yield
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>,
+//  CHECK-SAME:        !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>)
+
+// -----
+
+// run_cluster: yield values only (no uniform).
+util.func private @run_cluster_values_only(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
+  %result = pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32) {
+    pcf.cluster_yield %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>
+  util.return
+}
+
+// CHECK-LABEL: @run_cluster_values_only
+//       CHECK:     pcf.cluster_yield %{{.*}} : f32
+//   CHECK-NOT:     uniform(
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>
+
+// -----
+
+// run_cluster: yield uniform only.
+util.func private @run_cluster_uniform_only(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>) {
+  %result = pcf.shared_executor.run_cluster(%c)[]
+      (%u: index) {
+    pcf.cluster_yield uniform(%u : index)
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>
+  util.return
+}
+
+// CHECK-LABEL: @run_cluster_uniform_only
+//       CHECK:     pcf.cluster_yield uniform(%{{.*}} : index)
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>

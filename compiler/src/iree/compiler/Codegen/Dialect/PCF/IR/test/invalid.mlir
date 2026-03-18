@@ -148,102 +148,311 @@ util.func private @shared_executor_sref_scope_mismatch(%init: tensor<4x8xf32>) {
 
 // -----
 
-// Readonly sref scope mismatch with op scope.
-util.func private @shared_executor_readonly_scope_mismatch(
-    %input: tensor<4x8xf32>, %output: tensor<4x8xf32>) {
-  // expected-error@+1 {{readonly sref scope must match op scope}}
-  %0 = pcf.shared_executor scope(#pcf.sequential)
-    execute(%in_ref <- %input, %out_ref = %output)
-        [%tg: !pcf.threadgroup<#pcf.sequential>]
-         : (!pcf.sref<4x8xf32, #pcf.test_scope>,
-            !pcf.sref<4x8xf32, #pcf.sequential>)
-        -> (tensor<4x8xf32>) {
+// Tile group: wrong number of block args.
+util.func private @tile_group_wrong_num_args(%tg: !pcf.threadgroup<#pcf.sequential>, %k: index) {
+  // expected-error@+1 {{expected 2 cluster block arguments but got 1}}
+  pcf.shared_executor.tile_group %tg split [[%k]]
+      (%only: !pcf.cluster<#pcf.sequential, (0 -> d0), only>) {
     pcf.return
-  }
+  } : !pcf.threadgroup<#pcf.sequential>
   util.return
 }
 
 // -----
 
-// Readwrite sref shape mismatch with result type.
-util.func private @shared_executor_readwrite_shape_mismatch(
-    %init: tensor<4x8xf32>) {
-  // expected-error@+1 {{readwrite sref at index 0 shape mismatch with result type}}
-  %0 = pcf.shared_executor scope(#pcf.sequential)
-    execute(%ref = %init)
-        [%tg: !pcf.threadgroup<#pcf.sequential>]
-         : (!pcf.sref<8x8xf32, #pcf.sequential>)
-        -> (tensor<4x8xf32>) {
+// Tile group: block arg is not a cluster type.
+util.func private @tile_group_non_cluster_arg(%tg: !pcf.threadgroup<#pcf.sequential>) {
+  // expected-error@+1 {{block argument must be !pcf.cluster}}
+  pcf.shared_executor.tile_group %tg split [[]]
+      (%bad: index) {
     pcf.return
-  }
+  } : !pcf.threadgroup<#pcf.sequential>
   util.return
 }
 
 // -----
 
-// Readwrite sref element type mismatch with result type.
-util.func private @shared_executor_readwrite_eltype_mismatch(
-    %init: tensor<4x8xf32>) {
-  // expected-error@+1 {{readwrite sref at index 0 element type mismatch with result type}}
-  %0 = pcf.shared_executor scope(#pcf.sequential)
-    execute(%ref = %init)
-        [%tg: !pcf.threadgroup<#pcf.sequential>]
-         : (!pcf.sref<4x8xf16, #pcf.sequential>)
-        -> (tensor<4x8xf32>) {
+// Tile group: source has struct elements.
+util.func private @tile_group_struct_source(
+    %tg: !pcf.threadgroup<#pcf.sequential, {index}>) {
+  // expected-error@+1 {{source must not have struct elements}}
+  pcf.shared_executor.tile_group %tg split [[]]
+      (%c: !pcf.cluster<#pcf.sequential, (0 -> s0), c0>) {
     pcf.return
-  }
+  } : !pcf.threadgroup<#pcf.sequential, {index}>
   util.return
 }
 
 // -----
 
-// Last region argument not being !pcf.threadgroup type.
-util.func private @shared_executor_not_threadgroup(%init: tensor<4x8xf32>) {
-  // expected-error@+1 {{expected last region argument to be !pcf.threadgroup, got 'index'}}
-  pcf.shared_executor scope(#pcf.sequential)
-    execute[%tg: index] {
+// Tile group: scope mismatch.
+util.func private @tile_group_scope_mismatch(
+    %tg: !pcf.threadgroup<#pcf.sequential>, %k: index) {
+  // expected-error@+1 {{cluster scope mismatch}}
+  pcf.shared_executor.tile_group %tg split [[%k]]
+      (%left: !pcf.cluster<#pcf.test_scope, (0 -> d0), left>,
+       %right: !pcf.cluster<#pcf.test_scope, (d0 -> s0), right>) {
     pcf.return
-  }
+  } : !pcf.threadgroup<#pcf.sequential>
   util.return
 }
 
 // -----
 
-// Initializer yield count mismatch with leading args.
-util.func private @shared_executor_yield_count_mismatch(
-    %output: tensor<4x8xf32>) {
-  // expected-error@+1 {{initializer yield operand count (2) does not match num_leading_args (1)}}
-  %0 = pcf.shared_executor scope(#pcf.sequential)
-    initialize {
-      %smem = pcf.alloc() : !pcf.sref<128x64xf16, #pcf.sequential>
-      %smem2 = pcf.alloc() : !pcf.sref<64x64xf16, #pcf.sequential>
-      pcf.yield %smem, %smem2 : !pcf.sref<128x64xf16, #pcf.sequential>, !pcf.sref<64x64xf16, #pcf.sequential>
-    } -> (%smem: !pcf.sref<128x64xf16, #pcf.sequential>)
-    execute(%ref = %output)
-        [%tg: !pcf.threadgroup<#pcf.sequential>]
-         : (!pcf.sref<4x8xf32, #pcf.sequential>)
-        -> (tensor<4x8xf32>) {
+// Tile group: result cluster has struct elements.
+util.func private @tile_group_cluster_with_struct(
+    %tg: !pcf.threadgroup<#pcf.sequential>) {
+  // expected-error@+1 {{result clusters must not have struct elements}}
+  pcf.shared_executor.tile_group %tg split [[]]
+      (%c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {index}, c0>) {
     pcf.return
-  }
+  } : !pcf.threadgroup<#pcf.sequential>
   util.return
 }
 
 // -----
 
-// Initializer yield type mismatch with leading args.
-util.func private @shared_executor_yield_type_mismatch(
-    %output: tensor<4x8xf32>) {
-  // expected-error@+1 {{initializer yield type '!pcf.sref<64x64xf16, #pcf.sequential>' at index 0 does not match leading arg type '!pcf.sref<128x64xf16, #pcf.sequential>'}}
-  %0 = pcf.shared_executor scope(#pcf.sequential)
-    initialize {
-      %smem = pcf.alloc() : !pcf.sref<64x64xf16, #pcf.sequential>
-      pcf.yield %smem : !pcf.sref<64x64xf16, #pcf.sequential>
-    } -> (%smem: !pcf.sref<128x64xf16, #pcf.sequential>)
-    execute(%ref = %output)
-        [%tg: !pcf.threadgroup<#pcf.sequential>]
-         : (!pcf.sref<4x8xf32, #pcf.sequential>)
-        -> (tensor<4x8xf32>) {
-    pcf.return
-  }
+// Cluster type: unknown keyword in struct group.
+// expected-error@+1 {{expected 'private', 'shared', or 'uniform'}}
+util.func private @cluster_unknown_keyword(!pcf.cluster<#pcf.test_scope, (0 -> s0), unknown: {index}, c0>)
+
+// -----
+
+// Cluster type: duplicate keyword in struct group.
+// expected-error@+1 {{duplicate keyword 'shared'}}
+util.func private @cluster_duplicate_keyword(!pcf.cluster<#pcf.test_scope, (0 -> s0), shared: {index}, shared: {f32}, c0>)
+
+// -----
+
+// run_cluster: result has private types.
+util.func private @run_cluster_private_result(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
+  // expected-error@+1 {{run_cluster result must not have private types}}
+  %r = pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32) {
+    pcf.cluster_yield %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>
   util.return
 }
+
+// -----
+
+// run_thread: result has shared types.
+util.func private @run_thread_shared_result(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>) {
+  // expected-error@+1 {{run_thread result must not have shared types}}
+  %r = pcf.shared_executor.run_thread(%c)[]
+      (%p: f32)[%tid: index] {
+    pcf.cluster_yield %p : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>
+  util.return
+}
+
+// -----
+
+// run_cluster: scope mismatch between sources.
+util.func private @run_cluster_scope_mismatch(
+    %c0: !pcf.cluster<#pcf.sequential, (0 -> s0), a>,
+    %c1: !pcf.cluster<#pcf.test_scope, (0 -> s0), b>) {
+  // expected-error@+1 {{all source clusters must have the same scope}}
+  pcf.shared_executor.run_cluster(%c0, %c1)[]
+      () {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), a>,
+       !pcf.cluster<#pcf.test_scope, (0 -> s0), b>)
+  util.return
+}
+
+// -----
+
+// run_cluster: wrong range value count.
+util.func private @run_cluster_wrong_range_count(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> d0), c0>,
+    %k: index, %extra: index) {
+  // expected-error@+1 {{expected 1 range values but got 2}}
+  pcf.shared_executor.run_cluster(%c)[%k, %extra]
+      () {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), c0>)
+  util.return
+}
+
+// -----
+
+// run_cluster: block arg type mismatch.
+util.func private @run_cluster_arg_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
+  // expected-error@+1 {{block argument 0 type mismatch}}
+  pcf.shared_executor.run_cluster(%c)[]
+      (%bad: i32) {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+  util.return
+}
+
+// -----
+
+// run_cluster: boundsMap mismatch between sources.
+util.func private @run_cluster_boundsmap_mismatch(
+    %c0: !pcf.cluster<#pcf.sequential, (0 -> s0), a>,
+    %c1: !pcf.cluster<#pcf.sequential, (0 -> d0), b>,
+    %k: index) {
+  // expected-error@+1 {{'pcf.shared_executor.run_cluster' op all source clusters must have the same boundsMap}}
+  pcf.shared_executor.run_cluster(%c0, %c1)[%k]
+      () {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), a>,
+       !pcf.cluster<#pcf.sequential, (0 -> d0), b>)
+  util.return
+}
+
+// -----
+
+// run_cluster: yield uniform type mismatch.
+util.func private @run_cluster_yield_uniform_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>) {
+  %cst = arith.constant 0.0 : f32
+  // expected-error@+1 {{'pcf.shared_executor.run_cluster' op yield uniform types do not match result}}
+  %r = pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32, %u: index) {
+    pcf.cluster_yield uniform(%cst : f32) %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>
+  util.return
+}
+
+// -----
+
+// run_cluster: yield value type mismatch.
+util.func private @run_cluster_yield_value_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>) {
+  // expected-error@+1 {{'pcf.shared_executor.run_cluster' op yield value types do not match result}}
+  %r = pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32, %u: index) {
+    pcf.cluster_yield uniform(%u : index) %u : index
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>
+  util.return
+}
+
+// -----
+
+// run_thread: block arg type mismatch.
+util.func private @run_thread_arg_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>) {
+  // expected-error@+1 {{'pcf.shared_executor.run_thread' op block argument 0 type mismatch}}
+  pcf.shared_executor.run_thread(%c)[]
+      (%bad: i32)[%tid: index] {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>)
+  util.return
+}
+
+// -----
+
+// run_cluster: yield with operands but no result.
+util.func private @run_cluster_yield_with_operands_no_result(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
+  // expected-error@+1 {{cluster_yield must have no operands when parent has no result}}
+  pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32) {
+    pcf.cluster_yield %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+  util.return
+}
+
+// -----
+
+// run_cluster: result scope mismatch.
+util.func private @run_cluster_result_scope_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
+  // expected-error@+1 {{result cluster scope mismatch}}
+  %r = pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32) {
+    pcf.cluster_yield %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+    -> !pcf.cluster<#pcf.test_scope, (0 -> s0), shared: {f32}, c0>
+  util.return
+}
+
+// -----
+
+// run_cluster: result boundsMap mismatch.
+util.func private @run_cluster_result_boundsmap_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
+  // expected-error@+1 {{result cluster boundsMap mismatch}}
+  %r = pcf.shared_executor.run_cluster(%c)[]
+      (%s: f32) {
+    pcf.cluster_yield %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>
+  util.return
+}
+
+// -----
+
+// run_thread: wrong number of block args (too many thread IDs).
+util.func private @run_thread_wrong_thread_id_count(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>) {
+  // expected-error@+1 {{expected 2 block arguments but got 3}}
+  pcf.shared_executor.run_thread(%c)[]
+      (%p: f32)[%tid0: index, %tid1: index] {
+    pcf.cluster_yield
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>)
+  util.return
+}
+
+// -----
+
+// to_sref: shape mismatch.
+util.func private @to_sref_shape_mismatch(%input: tensor<128x256xf16>) {
+  // expected-error@+1 {{result sref shape}}
+  %sref = pcf.to_sref %input : tensor<128x256xf16> -> !pcf.sref<64x256xf16, #pcf.test_scope>
+  util.return
+}
+
+// -----
+
+// to_sref: element type mismatch.
+util.func private @to_sref_eltype_mismatch(%input: tensor<128x256xf16>) {
+  // expected-error@+1 {{result sref element type}}
+  %sref = pcf.to_sref %input : tensor<128x256xf16> -> !pcf.sref<128x256xf32, #pcf.test_scope>
+  util.return
+}
+
+// -----
+
+// Note: The "expected at least one source cluster" verifier check on
+// run_cluster/run_thread is only reachable via programmatic construction,
+// because the parser requires at least one source type in the type list.
+
+// run_thread: yield uniform type mismatch.
+util.func private @run_thread_yield_uniform_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>) {
+  %cst = arith.constant 0.0 : f32
+  // expected-error@+1 {{'pcf.shared_executor.run_thread' op yield uniform types do not match result}}
+  %r = pcf.shared_executor.run_thread(%c)[]
+      (%p: f32, %u: index)[%tid: index] {
+    pcf.cluster_yield uniform(%cst : f32) %p : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>
+  util.return
+}
+
+// -----
+
+// run_thread: yield value type mismatch.
+util.func private @run_thread_yield_value_mismatch(
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>) {
+  // expected-error@+1 {{'pcf.shared_executor.run_thread' op yield value types do not match result}}
+  %r = pcf.shared_executor.run_thread(%c)[]
+      (%p: f32, %u: index)[%tid: index] {
+    pcf.cluster_yield uniform(%u : index) %u : index
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>
+  util.return
+}
+
+

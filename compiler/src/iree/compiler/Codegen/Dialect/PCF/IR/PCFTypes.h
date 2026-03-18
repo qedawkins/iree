@@ -7,8 +7,10 @@
 #ifndef IREE_COMPILER_CODEGEN_DIALECT_PCF_IR_PCFTYPES_H_
 #define IREE_COMPILER_CODEGEN_DIALECT_PCF_IR_PCFTYPES_H_
 
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFDialect.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/TypeSupport.h"

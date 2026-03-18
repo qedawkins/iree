@@ -216,6 +216,70 @@ def PCF_ThreadGroupType : TypeDef<PCF_Dialect, "ThreadGroup", []> {
 
 def PCF_AnyThreadGroup : AnyTypeOf<[PCF_ThreadGroupType]>;
 
+def PCF_ClusterType : TypeDef<PCF_Dialect, "Cluster", []> {
+  let mnemonic = "cluster";
+
+  let summary = [{A rectangular subset of a threadgroup's worker grid.}];
+  let description = [{
+    Represents a subset of workers within a scope's grid, defined by
+    per-dimension half-open ranges [lower, upper). Range bounds are
+    affine expressions over two kinds of variables:
+
+    - d0, d1, ... -- dependent variables. Each distinct d variable adds
+      one SSA index operand requirement to ops using the type.
+    - s0, s1, ... -- scope size symbols, implicit from the scope's
+      getWorkerCounts. Do NOT add SSA dependencies.
+
+    The bounds are stored as a single AffineMap with 2 * rank results:
+    [lower0, upper0, lower1, upper1, ...]. The map's dims are dependent
+    variables and its symbols are scope grid sizes.
+
+    Examples:
+    ```
+    !pcf.cluster<#scope, (0 -> d0), left>
+    !pcf.cluster<#scope, (0 -> d0) x (d0 -> s1), tg.left>
+    !pcf.cluster<#scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, uniform: {index}, c0>
+    !pcf.cluster<#scope, (0 -> d0), uniform: {index}, c0>
+    ```
+  }];
+
+  let parameters = (ins
+      AttrParameter<"ScopeAttrInterface", "scope">:$scope,
+      "AffineMap":$boundsMap,
+      OptionalArrayRefParameter<"Type">:$privateTypes,
+      OptionalArrayRefParameter<"Type">:$sharedTypes,
+      OptionalArrayRefParameter<"Type">:$uniformTypes,
+      "NamespacedSymbolAttr":$id);
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns the number of grid dimensions.
+    int64_t getRank() const { return getBoundsMap().getNumResults() / 2; }
+
+    /// Returns the number of dependent SSA values ops using this type need.
+    int64_t getNumDependentValues() const { return getBoundsMap().getNumDims(); }
+
+    /// Returns the lower bound expression for dimension i.
+    AffineExpr getLowerBound(int64_t i) const {
+      return getBoundsMap().getResult(2 * i);
+    }
+
+    /// Returns the upper bound expression for dimension i.
+    AffineExpr getUpperBound(int64_t i) const {
+      return getBoundsMap().getResult(2 * i + 1);
+    }
+
+    /// Returns true if the cluster carries any struct elements.
+    bool hasStructElements() const {
+      return !getPrivateTypes().empty() || !getSharedTypes().empty() ||
+             !getUniformTypes().empty();
+    }
+  }];
+}
+
+def PCF_AnyCluster : AnyTypeOf<[PCF_ClusterType]>;
+
 //===----------------------------------------------------------------------===//
 // Base pcf attributes
 //===----------------------------------------------------------------------===//
@@ -299,6 +363,44 @@ def PCF_SyncOnReturnAttr
       // Nothing to do.
       return;
     }
+  }];
+}
+
+def PCF_NamespacedSymbolAttr
+    : AttrDef<PCF_Dialect, "NamespacedSymbol", []> {
+  let mnemonic = "ns_sym";
+  let summary = [{A hierarchical symbol path for private namespace resolution.}];
+  let description = [{
+    Stores an ordered list of path segments forming a hierarchical symbol
+    identifier. The last segment is the leaf symbol name; preceding segments
+    are namespace qualifiers. Used as the `id` field on `!pcf.cluster` types
+    to give clusters stable, symbolically resolvable identifiers.
+
+    Printed as a dot-joined bare keyword:
+    ```
+    tg.left          // path: ["tg", "left"]
+    left             // path: ["left"]
+    outer.inner.leaf // path: ["outer", "inner", "leaf"]
+    ```
+  }];
+
+  let parameters = (ins ArrayRefParameter<"StringAttr">:$path);
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns the last segment (the symbol name).
+    StringAttr getLeaf() const {
+      assert(!getPath().empty() && "leaf requires non-empty path");
+      return getPath().back();
+    }
+
+    /// Returns all segments except the last (the namespace path).
+    ArrayRef<StringAttr> getNamespacePath() const {
+      return getPath().drop_back();
+    }
+
+    /// Returns true if the path has exactly one segment (leaf-only).
+    bool isLeafOnly() const { return getPath().size() == 1; }
   }];
 }
 
