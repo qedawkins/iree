@@ -36,6 +36,7 @@ iree_cc_library(
     "LowerStructuralPCF.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"
+    "TestNamespaceResolution.cpp"
     "Transforms.cpp"
   DEPS
     ::PassesIncGen

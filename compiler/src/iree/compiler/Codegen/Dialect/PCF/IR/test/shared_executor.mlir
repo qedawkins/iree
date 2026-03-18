@@ -141,7 +141,7 @@ util.func private @no_operands() {
 
 // -----
 
-// Tile group: 1D split into 2 clusters.
+// Tile group: 1D split into 2 clusters (anonymous namespace).
 util.func private @tile_group_1d_split(%tg: !pcf.threadgroup<#pcf.sequential>,
                                         %k: index) {
   pcf.shared_executor.tile_group %tg split [[%k]]
@@ -210,6 +210,42 @@ util.func private @tile_group_2d_full(
 // CHECK-LABEL: @tile_group_2d_full
 //       CHECK:   pcf.shared_executor.tile_group
 //  CHECK-SAME:       split {{\[}}[%{{.*}}], [%{{.*}}]]
+
+// -----
+
+// Tile group with named namespace.
+util.func private @tile_group_named_namespace(
+    %tg: !pcf.threadgroup<#pcf.sequential>, %k: index) {
+  pcf.shared_executor.tile_group %tg ns(tg) split [[%k]]
+      (%left: !pcf.cluster<#pcf.sequential, (0 -> d0), tg.left>,
+       %right: !pcf.cluster<#pcf.sequential, (d0 -> s0), tg.right>) {
+    pcf.return
+  } : !pcf.threadgroup<#pcf.sequential>
+  util.return
+}
+
+// CHECK-LABEL: @tile_group_named_namespace
+//       CHECK:   pcf.shared_executor.tile_group %{{.*}} ns(tg) split
+//  CHECK-SAME:       {{\[}}[%{{.*}}]]
+//  CHECK-NEXT:       (%{{.*}}: !pcf.cluster<#pcf.sequential, (0 -> d0), tg.left>,
+//  CHECK-SAME:        %{{.*}}: !pcf.cluster<#pcf.sequential, (d0 -> s0), tg.right>)
+
+// -----
+
+// Tile group with anonymous namespace (no ns keyword).
+util.func private @tile_group_anonymous_namespace(
+    %tg: !pcf.threadgroup<#pcf.sequential>, %k: index) {
+  pcf.shared_executor.tile_group %tg split [[%k]]
+      (%a: !pcf.cluster<#pcf.sequential, (0 -> d0), a>,
+       %b: !pcf.cluster<#pcf.sequential, (d0 -> s0), b>) {
+    pcf.return
+  } : !pcf.threadgroup<#pcf.sequential>
+  util.return
+}
+
+// CHECK-LABEL: @tile_group_anonymous_namespace
+//   CHECK-NOT:   ns(
+//       CHECK:   pcf.shared_executor.tile_group %{{.*}} split
 
 // -----
 

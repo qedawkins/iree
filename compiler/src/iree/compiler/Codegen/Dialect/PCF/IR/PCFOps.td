@@ -471,7 +471,6 @@ def SharedExecutorOp : PCF_Op<"shared_executor", [
   let arguments = (ins PCF_ScopeAttrInterface:$scope,
       Variadic<AnyRankedTensorOrMemRef>:$readonlyInits,
       Variadic<AnyRankedTensorOrMemRef>:$readwriteInits,
-      DefaultValuedProp<BoolProp, "false">:$sync_on_return,
       IntProp<"int64_t">:$num_leading_args,
       IntProp<"int64_t">:$num_readonly_refs);
 
@@ -488,13 +487,11 @@ def SharedExecutorOp : PCF_Op<"shared_executor", [
   let builders = [
       // Builder with readwrite inits only (results inferred from inits).
       OpBuilder<(ins "ScopeAttrInterface":$scope,
-          "ValueRange":$readwriteInits,
-          CArg<"bool", "false">:$sync_on_return)>,
+          "ValueRange":$readwriteInits)>,
       // Builder with readonly and readwrite inits.
       OpBuilder<(ins "ScopeAttrInterface":$scope,
           "ValueRange":$readonlyInits,
-          "ValueRange":$readwriteInits,
-          CArg<"bool", "false">:$sync_on_return)>,
+          "ValueRange":$readwriteInits)>,
   ];
 
   let extraClassDeclaration = [{
@@ -546,6 +543,7 @@ def SharedExecutorOp : PCF_Op<"shared_executor", [
 def TileGroupOp : PCF_Op<"shared_executor.tile_group", [
        RecursiveMemoryEffects,
        SingleBlock,
+       DeclareOpInterfaceMethods<PCF_NamespaceOpInterface>,
      ]> {
   let summary = [{
     Partition a threadgroup or cluster into sub-clusters at split points.
@@ -563,11 +561,25 @@ def TileGroupOp : PCF_Op<"shared_executor.tile_group", [
     The source must not have struct elements (destructuring with struct is
     currently illegal). All result clusters have no struct elements.
 
-    Example:
+    An optional namespace name can be specified with `ns(name)`. When
+    present, all cluster IDs must be qualified with the namespace name as
+    the first path segment. When absent (anonymous namespace), all cluster
+    IDs must be leaf-only.
+
+    Example without namespace (anonymous):
     ```mlir
     pcf.shared_executor.tile_group %tg split [[%k]]
-        (%left: !pcf.cluster<#scope, (0 -> d0)>,
-         %right: !pcf.cluster<#scope, (d0 -> s0)>) {
+        (%left: !pcf.cluster<#scope, (0 -> d0), left>,
+         %right: !pcf.cluster<#scope, (d0 -> s0), right>) {
+      pcf.return
+    } : !pcf.threadgroup<#scope>
+    ```
+
+    Example with named namespace:
+    ```mlir
+    pcf.shared_executor.tile_group %tg ns(tg) split [[%k]]
+        (%left: !pcf.cluster<#scope, (0 -> d0), tg.left>,
+         %right: !pcf.cluster<#scope, (d0 -> s0), tg.right>) {
       pcf.return
     } : !pcf.threadgroup<#scope>
     ```
@@ -576,7 +588,8 @@ def TileGroupOp : PCF_Op<"shared_executor.tile_group", [
   let arguments = (ins
       AnyType:$source,
       Variadic<Index>:$splitPoints,
-      DenseI64ArrayAttr:$numSplitsPerDim);
+      DenseI64ArrayAttr:$numSplitsPerDim,
+      OptionalAttr<StrAttr>:$nsName);
 
   let regions = (region MinSizedRegion<1>:$body);
 
@@ -588,7 +601,8 @@ def TileGroupOp : PCF_Op<"shared_executor.tile_group", [
       OpBuilder<(ins
           "Value":$source,
           "ArrayRef<SmallVector<Value>>":$splitPointsPerDim,
-          "ArrayRef<ClusterType>":$resultClusterTypes)>,
+          "ArrayRef<ClusterType>":$resultClusterTypes,
+          CArg<"StringAttr", "{}">:$nsName)>,
   ];
 
   let extraClassDeclaration = [{
