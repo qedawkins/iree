@@ -294,6 +294,49 @@ struct WriteSliceOpInterface
   }
 };
 
+struct ToSrefOpInterface
+    : BufferizableOpInterface::ExternalModel<ToSrefOpInterface, PCF::ToSrefOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
+                              const AnalysisState &state) const {
+    // Returns true because the tensor input is consumed to create the sref
+    // view. While to_sref is logically a view (not a read), returning false
+    // here causes MLIR's alias analysis to traverse the Equivalent aliasing
+    // chain and call isValueRead on the sref result, which is not a
+    // TensorType and triggers an assertion failure.
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                               const AnalysisState &state) const {
+    // to_sref is a readonly binding — it never writes.
+    return false;
+  }
+
+  AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
+                                      const AnalysisState &state) const {
+    // The sref result aliases the input buffer.
+    return {{op->getResult(0), BufferRelation::Equivalent,
+             /*isDefinite=*/true}};
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options,
+                          BufferizationState &state) const {
+    auto toSrefOp = cast<PCF::ToSrefOp>(op);
+
+    // Get the buffer for the tensor input.
+    if (isa<RankedTensorType>(toSrefOp.getInput().getType())) {
+      FailureOr<Value> newInput =
+          getBuffer(rewriter, toSrefOp.getInput(), options, state);
+      if (failed(newInput)) {
+        return failure();
+      }
+      toSrefOp.getInputMutable().assign(*newInput);
+    }
+    return success();
+  }
+};
+
 struct ReadSliceOpInterface
     : BufferizableOpInterface::ExternalModel<ReadSliceOpInterface,
                                              PCF::ReadSliceOp> {
@@ -352,6 +395,7 @@ void registerBufferizationExternalModels(DialectRegistry &registry) {
     GenericOp::attachInterface<GenericOpInterface>(*ctx);
     LoopOp::attachInterface<LoopOpInterface>(*ctx);
     ReadSliceOp::attachInterface<ReadSliceOpInterface>(*ctx);
+    ToSrefOp::attachInterface<ToSrefOpInterface>(*ctx);
     WriteSliceOp::attachInterface<WriteSliceOpInterface>(*ctx);
   });
 }

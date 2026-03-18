@@ -470,3 +470,47 @@ func.func @convert_get_memref_dynamic_layout(%arg0: memref<?x?xi32, strided<[?, 
 //       CHECK:     %[[SV:.+]] = memref.subview %[[ARG0]][0, 0] [%{{.*}}, %{{.*}}] [1, 1] : memref<?x?xi32, strided<[?, ?], offset: ?>> to memref<?x?xi32, strided<[?, ?], offset: ?>>
 //       CHECK:     util.optimization_barrier %[[SV]]
 //       CHECK:     pcf.return
+
+// -----
+
+// Verify that to_sref with a memref input is removed (replaced by the input).
+func.func @convert_to_sref(%arg0: memref<128x256xf16>) {
+  pcf.generic scope(#pcf.test_scope)
+    execute(%ref = %arg0)[%id: index, %n: index]
+         : (!pcf.sref<128x256xf16, #pcf.test_scope>)
+        -> (memref<128x256xf16>) {
+    %sref = pcf.to_sref %arg0 : memref<128x256xf16> -> !pcf.sref<128x256xf16, #pcf.test_scope>
+    util.optimization_barrier %sref : !pcf.sref<128x256xf16, #pcf.test_scope>
+    pcf.return
+  }
+  return
+}
+
+// CHECK-LABEL: @convert_to_sref
+//  CHECK-SAME:     %[[ARG0:[A-Za-z0-9_]+]]: memref<128x256xf16>
+//       CHECK:   pcf.generic
+//  CHECK-NEXT:     execute[{{.*}}] {
+//       CHECK:     util.optimization_barrier %[[ARG0]] : memref<128x256xf16>
+//       CHECK:     pcf.return
+
+// -----
+
+// Verify that to_sref with a strided memref input is removed.
+func.func @convert_to_sref_strided(%arg0: memref<?x?xf32, strided<[?, 1]>, 3>) {
+  pcf.generic scope(#pcf.test_scope)
+    execute(%ref = %arg0)[%id: index, %n: index]
+         : (!pcf.sref<?x?xf32, #pcf.test_scope>)
+        -> (memref<?x?xf32, strided<[?, 1]>, 3>) {
+    %sref = pcf.to_sref %arg0 : memref<?x?xf32, strided<[?, 1]>, 3> -> !pcf.sref<?x?xf32, #pcf.test_scope>
+    util.optimization_barrier %sref : !pcf.sref<?x?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  return
+}
+
+// CHECK-LABEL: @convert_to_sref_strided
+//  CHECK-SAME:     %[[ARG0:[A-Za-z0-9_]+]]: memref<?x?xf32, strided<[?, 1]>, 3>
+//       CHECK:   pcf.generic
+//  CHECK-NEXT:     execute[{{.*}}] {
+//       CHECK:     util.optimization_barrier %[[ARG0]] : memref<?x?xf32, strided<[?, 1]>, 3>
+//       CHECK:     pcf.return
