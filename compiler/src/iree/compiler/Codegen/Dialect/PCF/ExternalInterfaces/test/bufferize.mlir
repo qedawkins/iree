@@ -280,3 +280,31 @@ util.func private @bufferize_loop_tied_result_users(%d0: index, %n: index) -> (t
 //   CHECK-DAG:   bufferization.to_tensor %[[INIT]]
 // Untied result: replaced by the loop op's result.
 //   CHECK-DAG:   bufferization.to_tensor %[[LOOP]]#1
+
+// -----
+
+// Verify that to_sref with a tensor input gets bufferized (tensor -> memref).
+util.func private @bufferize_to_sref(%d0: index) {
+  %0 = bufferization.alloc_tensor(%d0) : tensor<?xf16>
+  %sref = pcf.to_sref %0 : tensor<?xf16> -> !pcf.sref<?xf16, #pcf.test_scope>
+  util.optimization_barrier %sref : !pcf.sref<?xf16, #pcf.test_scope>
+  util.return
+}
+
+// CHECK-LABEL: @bufferize_to_sref(
+//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
+//       CHECK:   %[[ALLOC:.+]] = memref.alloc(%[[D0]]) {alignment = 64 : i64} : memref<?xf16>
+//       CHECK:   pcf.to_sref %[[ALLOC]] : memref<?xf16> -> !pcf.sref<?xf16, #pcf.test_scope>
+
+// -----
+
+// Verify that to_sref with a memref input is unchanged by bufferization.
+util.func private @replay_bufferize_to_sref(%input: memref<128x256xf16>) {
+  %sref = pcf.to_sref %input : memref<128x256xf16> -> !pcf.sref<128x256xf16, #pcf.test_scope>
+  util.optimization_barrier %sref : !pcf.sref<128x256xf16, #pcf.test_scope>
+  util.return
+}
+
+// CHECK-LABEL: @replay_bufferize_to_sref
+//  CHECK-SAME:   %[[INPUT:[A-Za-z0-9]+]]: memref<128x256xf16>
+//  CHECK-NEXT:   pcf.to_sref %[[INPUT]] : memref<128x256xf16> -> !pcf.sref<128x256xf16, #pcf.test_scope>
