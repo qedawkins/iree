@@ -2295,6 +2295,125 @@ LogicalResult InitSubscopeOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// TelescopeOp
+//===----------------------------------------------------------------------===//
+
+ParseResult TelescopeOp::parse(OpAsmParser &parser, OperationState &result) {
+  // Parse source operand.
+  OpAsmParser::UnresolvedOperand sourceOperand;
+  if (parser.parseOperand(sourceOperand)) {
+    return failure();
+  }
+
+  // Parse "[" thread ID "]".
+  OpAsmParser::UnresolvedOperand threadIdOperand;
+  if (parser.parseLSquare() || parser.parseOperand(threadIdOperand) ||
+      parser.parseRSquare()) {
+    return failure();
+  }
+
+  // Parse ":" source type.
+  Type sourceType;
+  if (parser.parseColon() || parser.parseType(sourceType)) {
+    return failure();
+  }
+
+  // Parse "->" result types.
+  SmallVector<Type> resultTypes;
+  if (parser.parseArrow()) {
+    return failure();
+  }
+
+  // Handle parenthesized (multiple) or bare (single) result types.
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (parser.parseTypeList(resultTypes) || parser.parseRParen()) {
+      return failure();
+    }
+  } else {
+    Type singleType;
+    if (parser.parseType(singleType)) {
+      return failure();
+    }
+    resultTypes.push_back(singleType);
+  }
+
+  // Resolve operands.
+  if (parser.resolveOperand(sourceOperand, sourceType, result.operands) ||
+      parser.resolveOperand(threadIdOperand,
+                            IndexType::get(parser.getContext()),
+                            result.operands)) {
+    return failure();
+  }
+
+  result.addTypes(resultTypes);
+  return success();
+}
+
+void TelescopeOp::print(OpAsmPrinter &p) {
+  p << " " << getSource() << "[" << getThreadId() << "]";
+  p << " : " << getSource().getType() << " -> ";
+  if (getNumResults() > 1) {
+    p << "(";
+    llvm::interleaveComma(getResultTypes(), p,
+                          [&](Type type) { p << type; });
+    p << ")";
+  } else {
+    p << getResultTypes().front();
+  }
+}
+
+LogicalResult TelescopeOp::verify() {
+  // Must have at least one result.
+  if (getNumResults() == 0) {
+    return emitOpError("must have at least one result");
+  }
+
+  // First result must be a ThreadGroupType with no struct fields.
+  ThreadGroupType resultTgType =
+      dyn_cast<ThreadGroupType>(getResults().front().getType());
+  if (!resultTgType) {
+    return emitOpError("first result must be !pcf.threadgroup, got ")
+           << getResults().front().getType();
+  }
+  if (!resultTgType.getStructTypes().empty()) {
+    return emitOpError("result threadgroup must have no struct fields");
+  }
+
+  ThreadGroupType sourceType = cast<ThreadGroupType>(getSource().getType());
+  ArrayRef<Type> structTypes = sourceType.getStructTypes();
+
+  if (structTypes.empty()) {
+    // No struct fields: must have exactly one result.
+    if (getNumResults() != 1) {
+      return emitOpError("source has no struct fields, expected exactly one "
+                         "result but got ")
+             << getNumResults();
+    }
+  } else {
+    // Has struct fields: remaining results must match.
+    int64_t expectedResults = 1 + static_cast<int64_t>(structTypes.size());
+    if (getNumResults() != expectedResults) {
+      return emitOpError("expected ")
+             << expectedResults << " results (1 threadgroup + "
+             << structTypes.size() << " struct fields) but got "
+             << getNumResults();
+    }
+    for (int64_t i = 0, e = static_cast<int64_t>(structTypes.size()); i < e;
+         ++i) {
+      Type resultFieldType = getResults()[i + 1].getType();
+      if (resultFieldType != structTypes[i]) {
+        return emitOpError("result type ")
+               << resultFieldType << " at index " << (i + 1)
+               << " does not match source struct field type "
+               << structTypes[i];
+      }
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Dialect registration
 //===----------------------------------------------------------------------===//
 

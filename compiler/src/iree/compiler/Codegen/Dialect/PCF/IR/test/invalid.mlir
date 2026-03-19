@@ -639,6 +639,41 @@ util.func private @init_subscope_yield_mismatch(
 
 // -----
 
+// telescope: first result not a threadgroup.
+util.func private @telescope_first_not_tg(
+    %tg: !pcf.threadgroup<#pcf.sequential>, %tid: index) {
+  // expected-error@+1 {{first result must be !pcf.threadgroup, got 'index'}}
+  %bad = pcf.telescope %tg[%tid]
+      : !pcf.threadgroup<#pcf.sequential> -> index
+  util.return
+}
+
+// -----
+
+// telescope: result count mismatch with struct fields.
+util.func private @telescope_result_count_mismatch(
+    %tg: !pcf.threadgroup<#pcf.sequential, {index, f32}>, %tid: index) {
+  // expected-error@+1 {{expected 3 results (1 threadgroup + 2 struct fields) but got 2}}
+  %child_tg, %idx = pcf.telescope %tg[%tid]
+      : !pcf.threadgroup<#pcf.sequential, {index, f32}>
+     -> (!pcf.threadgroup<#pcf.test_scope>, index)
+  util.return
+}
+
+// -----
+
+// telescope: struct field type mismatch.
+util.func private @telescope_struct_type_mismatch(
+    %tg: !pcf.threadgroup<#pcf.sequential, {index}>, %tid: index) {
+  // expected-error@+1 {{result type 'f32' at index 1 does not match source struct field type 'index'}}
+  %child_tg, %bad = pcf.telescope %tg[%tid]
+      : !pcf.threadgroup<#pcf.sequential, {index}>
+     -> (!pcf.threadgroup<#pcf.test_scope>, f32)
+  util.return
+}
+
+// -----
+
 // shared_executor: readonly sref scope mismatch with op scope.
 util.func private @shared_executor_readonly_scope_mismatch(
     %input: tensor<4x8xf32>, %output: tensor<4x8xf32>) {

@@ -1210,6 +1210,44 @@ def InitSubscopeOp : PCF_Op<"init_subscope", [
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// TelescopeOp
+//===----------------------------------------------------------------------===//
+
+def TelescopeOp : PCF_Op<"telescope", [Pure]> {
+  let summary = [{Convert a threadgroup identity from parent to child scope.}];
+  let description = [{
+    A pure type conversion op that takes a threadgroup with optional
+    struct fields and an index operand (the thread ID). Returns a
+    child-scope threadgroup (no struct fields) plus the struct fields
+    as separate SSA values.
+
+    The thread ID operand is the parent scope's worker ID. Passing a
+    value that is not the actual thread ID is undefined behavior.
+
+    The child scope is determined by the result threadgroup type.
+
+    Example with struct fields:
+    ```mlir
+    %child_tg, %sref = pcf.telescope %tg[%tid]
+        : !pcf.threadgroup<#parent, {!pcf.sref<128x64xf16, #child>}>
+       -> (!pcf.threadgroup<#child>, !pcf.sref<128x64xf16, #child>)
+    ```
+
+    Example without struct fields (pure scope conversion):
+    ```mlir
+    %child_tg = pcf.telescope %tg[%tid]
+        : !pcf.threadgroup<#parent> -> !pcf.threadgroup<#child>
+    ```
+  }];
+
+  let arguments = (ins PCF_AnyThreadGroup:$source, Index:$threadId);
+  let results = (outs Variadic<AnyType>:$results);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
 } // OpGroupScopeOps
 
 //===----------------------------------------------------------------------===//

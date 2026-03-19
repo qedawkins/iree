@@ -418,3 +418,51 @@ util.func private @init_subscope_multi(%tg: !pcf.threadgroup<#pcf.sequential>) {
 //       CHECK:     pcf.yield %{{.*}}, %{{.*}} : !pcf.sref<128x64xf16, #pcf.sequential>, !pcf.sref<64x32xf32, #pcf.sequential>
 //  CHECK-NEXT:   } -> !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.sequential>, !pcf.sref<64x32xf32, #pcf.sequential>}>
 
+// -----
+
+// telescope: no struct fields (pure scope conversion).
+util.func private @telescope_no_struct(%tg: !pcf.threadgroup<#pcf.sequential>, %tid: index) {
+  %child_tg = pcf.telescope %tg[%tid]
+      : !pcf.threadgroup<#pcf.sequential> -> !pcf.threadgroup<#pcf.test_scope>
+  util.return
+}
+
+// CHECK-LABEL: @telescope_no_struct
+//  CHECK-SAME:   %[[TG:[A-Za-z0-9]+]]: !pcf.threadgroup<#pcf.sequential>
+//  CHECK-SAME:   %[[TID:[A-Za-z0-9]+]]: index
+//       CHECK:   pcf.telescope %[[TG]][%[[TID]]] : !pcf.threadgroup<#pcf.sequential> -> !pcf.threadgroup<#pcf.test_scope>
+
+// -----
+
+// telescope: single struct field.
+util.func private @telescope_single_struct(
+    %tg: !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.test_scope>}>,
+    %tid: index) {
+  %child_tg, %sref = pcf.telescope %tg[%tid]
+      : !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.test_scope>}>
+     -> (!pcf.threadgroup<#pcf.test_scope>, !pcf.sref<128x64xf16, #pcf.test_scope>)
+  util.return
+}
+
+// CHECK-LABEL: @telescope_single_struct
+//       CHECK:   pcf.telescope %{{.*}}[%{{.*}}]
+//  CHECK-SAME:     : !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.test_scope>}>
+//  CHECK-SAME:    -> (!pcf.threadgroup<#pcf.test_scope>, !pcf.sref<128x64xf16, #pcf.test_scope>)
+
+// -----
+
+// telescope: multiple struct fields.
+util.func private @telescope_multi_struct(
+    %tg: !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.test_scope>, index}>,
+    %tid: index) {
+  %child_tg, %sref, %idx = pcf.telescope %tg[%tid]
+      : !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.test_scope>, index}>
+     -> (!pcf.threadgroup<#pcf.test_scope>, !pcf.sref<128x64xf16, #pcf.test_scope>, index)
+  util.return
+}
+
+// CHECK-LABEL: @telescope_multi_struct
+//       CHECK:   pcf.telescope %{{.*}}[%{{.*}}]
+//  CHECK-SAME:     : !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.test_scope>, index}>
+//  CHECK-SAME:    -> (!pcf.threadgroup<#pcf.test_scope>, !pcf.sref<128x64xf16, #pcf.test_scope>, index)
+
