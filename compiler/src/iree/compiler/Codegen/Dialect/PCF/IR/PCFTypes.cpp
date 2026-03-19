@@ -315,7 +315,7 @@ Type ClusterType::parse(AsmParser &parser) {
   // Parse struct groups and required ID.
   // Struct groups use "keyword : { types }" -- the colon disambiguates from
   // the trailing ID keyword (which has no colon).
-  SmallVector<Type> privateTypes, sharedTypes, uniformTypes;
+  SmallVector<Type> privateTypes, sharedTypes;
   llvm::SmallDenseSet<StringRef> seenKeywords;
   NamespacedSymbolAttr id;
 
@@ -359,12 +359,8 @@ Type ClusterType::parse(AsmParser &parser) {
         if (failed(parseStructGroup(sharedTypes))) {
           return {};
         }
-      } else if (keyword == "uniform") {
-        if (failed(parseStructGroup(uniformTypes))) {
-          return {};
-        }
       } else {
-        parser.emitError(kwLoc, "expected 'private', 'shared', or 'uniform'");
+        parser.emitError(kwLoc, "expected 'private' or 'shared'");
         return {};
       }
       // Expect comma before next group or ID.
@@ -396,7 +392,7 @@ Type ClusterType::parse(AsmParser &parser) {
   AffineMap boundsMap =
       AffineMap::get(numDims, numSyms, results, parser.getContext());
   return ClusterType::get(parser.getContext(), scope, boundsMap, privateTypes,
-                          sharedTypes, uniformTypes, id);
+                          sharedTypes, id);
 }
 
 void ClusterType::print(AsmPrinter &printer) const {
@@ -427,7 +423,6 @@ void ClusterType::print(AsmPrinter &printer) const {
 
   printGroup("private", getPrivateTypes());
   printGroup("shared", getSharedTypes());
-  printGroup("uniform", getUniformTypes());
 
   // Print cluster ID (always last, always present).
   printer << ", ";

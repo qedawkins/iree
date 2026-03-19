@@ -238,8 +238,7 @@ def PCF_ClusterType : TypeDef<PCF_Dialect, "Cluster", []> {
     ```
     !pcf.cluster<#scope, (0 -> d0), left>
     !pcf.cluster<#scope, (0 -> d0) x (d0 -> s1), tg.left>
-    !pcf.cluster<#scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, uniform: {index}, c0>
-    !pcf.cluster<#scope, (0 -> d0), uniform: {index}, c0>
+    !pcf.cluster<#scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, c0>
     ```
   }];
 
@@ -248,7 +247,6 @@ def PCF_ClusterType : TypeDef<PCF_Dialect, "Cluster", []> {
       "AffineMap":$boundsMap,
       OptionalArrayRefParameter<"Type">:$privateTypes,
       OptionalArrayRefParameter<"Type">:$sharedTypes,
-      OptionalArrayRefParameter<"Type">:$uniformTypes,
       "NamespacedSymbolAttr":$id);
 
   let hasCustomAssemblyFormat = 1;
@@ -272,8 +270,7 @@ def PCF_ClusterType : TypeDef<PCF_Dialect, "Cluster", []> {
 
     /// Returns true if the cluster carries any struct elements.
     bool hasStructElements() const {
-      return !getPrivateTypes().empty() || !getSharedTypes().empty() ||
-             !getUniformTypes().empty();
+      return !getPrivateTypes().empty() || !getSharedTypes().empty();
     }
   }];
 }

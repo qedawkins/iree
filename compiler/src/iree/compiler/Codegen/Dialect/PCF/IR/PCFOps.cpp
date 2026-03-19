@@ -1508,24 +1508,12 @@ LogicalResult TileGroupOp::verify() {
 
 // Parse format:
 //   pcf.cluster_yield
-//   pcf.cluster_yield uniform(%u : index) %v : f32
-//   pcf.cluster_yield %v : f32
-//   pcf.cluster_yield uniform(%u : index)
+//   pcf.cluster_yield %v1, %v2 : type1, type2
 ParseResult ClusterYieldOp::parse(OpAsmParser &parser, OperationState &result) {
-  SmallVector<OpAsmParser::UnresolvedOperand> uniformOperands;
-  SmallVector<Type> uniformTypes;
   SmallVector<OpAsmParser::UnresolvedOperand> valueOperands;
   SmallVector<Type> valueTypes;
 
-  // Try parsing "uniform(...)".
-  if (succeeded(parser.parseOptionalKeyword("uniform"))) {
-    if (parser.parseLParen() || parser.parseOperandList(uniformOperands) ||
-        parser.parseColonTypeList(uniformTypes) || parser.parseRParen()) {
-      return failure();
-    }
-  }
-
-  // Try parsing remaining (non-uniform) operands: %v0, %v1 : type0, type1.
+  // Try parsing operands: %v0, %v1 : type0, type1.
   OpAsmParser::UnresolvedOperand firstOperand;
   OptionalParseResult optResult = parser.parseOptionalOperand(firstOperand);
   if (optResult.has_value() && succeeded(*optResult)) {
@@ -1541,38 +1529,22 @@ ParseResult ClusterYieldOp::parse(OpAsmParser &parser, OperationState &result) {
   }
 
   // Resolve operands.
-  if (parser.resolveOperands(uniformOperands, uniformTypes,
-                             parser.getCurrentLocation(), result.operands) ||
-      parser.resolveOperands(valueOperands, valueTypes,
+  if (parser.resolveOperands(valueOperands, valueTypes,
                              parser.getCurrentLocation(), result.operands)) {
     return failure();
   }
-
-  // Set operand segment sizes.
-  result.addAttribute("operandSegmentSizes",
-                      parser.getBuilder().getDenseI32ArrayAttr(
-                          {static_cast<int32_t>(uniformOperands.size()),
-                           static_cast<int32_t>(valueOperands.size())}));
 
   return success();
 }
 
 void ClusterYieldOp::print(OpAsmPrinter &p) {
-  if (!getUniformValues().empty()) {
-    p << " uniform(";
-    llvm::interleaveComma(getUniformValues(), p, [&](Value v) { p << v; });
-    p << " : ";
-    llvm::interleaveComma(getUniformValues().getTypes(), p);
-    p << ")";
-  }
   if (!getValues().empty()) {
     p << " ";
     llvm::interleaveComma(getValues(), p, [&](Value v) { p << v; });
     p << " : ";
     llvm::interleaveComma(getValues().getTypes(), p);
   }
-  p.printOptionalAttrDict((*this)->getAttrs(),
-                          /*elidedAttrs=*/{"operandSegmentSizes"});
+  p.printOptionalAttrDict((*this)->getAttrs());
 }
 
 //===----------------------------------------------------------------------===//
@@ -1635,10 +1607,8 @@ static LogicalResult verifyRunOp(Operation *op, ValueRange sources,
   for (ClusterType ct : sourceTypes) {
     if (isClusterMode) {
       llvm::append_range(expectedArgTypes, ct.getSharedTypes());
-      llvm::append_range(expectedArgTypes, ct.getUniformTypes());
     } else {
       llvm::append_range(expectedArgTypes, ct.getPrivateTypes());
-      llvm::append_range(expectedArgTypes, ct.getUniformTypes());
     }
   }
 
@@ -1671,7 +1641,7 @@ static LogicalResult verifyRunOp(Operation *op, ValueRange sources,
   ClusterYieldOp yield = cast<ClusterYieldOp>(body.front().getTerminator());
   if (!result) {
     // No result cluster — yield must be empty.
-    if (!yield.getUniformValues().empty() || !yield.getValues().empty()) {
+    if (!yield.getValues().empty()) {
       return op->emitOpError(
           "cluster_yield must have no operands when parent has no result");
     }
@@ -1699,9 +1669,6 @@ static LogicalResult verifyRunOp(Operation *op, ValueRange sources,
   }
 
   // Verify yield types match result.
-  if (yield.getUniformValues().getTypes() != resultType.getUniformTypes()) {
-    return op->emitOpError("yield uniform types do not match result");
-  }
   ArrayRef<Type> expectedValueTypes = isClusterMode
                                           ? resultType.getSharedTypes()
                                           : resultType.getPrivateTypes();
@@ -1737,7 +1704,7 @@ void RunClusterOp::build(OpBuilder &builder, OperationState &result,
   }
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToEnd(block);
-  ClusterYieldOp::create(builder, result.location, ValueRange{}, ValueRange{});
+  ClusterYieldOp::create(builder, result.location, ValueRange{});
 }
 
 LogicalResult RunThreadOp::verify() {
@@ -1770,7 +1737,7 @@ void RunThreadOp::build(OpBuilder &builder, OperationState &result,
   }
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToEnd(block);
-  ClusterYieldOp::create(builder, result.location, ValueRange{}, ValueRange{});
+  ClusterYieldOp::create(builder, result.location, ValueRange{});
 }
 
 /// Shared parse helper for RunClusterOp and RunThreadOp.

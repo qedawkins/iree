@@ -251,21 +251,21 @@ util.func private @tile_group_anonymous_namespace(
 
 // run_cluster: basic with result.
 util.func private @run_cluster_basic(
-    %c: !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>,
+    %c: !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>,
     %k: index) {
   %result = pcf.shared_executor.run_cluster(%c)[%k]
-      (%s: f32, %u: index) {
-    pcf.cluster_yield uniform(%u : index) %s : f32
-  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>)
-    -> !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>
+      (%s: f32) {
+    pcf.cluster_yield %s : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>
   util.return
 }
 
 // CHECK-LABEL: @run_cluster_basic
 //       CHECK:   pcf.shared_executor.run_cluster(%{{.*}})[%{{.*}}]
-//  CHECK-NEXT:       (%{{.*}}: f32, %{{.*}}: index)
-//       CHECK:     pcf.cluster_yield uniform(%{{.*}} : index) %{{.*}} : f32
-//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, uniform: {index}, c0>
+//  CHECK-NEXT:       (%{{.*}}: f32)
+//       CHECK:     pcf.cluster_yield %{{.*}} : f32
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>
 
 // -----
 
@@ -290,13 +290,13 @@ util.func private @run_cluster_void(
 // run_cluster: multiple sources.
 util.func private @run_cluster_multi_source(
     %c0: !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>,
-    %c1: !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>,
+    %c1: !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {index}, c0>,
     %k: index) {
   pcf.shared_executor.run_cluster(%c0, %c1)[%k]
-      (%s0: f32, %u1: index) {
+      (%s0: f32, %s1: index) {
     pcf.cluster_yield
   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>,
-       !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>)
+       !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {index}, c0>)
   util.return
 }
 
@@ -305,27 +305,27 @@ util.func private @run_cluster_multi_source(
 //  CHECK-NEXT:       (%{{.*}}: f32, %{{.*}}: index)
 //       CHECK:     pcf.cluster_yield
 //       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), shared: {f32}, c0>,
-//  CHECK-SAME:        !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>)
+//  CHECK-SAME:        !pcf.cluster<#pcf.sequential, (0 -> d0), shared: {index}, c0>)
 
 // -----
 
 // run_thread: basic with result and thread IDs.
 util.func private @run_thread_basic(
-    %c: !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>,
+    %c: !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>,
     %k: index) {
   %result = pcf.shared_executor.run_thread(%c)[%k]
-      (%p: f32, %u: index)[%tid: index] {
-    pcf.cluster_yield uniform(%u : index) %p : f32
-  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>)
-    -> !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>
+      (%p: f32)[%tid: index] {
+    pcf.cluster_yield %p : f32
+  } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>
   util.return
 }
 
 // CHECK-LABEL: @run_thread_basic
 //       CHECK:   pcf.shared_executor.run_thread(%{{.*}})[%{{.*}}]
-//  CHECK-NEXT:       (%{{.*}}: f32, %{{.*}}: index)[%{{.*}}: index]
-//       CHECK:     pcf.cluster_yield uniform(%{{.*}} : index) %{{.*}} : f32
-//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, uniform: {index}, c0>
+//  CHECK-NEXT:       (%{{.*}}: f32)[%{{.*}}: index]
+//       CHECK:     pcf.cluster_yield %{{.*}} : f32
+//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>
 
 // -----
 
@@ -349,13 +349,13 @@ util.func private @run_thread_void(
 // run_thread: multiple sources.
 util.func private @run_thread_multi_source(
     %c0: !pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>,
-    %c1: !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>,
+    %c1: !pcf.cluster<#pcf.sequential, (0 -> d0), private: {index}, c0>,
     %k: index) {
   pcf.shared_executor.run_thread(%c0, %c1)[%k]
-      (%p0: f32, %u1: index)[%tid: index] {
+      (%p0: f32, %p1: index)[%tid: index] {
     pcf.cluster_yield
   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>,
-       !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>)
+       !pcf.cluster<#pcf.sequential, (0 -> d0), private: {index}, c0>)
   util.return
 }
 
@@ -364,11 +364,11 @@ util.func private @run_thread_multi_source(
 //  CHECK-NEXT:       (%{{.*}}: f32, %{{.*}}: index)[%{{.*}}: index]
 //       CHECK:     pcf.cluster_yield
 //       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> d0), private: {f32}, c0>,
-//  CHECK-SAME:        !pcf.cluster<#pcf.sequential, (0 -> d0), uniform: {index}, c0>)
+//  CHECK-SAME:        !pcf.cluster<#pcf.sequential, (0 -> d0), private: {index}, c0>)
 
 // -----
 
-// run_cluster: yield values only (no uniform).
+// run_cluster: yield values only.
 util.func private @run_cluster_values_only(
     %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
   %result = pcf.shared_executor.run_cluster(%c)[]
@@ -381,22 +381,4 @@ util.func private @run_cluster_values_only(
 
 // CHECK-LABEL: @run_cluster_values_only
 //       CHECK:     pcf.cluster_yield %{{.*}} : f32
-//   CHECK-NOT:     uniform(
 //       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>
-
-// -----
-
-// run_cluster: yield uniform only.
-util.func private @run_cluster_uniform_only(
-    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>) {
-  %result = pcf.shared_executor.run_cluster(%c)[]
-      (%u: index) {
-    pcf.cluster_yield uniform(%u : index)
-  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>)
-    -> !pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>
-  util.return
-}
-
-// CHECK-LABEL: @run_cluster_uniform_only
-//       CHECK:     pcf.cluster_yield uniform(%{{.*}} : index)
-//       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> s0), uniform: {index}, c0>

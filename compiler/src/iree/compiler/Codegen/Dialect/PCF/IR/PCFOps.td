@@ -624,32 +624,24 @@ def ClusterYieldOp : PCF_Op<"cluster_yield", [
     "IREE::PCF::RunClusterOp",
     "IREE::PCF::RunThreadOp",
   ]>,
-  AttrSizedOperandSegments,
   Pure,
   ReturnLike,
   Terminator,
 ]> {
   let summary = [{Yields values from a cluster execution region.}];
   let description = [{
-    Terminates the body of `run_cluster` or `run_thread`. Separates
-    uniform return values from non-uniform (shared or private) values.
-
-    The `uniform` operands populate the result cluster's `uniformTypes`.
-    The remaining operands populate the result cluster's `sharedTypes`
-    (if parent is `run_cluster`) or `privateTypes` (if parent is
-    `run_thread`).
+    Terminates the body of `run_cluster` or `run_thread`. The operands
+    populate the result cluster's `sharedTypes` (if parent is
+    `run_cluster`) or `privateTypes` (if parent is `run_thread`).
 
     Example:
     ```mlir
-    pcf.cluster_yield uniform(%u : index) %v : f32
-    pcf.cluster_yield %v : f32
-    pcf.cluster_yield uniform(%u : index)
+    pcf.cluster_yield %v1, %v2 : type1, type2
     pcf.cluster_yield
     ```
   }];
 
   let arguments = (ins
-    Variadic<AnyType>:$uniformValues,
     Variadic<AnyType>:$values);
 
   let hasCustomAssemblyFormat = 1;
@@ -662,25 +654,25 @@ def RunClusterOp : PCF_Op<"shared_executor.run_cluster", [
        SingleBlockImplicitTerminator<"mlir::iree_compiler::IREE::PCF::ClusterYieldOp">,
      ]> {
   let summary = [{
-    Execute a cluster region collectively with shared and uniform values.
+    Execute a cluster region collectively with shared values.
   }];
   let description = [{
     Executes a region where all workers in the cluster cooperate. The body
-    receives shared and uniform struct values from the input clusters as
-    block arguments, grouped per cluster in operand order.
+    receives shared struct values from the input clusters as block
+    arguments, grouped per cluster in operand order.
 
     All input clusters must have identical `boundsMap` and `scope`. The
     dependent values for the range bounds are provided as `rangeValues`.
 
     Optionally produces a result cluster with the same scope and bounds
-    but new shared/uniform struct elements. The result cluster cannot have
+    but new shared struct elements. The result cluster cannot have
     private elements (collective execution cannot produce per-thread data).
 
     Example:
     ```mlir
     %result = pcf.shared_executor.run_cluster(%c0, %c1)[%k]
-        (%s0: tensor<64xf32>, %u0: index, %s1: f32) {
-      pcf.cluster_yield uniform(%new_u : index) %new_s : tensor<64xf32>
+        (%s0: tensor<64xf32>, %s1: f32) {
+      pcf.cluster_yield %new_s : tensor<64xf32>
     } : (!pcf.cluster<...>, !pcf.cluster<...>) -> !pcf.cluster<...>
     ```
   }];
@@ -732,13 +724,13 @@ def RunThreadOp : PCF_Op<"shared_executor.run_thread", [
        SingleBlockImplicitTerminator<"mlir::iree_compiler::IREE::PCF::ClusterYieldOp">,
      ]> {
   let summary = [{
-    Execute a cluster region per-thread with private and uniform values.
+    Execute a cluster region per-thread with private values.
   }];
   let description = [{
     Executes a region from the perspective of a single worker in the
-    cluster. The body receives private and uniform struct values from the
-    input clusters as block arguments (grouped per cluster in operand
-    order), followed by per-dimension thread IDs.
+    cluster. The body receives private struct values from the input
+    clusters as block arguments (grouped per cluster in operand order),
+    followed by per-dimension thread IDs.
 
     Thread IDs are tile-relative: each ranges from 0 to tile_size-1,
     where tile_size = upper_bound - lower_bound. Thread ID 0 corresponds
@@ -748,15 +740,15 @@ def RunThreadOp : PCF_Op<"shared_executor.run_thread", [
     dependent values for the range bounds are provided as `rangeValues`.
 
     Optionally produces a result cluster with the same scope and bounds
-    but new private/uniform struct elements. The result cluster cannot
-    have shared elements (per-thread execution cannot produce collective
+    but new private struct elements. The result cluster cannot have
+    shared elements (per-thread execution cannot produce collective
     data).
 
     Example:
     ```mlir
     %result = pcf.shared_executor.run_thread(%c0)[%k]
-        (%priv: f32, %u: index)[%tid0: index, %tid1: index] {
-      pcf.cluster_yield uniform(%new_u : index) %new_p : f32
+        (%priv: f32)[%tid0: index, %tid1: index] {
+      pcf.cluster_yield %new_p : f32
     } : (!pcf.cluster<...>) -> !pcf.cluster<...>
     ```
   }];
