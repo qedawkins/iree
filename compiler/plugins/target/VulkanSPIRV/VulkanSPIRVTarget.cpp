@@ -218,6 +218,7 @@ public:
   }
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
+                                    Attribute options,
                                     OpPassManager &passManager) final {
     buildSPIRVCodegenPassPipeline(passManager);
   }
