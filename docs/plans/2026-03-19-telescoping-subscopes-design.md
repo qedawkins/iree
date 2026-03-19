@@ -211,12 +211,16 @@ behavior (child → pcf.generic wrapping child shared_executor).
 
 ## Design Decisions
 
-**Why separate `init_subscope` and `telescope`?** Memory allocation
-must happen before distribution (at the parent scope level, where all
-workers can cooperate on allocation). Telescoping happens inside
-`run_thread` bodies where thread IDs are available. The two ops
-reflect this temporal separation: allocate collectively first, then
-telescope per-thread.
+**Why are `init_subscope` and `telescope` independent ops?** They
+solve different problems. `init_subscope` is about memory allocation
+for a child scope — attaching resources to a threadgroup. `telescope`
+is about scope transition — converting a threadgroup identity from
+parent to child scope. Either can be used without the other: you can
+telescope a threadgroup with no struct fields (just scope conversion),
+and you can use `init_subscope` without telescoping (just attaching
+allocations for later use). They compose naturally when both are
+needed: allocate collectively at the parent scope, then telescope
+per-thread inside `run_thread`.
 
 **Why is `telescope` a pure op?** It is a type conversion, not an
 execution context change. It converts a parent-scope threadgroup
@@ -250,6 +254,7 @@ init_subscope body goes into which initializer slot?). A single
 
 **Roundtrip tests:**
 - `init_subscope` with single and multiple allocations.
+- `telescope` with no struct fields (pure scope conversion).
 - `telescope` with single and multiple struct fields.
 
 **Verifier tests:**
@@ -265,8 +270,8 @@ init_subscope body goes into which initializer slot?). A single
   tile_group body with run_thread.
 
 **Negative lowering tests:**
-- `telescope` without preceding `init_subscope`.
-- `init_subscope` yielded types not matching `telescope` struct fields.
+- `init_subscope` on threadgroup that already has struct fields.
+- `telescope` with mismatched struct field types in result.
 
 **Related change tests:**
 - ClusterType without `uniform` field (update existing tests).
