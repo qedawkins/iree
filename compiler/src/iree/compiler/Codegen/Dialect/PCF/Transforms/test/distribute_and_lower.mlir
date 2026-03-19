@@ -666,3 +666,106 @@ util.func private @run_thread_with_struct_args(
   } : !pcf.threadgroup<#pcf.test_scope>
   util.return
 }
+
+// -----
+
+// Telescoping: shared_executor with init_subscope + telescope lowers to
+// pcf.generic wrapping a child shared_executor with initializer. The
+// init_subscope body moves into the child's initializer, and telescope
+// results become the child's threadgroup and leading args.
+//
+// CHECK-LABEL: util.func private @telescoping_basic
+// CHECK-SAME:    (%[[OUTPUT:.+]]: tensor<128xf32>)
+// CHECK:         pcf.generic scope(#pcf.test_scope)
+// CHECK:           execute(%{{.+}} = %[[OUTPUT]])
+// CHECK:             pcf.shared_executor scope(#pcf.test_scope) initialize {
+// CHECK:               %[[ALLOC:.+]] = pcf.alloc() : !pcf.sref<64xf16, #pcf.test_scope>
+// CHECK:               pcf.yield %[[ALLOC]]
+// CHECK:             }
+// CHECK:             execute[%[[TG:.+]]: !pcf.threadgroup<#pcf.test_scope>]
+// CHECK-NOT:           builtin.unrealized_conversion_cast
+// CHECK:               "test.use"(%[[TG]], %{{.+}})
+// CHECK:             pcf.return
+// CHECK:           pcf.return
+// CHECK-NOT:     pcf.shared_executor{{[^.]}}
+util.func private @telescoping_basic(%output: tensor<128xf32>) {
+  %0 = pcf.shared_executor scope(#pcf.test_scope)
+    execute(%ref = %output)
+        [%tg: !pcf.threadgroup<#pcf.test_scope>]
+         : (!pcf.sref<128xf32, #pcf.test_scope>)
+        -> (tensor<128xf32>) {
+    %tid = arith.constant 0 : index
+    %tg2 = pcf.init_subscope %tg {
+      %alloc = pcf.alloc() : !pcf.sref<64xf16, #pcf.test_scope>
+      pcf.yield %alloc : !pcf.sref<64xf16, #pcf.test_scope>
+    } -> !pcf.threadgroup<#pcf.test_scope, {!pcf.sref<64xf16, #pcf.test_scope>}>
+    %child_tg, %sref = pcf.telescope %tg2[%tid]
+        : !pcf.threadgroup<#pcf.test_scope, {!pcf.sref<64xf16, #pcf.test_scope>}>
+       -> (!pcf.threadgroup<#pcf.test_scope>, !pcf.sref<64xf16, #pcf.test_scope>)
+    "test.use"(%child_tg, %sref) : (!pcf.threadgroup<#pcf.test_scope>, !pcf.sref<64xf16, #pcf.test_scope>) -> ()
+    pcf.return
+  }
+  util.optimization_barrier %0 : tensor<128xf32>
+  util.return
+}
+
+// -----
+
+// Telescope without init_subscope: pure scope conversion with no
+// initializer. The child shared_executor has no initializer region.
+//
+// CHECK-LABEL: util.func private @telescope_no_init_subscope
+// CHECK:         pcf.generic scope(#pcf.test_scope)
+// CHECK:           execute(%{{.+}} = %{{.+}})
+// CHECK:             pcf.shared_executor scope(#pcf.test_scope)
+// CHECK-NOT:         initialize
+// CHECK:               execute[%[[TG:.+]]: !pcf.threadgroup<#pcf.test_scope>]
+// CHECK:               "test.use"(%[[TG]])
+// CHECK:             pcf.return
+// CHECK:           pcf.return
+// CHECK-NOT:     pcf.shared_executor{{[^.]}}
+util.func private @telescope_no_init_subscope(%output: tensor<128xf32>) {
+  %0 = pcf.shared_executor scope(#pcf.test_scope)
+    execute(%ref = %output)
+        [%tg: !pcf.threadgroup<#pcf.test_scope>]
+         : (!pcf.sref<128xf32, #pcf.test_scope>)
+        -> (tensor<128xf32>) {
+    %tid = arith.constant 0 : index
+    %child_tg = pcf.telescope %tg[%tid]
+        : !pcf.threadgroup<#pcf.test_scope> -> !pcf.threadgroup<#pcf.test_scope>
+    "test.use"(%child_tg) : (!pcf.threadgroup<#pcf.test_scope>) -> ()
+    pcf.return
+  }
+  util.optimization_barrier %0 : tensor<128xf32>
+  util.return
+}
+
+// -----
+
+// init_subscope without telescope: no child scope is detected, so the
+// shared_executor lowers directly to pcf.generic without creating a
+// child shared_executor. The init_subscope remains in the generic body.
+//
+// CHECK-LABEL: util.func private @init_subscope_no_telescope
+// CHECK:         pcf.generic scope(#pcf.test_scope)
+// CHECK:           execute(%{{.+}} = %{{.+}})
+// CHECK:             pcf.init_subscope
+// CHECK:             "test.use"
+// CHECK:           pcf.return
+// CHECK-NOT:     pcf.shared_executor
+util.func private @init_subscope_no_telescope(%output: tensor<128xf32>) {
+  %0 = pcf.shared_executor scope(#pcf.test_scope)
+    execute(%ref = %output)
+        [%tg: !pcf.threadgroup<#pcf.test_scope>]
+         : (!pcf.sref<128xf32, #pcf.test_scope>)
+        -> (tensor<128xf32>) {
+    %tg2 = pcf.init_subscope %tg {
+      %alloc = pcf.alloc() : !pcf.sref<64xf16, #pcf.test_scope>
+      pcf.yield %alloc : !pcf.sref<64xf16, #pcf.test_scope>
+    } -> !pcf.threadgroup<#pcf.test_scope, {!pcf.sref<64xf16, #pcf.test_scope>}>
+    "test.use"(%tg2) : (!pcf.threadgroup<#pcf.test_scope, {!pcf.sref<64xf16, #pcf.test_scope>}>) -> ()
+    pcf.return
+  }
+  util.optimization_barrier %0 : tensor<128xf32>
+  util.return
+}

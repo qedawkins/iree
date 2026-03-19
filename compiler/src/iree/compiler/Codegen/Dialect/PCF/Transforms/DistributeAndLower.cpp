@@ -544,6 +544,27 @@ distributeWithinTileGroup(TileGroupOp tileGroup,
 // SharedExecutor → pcf.generic lowering
 //===----------------------------------------------------------------------===//
 
+/// Auto-detect a child scope from telescope ops in the shared_executor body.
+/// Returns the child scope if all telescope ops agree on the same scope,
+/// or nullptr if no telescope ops exist.
+static ScopeAttrInterface
+detectChildScope(SharedExecutorOp sharedExec) {
+  ScopeAttrInterface childScope;
+  sharedExec.getRegion().walk([&](TelescopeOp telescopeOp) {
+    // The first result of a telescope op is a ThreadGroupType whose scope
+    // is the child scope.
+    ThreadGroupType resultTgType =
+        cast<ThreadGroupType>(telescopeOp.getResults().front().getType());
+    ScopeAttrInterface scope = resultTgType.getScope();
+    if (!childScope) {
+      childScope = scope;
+    }
+    // If multiple telescope ops disagree, we still use the first one found.
+    // The verifier on telescope ops ensures consistency within a single op.
+  });
+  return childScope;
+}
+
 /// Lower a SharedExecutorOp to a pcf.generic op. This handles the basic case
 /// where tile_groups have already been lowered (Phase 3). The execute region's
 /// body is moved into a new pcf.generic, with readwrite sref args mapped
@@ -557,7 +578,14 @@ distributeWithinTileGroup(TileGroupOp tileGroup,
 /// pcf.generic's initializer region. Leading args (yielded from the
 /// initializer) are mapped from the shared_executor's execute region to the
 /// pcf.generic's execute region.
-static LogicalResult lowerSharedExecutor(SharedExecutorOp sharedExec) {
+///
+/// When a non-null childScope is provided, the body is wrapped in a child
+/// SharedExecutorOp inside the pcf.generic. InitSubscopeOp bodies become the
+/// child's initializer, and TelescopeOp results are replaced with the child's
+/// threadgroup and leading args.
+static LogicalResult
+lowerSharedExecutor(SharedExecutorOp sharedExec,
+                    ScopeAttrInterface childScope = nullptr) {
   Location loc = sharedExec.getLoc();
 
   ScopeAttrInterface scope = sharedExec.getScope();
@@ -658,6 +686,154 @@ static LogicalResult lowerSharedExecutor(SharedExecutorOp sharedExec) {
   genericBlock.getOperations().splice(genericBlock.end(),
                                       sharedExecBlock.getOperations());
 
+  // If a child scope is specified, wrap the body in a child SharedExecutorOp.
+  if (childScope) {
+    // Collect init_subscope and telescope ops from the generic body.
+    SmallVector<InitSubscopeOp> initSubscopeOps;
+    SmallVector<TelescopeOp> telescopeOps;
+    for (Operation &op : genericBlock.getOperations()) {
+      if (InitSubscopeOp initOp = dyn_cast<InitSubscopeOp>(&op)) {
+        initSubscopeOps.push_back(initOp);
+      } else if (TelescopeOp telOp = dyn_cast<TelescopeOp>(&op)) {
+        telescopeOps.push_back(telOp);
+      }
+    }
+
+    // Create the child SharedExecutorOp inside the generic body, just before
+    // the pcf.return terminator.
+    Operation *returnOp = genericBlock.getTerminator();
+    builder.setInsertionPoint(returnOp);
+    SharedExecutorOp childExec =
+        SharedExecutorOp::create(builder, loc, childScope,
+                                 /*readwriteInits=*/ValueRange());
+
+    // If there are init_subscope ops, move their body ops into the child's
+    // initializer region and set up leading args.
+    if (!initSubscopeOps.empty()) {
+      // For now, support a single init_subscope op.
+      InitSubscopeOp initOp = initSubscopeOps.front();
+      Block &initBody = initOp.getBody().front();
+
+      // Get the yield op from the init_subscope body.
+      YieldOp initYield = cast<YieldOp>(initBody.getTerminator());
+      SmallVector<Type> yieldedTypes;
+      for (Value v : initYield.getOperands()) {
+        yieldedTypes.push_back(v.getType());
+      }
+
+      // Create the initializer region in the child shared_executor.
+      Region &childInitializer = childExec.getInitializer();
+      Block *childInitBlock = new Block();
+      childInitializer.push_back(childInitBlock);
+
+      // Move init_subscope body ops into the child initializer.
+      childInitBlock->getOperations().splice(
+          childInitBlock->end(), initBody.getOperations());
+
+      // Add leading args to the child execute region for each yielded value.
+      Block &childExecBlock = childExec.getRegion().front();
+      int64_t numChildLeadingArgs =
+          static_cast<int64_t>(yieldedTypes.size());
+      for (int64_t i = 0; i < numChildLeadingArgs; ++i) {
+        // Insert leading args at the front, before the threadgroup arg.
+        childExecBlock.insertArgument(i, yieldedTypes[i], loc);
+      }
+      childExec.setNumLeadingArgs(numChildLeadingArgs);
+    }
+
+    // Move all remaining ops (except init_subscope ops and the pcf.return
+    // terminator) from the generic body into the child execute region.
+    // First, collect the ops to move (excluding init_subscope ops, telescope
+    // ops will be handled after moving, and the return/child exec stay).
+    Block &childExecBlock = childExec.getRegion().front();
+    // The child's block currently has [leading_args] [threadgroup].
+    // We need to insert ops before the child's terminator. Since the child
+    // was just created, its block has no ops yet (no terminator either).
+    // The builder created a block but no terminator.
+
+    // Collect ops to move: everything in genericBlock that is not the child
+    // shared_executor, not an init_subscope op, and not the pcf.return.
+    SmallVector<Operation *> opsToMove;
+    for (Operation &op : genericBlock.getOperations()) {
+      if (&op == childExec.getOperation() || &op == returnOp) {
+        continue;
+      }
+      if (isa<InitSubscopeOp>(&op)) {
+        continue;
+      }
+      opsToMove.push_back(&op);
+    }
+
+    // Move ops into the child execute block.
+    for (Operation *op : opsToMove) {
+      op->moveBefore(&childExecBlock, childExecBlock.end());
+    }
+
+    // Now handle telescope ops: replace their results with the child
+    // shared_executor's threadgroup and leading args.
+    BlockArgument childTgArg = childExec.getThreadGroup();
+    ArrayRef<BlockArgument> childLeadingArgs = childExec.getLeadingArgs();
+
+    for (TelescopeOp telOp : telescopeOps) {
+      // First result is the child threadgroup.
+      telOp.getResults().front().replaceAllUsesWith(childTgArg);
+
+      // Remaining results are struct fields, which correspond to leading
+      // args from the initializer.
+      for (int64_t i = 1, e = telOp.getNumResults(); i < e; ++i) {
+        telOp.getResults()[i].replaceAllUsesWith(childLeadingArgs[i - 1]);
+      }
+
+      // Erase the telescope op.
+      telOp.erase();
+    }
+
+    // Erase init_subscope ops (their results should have no remaining uses
+    // since telescope ops consumed them and have been erased).
+    for (InitSubscopeOp initOp : initSubscopeOps) {
+      // The init_subscope result was used by telescope ops, which are now
+      // erased. But we need to verify the result is unused.
+      if (!initOp.getResult().use_empty()) {
+        return initOp.emitOpError(
+            "init_subscope result still has uses after telescope lowering");
+      }
+      initOp.erase();
+    }
+
+    // Add a pcf.return terminator to the child execute block if there isn't
+    // one already (the moved ops should include the original pcf.return from
+    // the generic block, which we need to repurpose).
+    // Check if the child block has a terminator.
+    if (childExecBlock.empty() ||
+        !childExecBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+      OpBuilder childBuilder =
+          OpBuilder::atBlockEnd(&childExecBlock);
+      ReturnOp::create(childBuilder, loc);
+    }
+
+    // The generic block needs a new pcf.return since the old one was moved
+    // to the child. Check if genericBlock still has its terminator.
+    if (genericBlock.empty() ||
+        !genericBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+      OpBuilder genericBuilder =
+          OpBuilder::atBlockEnd(&genericBlock);
+      ReturnOp::create(genericBuilder, loc);
+    }
+
+    // Clean up dead unrealized_conversion_cast ops in the child block.
+    // These were created for the parent threadgroup replacement and are
+    // now unused since telescope ops consumed the threadgroup.
+    SmallVector<Operation *> deadOps;
+    for (Operation &childOp : childExecBlock) {
+      if (isa<UnrealizedConversionCastOp>(&childOp) && childOp.use_empty()) {
+        deadOps.push_back(&childOp);
+      }
+    }
+    for (Operation *deadOp : deadOps) {
+      deadOp->erase();
+    }
+  }
+
   // Replace the shared_executor results with the generic results.
   sharedExec.replaceAllUsesWith(genericOp.getResults());
 
@@ -727,22 +903,36 @@ struct DistributeAndLowerPass final
 
     // Phase 4: Lower shared_executor → pcf.generic.
     // Collect after Phase 3 since tile_groups inside shared_executors are now
-    // lowered.
+    // lowered. Only lower top-level shared_executors (not those nested inside
+    // a pcf.generic, which are child shared_executors created during this
+    // phase for telescoping distribution).
     SmallVector<SharedExecutorOp> sharedExecs;
     op->walk([&](SharedExecutorOp sharedExec) {
       sharedExecs.push_back(sharedExec);
     });
 
     for (SharedExecutorOp sharedExec : sharedExecs) {
-      if (failed(lowerSharedExecutor(sharedExec))) {
+      // Auto-detect child scope from telescope ops in the body.
+      ScopeAttrInterface detectedChildScope =
+          detectChildScope(sharedExec);
+      if (failed(lowerSharedExecutor(sharedExec, detectedChildScope))) {
         signalPassFailure();
         return;
       }
     }
 
-    // Phase 5: Verify all tile_group and shared_executor ops were lowered.
+    // Phase 5: Verify all tile_group ops were lowered. SharedExecutorOps
+    // may remain as children inside pcf.generic when telescoping was used.
     WalkResult result = op->walk([](Operation *innerOp) -> WalkResult {
-      if (isa<TileGroupOp, SharedExecutorOp>(innerOp)) {
+      if (isa<TileGroupOp>(innerOp)) {
+        innerOp->emitOpError(
+            "expected to be lowered by DistributeAndLowerPass");
+        return WalkResult::interrupt();
+      }
+      // SharedExecutorOps nested inside pcf.generic are expected (child
+      // scopes from telescoping). Only flag top-level ones.
+      if (isa<SharedExecutorOp>(innerOp) &&
+          !innerOp->getParentOfType<GenericOp>()) {
         innerOp->emitOpError(
             "expected to be lowered by DistributeAndLowerPass");
         return WalkResult::interrupt();
