@@ -222,6 +222,7 @@ public:
   //   }
   virtual void
   buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
+                               Attribute options,
                                OpPassManager &passManager) = 0;
 
   // Inserts passes used to link `hal.executable.variant` ops together.

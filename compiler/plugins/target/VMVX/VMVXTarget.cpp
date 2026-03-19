@@ -126,6 +126,7 @@ public:
   }
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
+                                    Attribute options,
                                     OpPassManager &passManager) final {
     IREE::VMVX::buildVMVXTransformPassPipeline(passManager);
 
@@ -250,6 +251,7 @@ public:
   }
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
+                                    Attribute options,
                                     OpPassManager &passManager) final {
     IREE::VMVX::buildVMVXTransformPassPipeline(passManager);
   }
