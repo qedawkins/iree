@@ -465,4 +465,3 @@ util.func private @telescope_multi_struct(
 //       CHECK:   pcf.telescope %{{.*}}[%{{.*}}]
 //  CHECK-SAME:     : !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.test_scope>, index}>
 //  CHECK-SAME:    -> (!pcf.threadgroup<#pcf.test_scope>, !pcf.sref<128x64xf16, #pcf.test_scope>, index)
-

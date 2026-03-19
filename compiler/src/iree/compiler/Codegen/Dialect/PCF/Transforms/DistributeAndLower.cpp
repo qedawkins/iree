@@ -547,8 +547,7 @@ distributeWithinTileGroup(TileGroupOp tileGroup,
 /// Auto-detect a child scope from telescope ops in the shared_executor body.
 /// Returns the child scope if all telescope ops agree on the same scope,
 /// or nullptr if no telescope ops exist.
-static ScopeAttrInterface
-detectChildScope(SharedExecutorOp sharedExec) {
+static ScopeAttrInterface detectChildScope(SharedExecutorOp sharedExec) {
   ScopeAttrInterface childScope;
   sharedExec.getRegion().walk([&](TelescopeOp telescopeOp) {
     // The first result of a telescope op is a ThreadGroupType whose scope
@@ -727,13 +726,12 @@ lowerSharedExecutor(SharedExecutorOp sharedExec,
       childInitializer.push_back(childInitBlock);
 
       // Move init_subscope body ops into the child initializer.
-      childInitBlock->getOperations().splice(
-          childInitBlock->end(), initBody.getOperations());
+      childInitBlock->getOperations().splice(childInitBlock->end(),
+                                             initBody.getOperations());
 
       // Add leading args to the child execute region for each yielded value.
       Block &childExecBlock = childExec.getRegion().front();
-      int64_t numChildLeadingArgs =
-          static_cast<int64_t>(yieldedTypes.size());
+      int64_t numChildLeadingArgs = static_cast<int64_t>(yieldedTypes.size());
       for (int64_t i = 0; i < numChildLeadingArgs; ++i) {
         // Insert leading args at the front, before the threadgroup arg.
         childExecBlock.insertArgument(i, yieldedTypes[i], loc);
@@ -806,8 +804,7 @@ lowerSharedExecutor(SharedExecutorOp sharedExec,
     // Check if the child block has a terminator.
     if (childExecBlock.empty() ||
         !childExecBlock.back().hasTrait<OpTrait::IsTerminator>()) {
-      OpBuilder childBuilder =
-          OpBuilder::atBlockEnd(&childExecBlock);
+      OpBuilder childBuilder = OpBuilder::atBlockEnd(&childExecBlock);
       ReturnOp::create(childBuilder, loc);
     }
 
@@ -815,8 +812,7 @@ lowerSharedExecutor(SharedExecutorOp sharedExec,
     // to the child. Check if genericBlock still has its terminator.
     if (genericBlock.empty() ||
         !genericBlock.back().hasTrait<OpTrait::IsTerminator>()) {
-      OpBuilder genericBuilder =
-          OpBuilder::atBlockEnd(&genericBlock);
+      OpBuilder genericBuilder = OpBuilder::atBlockEnd(&genericBlock);
       ReturnOp::create(genericBuilder, loc);
     }
 
@@ -913,8 +909,7 @@ struct DistributeAndLowerPass final
 
     for (SharedExecutorOp sharedExec : sharedExecs) {
       // Auto-detect child scope from telescope ops in the body.
-      ScopeAttrInterface detectedChildScope =
-          detectChildScope(sharedExec);
+      ScopeAttrInterface detectedChildScope = detectChildScope(sharedExec);
       if (failed(lowerSharedExecutor(sharedExec, detectedChildScope))) {
         signalPassFailure();
         return;

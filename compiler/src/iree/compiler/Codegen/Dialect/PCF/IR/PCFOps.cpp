@@ -2205,8 +2205,7 @@ LogicalResult GetMemrefOp::verify() {
 // InitSubscopeOp
 //===----------------------------------------------------------------------===//
 
-ParseResult InitSubscopeOp::parse(OpAsmParser &parser,
-                                  OperationState &result) {
+ParseResult InitSubscopeOp::parse(OpAsmParser &parser, OperationState &result) {
   // Parse source operand.
   OpAsmParser::UnresolvedOperand sourceOperand;
   if (parser.parseOperand(sourceOperand)) {
@@ -2220,8 +2219,7 @@ ParseResult InitSubscopeOp::parse(OpAsmParser &parser,
   }
 
   // Ensure the body has a terminator.
-  InitSubscopeOp::ensureTerminator(*body, parser.getBuilder(),
-                                   result.location);
+  InitSubscopeOp::ensureTerminator(*body, parser.getBuilder(), result.location);
 
   // Parse "-> result_type".
   Type resultType;
@@ -2239,8 +2237,7 @@ ParseResult InitSubscopeOp::parse(OpAsmParser &parser,
       ThreadGroupType::get(parser.getContext(), resultTgType.getScope(), {});
 
   // Resolve source operand.
-  if (parser.resolveOperand(sourceOperand, sourceType,
-                            result.operands)) {
+  if (parser.resolveOperand(sourceOperand, sourceType, result.operands)) {
     return failure();
   }
 
@@ -2281,8 +2278,7 @@ LogicalResult InitSubscopeOp::verify() {
            << structTypes.size() << ")";
   }
 
-  for (auto [i, pair] :
-       llvm::enumerate(llvm::zip(yieldedTypes, structTypes))) {
+  for (auto [i, pair] : llvm::enumerate(llvm::zip(yieldedTypes, structTypes))) {
     if (std::get<0>(pair) != std::get<1>(pair)) {
       return emitOpError("yielded type ")
              << std::get<0>(pair) << " at index " << i
@@ -2354,8 +2350,7 @@ void TelescopeOp::print(OpAsmPrinter &p) {
   p << " : " << getSource().getType() << " -> ";
   if (getNumResults() > 1) {
     p << "(";
-    llvm::interleaveComma(getResultTypes(), p,
-                          [&](Type type) { p << type; });
+    llvm::interleaveComma(getResultTypes(), p, [&](Type type) { p << type; });
     p << ")";
   } else {
     p << getResultTypes().front();
@@ -2404,8 +2399,7 @@ LogicalResult TelescopeOp::verify() {
       if (resultFieldType != structTypes[i]) {
         return emitOpError("result type ")
                << resultFieldType << " at index " << (i + 1)
-               << " does not match source struct field type "
-               << structTypes[i];
+               << " does not match source struct field type " << structTypes[i];
       }
     }
   }
