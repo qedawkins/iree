@@ -382,3 +382,39 @@ util.func private @run_cluster_values_only(
 // CHECK-LABEL: @run_cluster_values_only
 //       CHECK:     pcf.cluster_yield %{{.*}} : f32
 //       CHECK:   } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>
+
+// -----
+
+// init_subscope: single allocation.
+util.func private @init_subscope_single(%tg: !pcf.threadgroup<#pcf.sequential>) {
+  %tg2 = pcf.init_subscope %tg {
+    %alloc = pcf.alloc() : !pcf.sref<128x64xf16, #pcf.sequential>
+    pcf.yield %alloc : !pcf.sref<128x64xf16, #pcf.sequential>
+  } -> !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.sequential>}>
+  util.return
+}
+
+// CHECK-LABEL: @init_subscope_single
+//  CHECK-SAME:   %[[TG:[A-Za-z0-9]+]]: !pcf.threadgroup<#pcf.sequential>
+//       CHECK:   pcf.init_subscope %[[TG]] {
+//  CHECK-NEXT:     %[[ALLOC:.+]] = pcf.alloc() : !pcf.sref<128x64xf16, #pcf.sequential>
+//  CHECK-NEXT:     pcf.yield %[[ALLOC]] : !pcf.sref<128x64xf16, #pcf.sequential>
+//  CHECK-NEXT:   } -> !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.sequential>}>
+
+// -----
+
+// init_subscope: multiple allocations.
+util.func private @init_subscope_multi(%tg: !pcf.threadgroup<#pcf.sequential>) {
+  %tg2 = pcf.init_subscope %tg {
+    %a0 = pcf.alloc() : !pcf.sref<128x64xf16, #pcf.sequential>
+    %a1 = pcf.alloc() : !pcf.sref<64x32xf32, #pcf.sequential>
+    pcf.yield %a0, %a1 : !pcf.sref<128x64xf16, #pcf.sequential>, !pcf.sref<64x32xf32, #pcf.sequential>
+  } -> !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.sequential>, !pcf.sref<64x32xf32, #pcf.sequential>}>
+  util.return
+}
+
+// CHECK-LABEL: @init_subscope_multi
+//       CHECK:   pcf.init_subscope %{{.*}} {
+//       CHECK:     pcf.yield %{{.*}}, %{{.*}} : !pcf.sref<128x64xf16, #pcf.sequential>, !pcf.sref<64x32xf32, #pcf.sequential>
+//  CHECK-NEXT:   } -> !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.sequential>, !pcf.sref<64x32xf32, #pcf.sequential>}>
+

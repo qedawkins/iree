@@ -1161,11 +1161,64 @@ def PCF_GetMemrefOp : PCF_Op<"get_memref", [
 } // OpGroupReadOps
 
 //===----------------------------------------------------------------------===//
+// Scope Ops
+//===----------------------------------------------------------------------===//
+
+def OpGroupScopeOps : OpDocGroup {
+  let summary = "Scope ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupScopeOps in {
+
+//===----------------------------------------------------------------------===//
+// InitSubscopeOp
+//===----------------------------------------------------------------------===//
+
+def InitSubscopeOp : PCF_Op<"init_subscope", [
+    RecursiveMemoryEffects,
+    SingleBlock,
+    SingleBlockImplicitTerminator<"mlir::iree_compiler::IREE::PCF::YieldOp">,
+  ]> {
+  let summary = [{Allocate resources for a child scope and attach as struct fields.}];
+  let description = [{
+    Allocates memory for a child scope and attaches the allocations as
+    struct fields to the threadgroup. The body contains allocation ops
+    that produce values for the child scope. The yielded values become
+    struct fields on the returned threadgroup.
+
+    Semantics: run-once, uniform across all scope levels.
+
+    The input threadgroup must have no struct fields. The output
+    threadgroup has the same scope but with struct fields matching the
+    yielded types.
+
+    Example:
+    ```mlir
+    %tg2 = pcf.init_subscope %tg {
+      %alloc = pcf.alloc() : !pcf.sref<128x64xf16, #child_scope>
+      pcf.yield %alloc : !pcf.sref<128x64xf16, #child_scope>
+    } -> !pcf.threadgroup<#parent_scope, {!pcf.sref<128x64xf16, #child_scope>}>
+    ```
+  }];
+
+  let arguments = (ins PCF_AnyThreadGroup:$source);
+  let results = (outs PCF_AnyThreadGroup:$result);
+  let regions = (region MinSizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+} // OpGroupScopeOps
+
+//===----------------------------------------------------------------------===//
 // Misc
 //===----------------------------------------------------------------------===//
 
 def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp",
-                                                 "IREE::PCF::SharedExecutorOp"]>, Pure,
+                                                 "IREE::PCF::SharedExecutorOp",
+                                                 "IREE::PCF::InitSubscopeOp"]>, Pure,
                                    ReturnLike, Terminator,
 ]> {
   let summary = [{Yields results from a region.}];
@@ -1176,6 +1229,13 @@ def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp",
   let arguments = (ins
     Variadic<AnyType>:$operands
   );
+
+  let builders = [
+    // Builder with no operands (used by SingleBlockImplicitTerminator).
+    OpBuilder<(ins), [{
+      return build($_builder, $_state, ValueRange{});
+    }]>,
+  ];
 
   let assemblyFormat = [{
     attr-dict
