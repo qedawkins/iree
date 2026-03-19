@@ -2202,6 +2202,99 @@ LogicalResult GetMemrefOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// InitSubscopeOp
+//===----------------------------------------------------------------------===//
+
+ParseResult InitSubscopeOp::parse(OpAsmParser &parser,
+                                  OperationState &result) {
+  // Parse source operand.
+  OpAsmParser::UnresolvedOperand sourceOperand;
+  if (parser.parseOperand(sourceOperand)) {
+    return failure();
+  }
+
+  // Parse body region.
+  Region *body = result.addRegion();
+  if (parser.parseRegion(*body)) {
+    return failure();
+  }
+
+  // Ensure the body has a terminator.
+  InitSubscopeOp::ensureTerminator(*body, parser.getBuilder(),
+                                   result.location);
+
+  // Parse "-> result_type".
+  Type resultType;
+  if (parser.parseArrow() || parser.parseType(resultType)) {
+    return failure();
+  }
+
+  // Derive input type from result type: same scope, no struct fields.
+  ThreadGroupType resultTgType = dyn_cast<ThreadGroupType>(resultType);
+  if (!resultTgType) {
+    return parser.emitError(parser.getCurrentLocation(),
+                            "result type must be !pcf.threadgroup");
+  }
+  ThreadGroupType sourceType =
+      ThreadGroupType::get(parser.getContext(), resultTgType.getScope(), {});
+
+  // Resolve source operand.
+  if (parser.resolveOperand(sourceOperand, sourceType,
+                            result.operands)) {
+    return failure();
+  }
+
+  result.addTypes(resultType);
+  return success();
+}
+
+void InitSubscopeOp::print(OpAsmPrinter &p) {
+  p << " " << getSource() << " ";
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+  p << " -> " << getResult().getType();
+}
+
+LogicalResult InitSubscopeOp::verify() {
+  ThreadGroupType sourceType = cast<ThreadGroupType>(getSource().getType());
+  ThreadGroupType resultType = cast<ThreadGroupType>(getResult().getType());
+
+  // Input threadgroup must have no struct fields.
+  if (!sourceType.getStructTypes().empty()) {
+    return emitOpError("input threadgroup must have no struct fields");
+  }
+
+  // Scopes must match.
+  if (sourceType.getScope() != resultType.getScope()) {
+    return emitOpError("result scope must match input scope");
+  }
+
+  // Yielded types must match result struct field types.
+  YieldOp yieldOp = cast<YieldOp>(getBody().front().getTerminator());
+  TypeRange yieldedTypes = yieldOp.getOperandTypes();
+  ArrayRef<Type> structTypes = resultType.getStructTypes();
+
+  if (yieldedTypes.size() != structTypes.size()) {
+    return emitOpError("yielded value count (")
+           << yieldedTypes.size()
+           << ") does not match result struct field count ("
+           << structTypes.size() << ")";
+  }
+
+  for (auto [i, pair] :
+       llvm::enumerate(llvm::zip(yieldedTypes, structTypes))) {
+    if (std::get<0>(pair) != std::get<1>(pair)) {
+      return emitOpError("yielded type ")
+             << std::get<0>(pair) << " at index " << i
+             << " does not match result struct field type "
+             << std::get<1>(pair);
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Dialect registration
 //===----------------------------------------------------------------------===//
 
