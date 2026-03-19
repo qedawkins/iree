@@ -594,6 +594,51 @@ util.func private @shared_executor_rw_eltype_mismatch(%init: tensor<4x8xf32>) {
 // operands against result types (SharedExecutorOp::parse line 916), so a
 // type mismatch causes a parse-time error before the verifier runs.
 
+// init_subscope: input with struct fields causes parser type mismatch.
+// The parser derives the source type from the result type (same scope, no
+// struct fields). If the source SSA value has struct fields, the parser
+// reports a type mismatch before the verifier runs.
+util.func private @init_subscope_input_with_struct(
+    // expected-note@below {{prior use here}}
+    %tg: !pcf.threadgroup<#pcf.sequential, {index}>) {
+  // expected-error@+1 {{expects different type than prior uses}}
+  %tg2 = pcf.init_subscope %tg {
+    %alloc = pcf.alloc() : !pcf.sref<128x64xf16, #pcf.sequential>
+    pcf.yield %alloc : !pcf.sref<128x64xf16, #pcf.sequential>
+  } -> !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.sequential>}>
+  util.return
+}
+
+// -----
+
+// init_subscope: scope mismatch between input and result causes parser
+// type mismatch. The parser derives source type from result type scope.
+util.func private @init_subscope_scope_mismatch(
+    // expected-note@below {{prior use here}}
+    %tg: !pcf.threadgroup<#pcf.test_scope>) {
+  // expected-error@+1 {{expects different type than prior uses}}
+  %tg2 = pcf.init_subscope %tg {
+    %alloc = pcf.alloc() : !pcf.sref<128x64xf16, #pcf.sequential>
+    pcf.yield %alloc : !pcf.sref<128x64xf16, #pcf.sequential>
+  } -> !pcf.threadgroup<#pcf.sequential, {!pcf.sref<128x64xf16, #pcf.sequential>}>
+  util.return
+}
+
+// -----
+
+// init_subscope: yield type mismatch with result struct fields.
+util.func private @init_subscope_yield_mismatch(
+    %tg: !pcf.threadgroup<#pcf.sequential>) {
+  // expected-error@+1 {{yielded type '!pcf.sref<128x64xf16, #pcf.sequential>' at index 0 does not match result struct field type 'index'}}
+  %tg2 = pcf.init_subscope %tg {
+    %alloc = pcf.alloc() : !pcf.sref<128x64xf16, #pcf.sequential>
+    pcf.yield %alloc : !pcf.sref<128x64xf16, #pcf.sequential>
+  } -> !pcf.threadgroup<#pcf.sequential, {index}>
+  util.return
+}
+
+// -----
+
 // shared_executor: readonly sref scope mismatch with op scope.
 util.func private @shared_executor_readonly_scope_mismatch(
     %input: tensor<4x8xf32>, %output: tensor<4x8xf32>) {
