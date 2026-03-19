@@ -78,17 +78,10 @@ util.func private @cluster_shared(!pcf.cluster<#pcf.test_scope, (0 -> s0), share
 
 // -----
 
-// Cluster with uniform struct elements.
-util.func private @cluster_uniform(!pcf.cluster<#pcf.test_scope, (0 -> s0), uniform: {index}, c5>)
-// CHECK: @cluster_uniform
-// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> s0), uniform: {index}, c5>
-
-// -----
-
-// Cluster with all three struct kinds.
-util.func private @cluster_all_kinds(!pcf.cluster<#pcf.test_scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, uniform: {index}, c6>)
-// CHECK: @cluster_all_kinds
-// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, uniform: {index}, c6>
+// Cluster with both struct kinds.
+util.func private @cluster_both_kinds(!pcf.cluster<#pcf.test_scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, c6>)
+// CHECK: @cluster_both_kinds
+// CHECK-SAME: !pcf.cluster<#pcf.test_scope, (0 -> d0), private: {f32}, shared: {tensor<64xf32>}, c6>
 
 // -----
 

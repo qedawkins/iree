@@ -629,7 +629,7 @@ util.func private @shared_executor_mixed(
 
 // -----
 
-// run_thread with struct block arguments (from source cluster with uniform
+// run_thread with struct block arguments (from source cluster with private
 // types). The structural lowering creates unrealized_conversion_cast for
 // struct args when inlining the run_thread body.
 //
@@ -638,7 +638,7 @@ util.func private @shared_executor_mixed(
 // CHECK-NEXT:    case 0 {
 // CHECK:           %[[CAST:.+]] = builtin.unrealized_conversion_cast to index
 // CHECK:           arith.subi
-// CHECK:           "test.use_uniform"
+// CHECK:           "test.use_struct"
 // CHECK:           scf.yield
 // CHECK:         }
 // CHECK-NEXT:    default {
@@ -649,19 +649,19 @@ util.func private @run_thread_with_struct_args(
   pcf.shared_executor.tile_group %tg split [[%k]]
       (%left: !pcf.cluster<#pcf.test_scope, (0 -> d0), left>,
        %right: !pcf.cluster<#pcf.test_scope, (d0 -> s0), right>) {
-    // A run_cluster produces a cluster with uniform types.
-    %c1 = pcf.shared_executor.run_cluster(%left)[%k]
-        () {
+    // A run_thread produces a cluster with private types.
+    %c1 = pcf.shared_executor.run_thread(%left)[%k]
+        ()[%tid0: index] {
       %idx = arith.constant 42 : index
-      pcf.cluster_yield uniform(%idx : index)
+      pcf.cluster_yield %idx : index
     } : (!pcf.cluster<#pcf.test_scope, (0 -> d0), left>)
-      -> !pcf.cluster<#pcf.test_scope, (0 -> d0), uniform: {index}, left>
-    // run_thread consumes the uniform value as a struct arg.
+      -> !pcf.cluster<#pcf.test_scope, (0 -> d0), private: {index}, left>
+    // Another run_thread consumes the private value as a struct arg.
     pcf.shared_executor.run_thread(%c1)[%k]
-        (%u: index)[%tid: index] {
-      "test.use_uniform"(%u, %tid) : (index, index) -> ()
+        (%p: index)[%tid1: index] {
+      "test.use_struct"(%p, %tid1) : (index, index) -> ()
       pcf.cluster_yield
-    } : (!pcf.cluster<#pcf.test_scope, (0 -> d0), uniform: {index}, left>)
+    } : (!pcf.cluster<#pcf.test_scope, (0 -> d0), private: {index}, left>)
     pcf.return
   } : !pcf.threadgroup<#pcf.test_scope>
   util.return
