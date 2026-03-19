@@ -213,7 +213,7 @@ util.func private @tile_group_cluster_with_struct(
 // -----
 
 // Cluster type: unknown keyword in struct group.
-// expected-error@+1 {{expected 'private', 'shared', or 'uniform'}}
+// expected-error@+1 {{expected 'private' or 'shared'}}
 util.func private @cluster_unknown_keyword(!pcf.cluster<#pcf.test_scope, (0 -> s0), unknown: {index}, c0>)
 
 // -----
@@ -310,30 +310,16 @@ util.func private @run_cluster_boundsmap_mismatch(
 
 // -----
 
-// run_cluster: yield uniform type mismatch.
-util.func private @run_cluster_yield_uniform_mismatch(
-    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>) {
-  %cst = arith.constant 0.0 : f32
-  // expected-error@+1 {{'pcf.shared_executor.run_cluster' op yield uniform types do not match result}}
-  %r = pcf.shared_executor.run_cluster(%c)[]
-      (%s: f32, %u: index) {
-    pcf.cluster_yield uniform(%cst : f32) %s : f32
-  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>)
-    -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>
-  util.return
-}
-
-// -----
-
 // run_cluster: yield value type mismatch.
 util.func private @run_cluster_yield_value_mismatch(
-    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>) {
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>) {
+  %idx = arith.constant 0 : index
   // expected-error@+1 {{'pcf.shared_executor.run_cluster' op yield value types do not match result}}
   %r = pcf.shared_executor.run_cluster(%c)[]
-      (%s: f32, %u: index) {
-    pcf.cluster_yield uniform(%u : index) %u : index
-  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>)
-    -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, uniform: {index}, c0>
+      (%s: f32) {
+    pcf.cluster_yield %idx : index
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), shared: {f32}, c0>
   util.return
 }
 
@@ -529,30 +515,16 @@ util.func private @run_thread_result_id_mismatch(
 
 // -----
 
-// run_thread: yield uniform type mismatch.
-util.func private @run_thread_yield_uniform_mismatch(
-    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>) {
-  %cst = arith.constant 0.0 : f32
-  // expected-error@+1 {{'pcf.shared_executor.run_thread' op yield uniform types do not match result}}
-  %r = pcf.shared_executor.run_thread(%c)[]
-      (%p: f32, %u: index)[%tid: index] {
-    pcf.cluster_yield uniform(%cst : f32) %p : f32
-  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>)
-    -> !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>
-  util.return
-}
-
-// -----
-
 // run_thread: yield value type mismatch.
 util.func private @run_thread_yield_value_mismatch(
-    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>) {
+    %c: !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>) {
+  %idx = arith.constant 0 : index
   // expected-error@+1 {{'pcf.shared_executor.run_thread' op yield value types do not match result}}
   %r = pcf.shared_executor.run_thread(%c)[]
-      (%p: f32, %u: index)[%tid: index] {
-    pcf.cluster_yield uniform(%u : index) %u : index
-  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>)
-    -> !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, uniform: {index}, c0>
+      (%p: f32)[%tid: index] {
+    pcf.cluster_yield %idx : index
+  } : (!pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>)
+    -> !pcf.cluster<#pcf.sequential, (0 -> s0), private: {f32}, c0>
   util.return
 }
 
