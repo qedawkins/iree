@@ -217,6 +217,9 @@ def DistributeAndLowerPass
            "Subgroup (warp/wave) size for vector distribution.">,
     ListOption<"workgroupSize", "workgroup-size", "int64_t",
                "Workgroup dimensions for vector distribution.">,
+    Option<"childScope", "child-scope", "std::string",
+           /*default=*/"\"\"",
+           "Child scope for telescoping distribution.">,
   ];
 }
 
