@@ -77,17 +77,26 @@ struct TranslateTargetExecutableVariantsPass
 
     // Build or retrieve the cached pass pipeline for this target attribute.
     // When many executables share the same target, this avoids redundantly
-    // reconstructing the same pipeline for each one.
+    // reconstructing the same pipeline for each one. The cache key includes
+    // variant options (if present) since they may influence the pipeline.
     IREE::HAL::ExecutableTargetAttr targetAttr = variantOp.getTargetAttr();
+    Attribute optionsAttr = variantOp.getOptionsAttr();
+    Attribute cacheKey = targetAttr;
+    if (optionsAttr) {
+      cacheKey = ArrayAttr::get(variantOp.getContext(),
+                                {targetAttr, optionsAttr});
+    }
     OpPassManager passManager(variantOp.getOperationName());
     if (pipelineCache) {
       passManager = pipelineCache->getOrCreate(
-          targetAttr, variantOp.getOperationName(), [&](OpPassManager &pm) {
-            targetBackend->buildTranslationPassPipeline(targetAttr, pm);
+          cacheKey, variantOp.getOperationName(), [&](OpPassManager &pm) {
+            targetBackend->buildTranslationPassPipeline(targetAttr,
+                                                        optionsAttr, pm);
           });
     } else {
       // Fallback for standalone pass usage (e.g., iree-opt).
-      targetBackend->buildTranslationPassPipeline(targetAttr, passManager);
+      targetBackend->buildTranslationPassPipeline(targetAttr, optionsAttr,
+                                                  passManager);
     }
 
     if (failed(runPipeline(passManager, variantOp))) {

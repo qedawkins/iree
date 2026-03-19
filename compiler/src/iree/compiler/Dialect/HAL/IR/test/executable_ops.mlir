@@ -33,6 +33,29 @@ hal.executable @executable {
 
 #executable_target_format = #hal.executable.target<"backend", "format">
 
+// CHECK-LABEL: @executable_with_dict_options
+hal.executable @executable_with_dict_options {
+  // CHECK: hal.executable.variant public @backend
+  // CHECK-SAME: target(#executable_target_format)
+  // CHECK-SAME: options({key = "value"})
+  hal.executable.variant @backend
+      target(#executable_target_format)
+      options({key = "value"}) {
+    hal.executable.export public @entry0 ordinal(0) layout(#hal.pipeline.layout<bindings = [
+      #hal.pipeline.binding<storage_buffer>
+    ]>)
+    builtin.module {
+      func.func @entry0() {
+        return
+      }
+    }
+  }
+}
+
+// -----
+
+#executable_target_format = #hal.executable.target<"backend", "format">
+
 // CHECK-LABEL: @export_with_workgroup_count_region
 hal.executable @export_with_workgroup_count_region {
   // CHECK: hal.executable.variant public @backend target(#executable_target_format

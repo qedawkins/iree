@@ -2873,6 +2873,7 @@ def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
     OptionalAttr<StrAttr>:$sym_visibility,
     SymbolNameAttr:$sym_name,
     HAL_ExecutableTargetAttr:$target,
+    OptionalAttr<AnyAttr>:$options,
     OptionalAttr<HAL_ExecutableObjectArrayAttr>:$objects,
     OptionalAttr<DictionaryAttr>:$sources
   );
@@ -2885,6 +2886,7 @@ def HAL_ExecutableVariantOp : HAL_Op<"executable.variant", [
     custom<SymbolVisibility>($sym_visibility)
     $sym_name
     `target` `(` $target `)`
+    (`options` `(` $options^ `)` )?
     (`objects` `(` $objects^ `)` )?
     (`sources` `(` $sources^ `)` )?
     attr-dict-with-keyword
