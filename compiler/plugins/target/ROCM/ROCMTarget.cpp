@@ -10,6 +10,7 @@
 
 #include "compiler/plugins/target/ROCM/Dialect/ROCM/IR/ROCMAttrs.h"
 #include "compiler/plugins/target/ROCM/Dialect/ROCM/Transforms/Passes.h"
+#include "compiler/plugins/target/ROCM/ROCDLPipelineOptions.h"
 #include "compiler/plugins/target/ROCM/builtins/ukernel/iree_uk_amdgpu_bitcode.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
@@ -25,12 +26,14 @@
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/HAL/Target/TargetRegistry.h"
+#include "iree/compiler/Dialect/HAL/Transforms/Passes.h"
 #include "iree/compiler/Dialect/HAL/Utils/ExecutableDebugInfoUtils.h"
 #include "iree/compiler/Dialect/HAL/Utils/LLVMLinkerUtils.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/PluginAPI/Client.h"
 #include "iree/compiler/Utils/EmbeddedDataDirectory.h"
 #include "iree/compiler/Utils/FlatbufferUtils.h"
+#include "iree/compiler/Utils/PassUtils.h"
 #include "iree/compiler/Utils/ToolUtils.h"
 #include "iree/schemas/amdgpu_executable_def_builder.h"
 #include "iree/schemas/hip_executable_def_builder.h"
@@ -46,6 +49,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
@@ -60,6 +64,8 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
+
+#define DEBUG_TYPE "iree-rocm-target"
 
 namespace mlir::iree_compiler::IREE::HAL {
 namespace {
@@ -532,8 +538,52 @@ public:
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
                                     Attribute options,
                                     OpPassManager &passManager) final {
-    buildLLVMGPUCodegenPassPipeline(passManager, true,
-                                    targetOptions.debugSymbols);
+    // Extract pipeline options from the variant options attribute.
+    ROCM::ROCDLPipelineOptions pipelineOpts;
+    if (auto pipelineOptionsAttr =
+            dyn_cast_if_present<ROCM::PipelineOptionsAttr>(options)) {
+      pipelineOpts = pipelineOptionsAttr.getValue();
+    }
+
+    bool preserveDebugInfo = targetOptions.debugSymbols;
+
+    // Phase 1: ConfigurationControlledTranslation.
+    // Covers executable lowering, transform dialect, strategy selection,
+    // and workgroup count reconciliation.
+    if (pipelineOpts.shouldRunPhase(
+            ROCM::TranslationPhase::ConfigurationControlledTranslation)) {
+      passManager.addPass(IREE::HAL::createHoistExecutableObjectsPass());
+      {
+        OpPassManager &modulePM = passManager.nest<ModuleOp>();
+        modulePM.addPass(createLowerExecutableUsingTransformDialectPass());
+        LLVMGPULowerExecutableTargetPassOptions lowerOpts;
+        lowerOpts.forROCDL = true;
+        FunctionLikeNest(modulePM)
+            .addPass([&] {
+              return createLLVMGPULowerExecutableTargetPass(lowerOpts);
+            })
+            .addPass(createVerifyWorkgroupDistributionPass)
+            .addPass(createRemoveIndexHintsPass);
+      }
+      {
+        passManager.addPass(createReconcileTranslationInfoPass());
+        passManager.addPass(createResolveWorkgroupCountHintsPass());
+      }
+    }
+
+    // Phase 2: LLVMTranslation.
+    // Covers linalg-to-loops, buffer optimizations, address computation,
+    // and the final ROCDL conversion + kernel annotation.
+    if (pipelineOpts.shouldRunPhase(ROCM::TranslationPhase::LLVMTranslation)) {
+      addLowerToLLVMGPUPasses(passManager.nest<ModuleOp>(),
+                              /*forROCDL=*/true, preserveDebugInfo);
+    }
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "Using ROCDL pass pipeline:\n";
+      passManager.printAsTextualPipeline(llvm::dbgs());
+      llvm::dbgs() << "\n";
+    });
   }
 
   void buildLinkingPassPipeline(OpPassManager &passManager) final {

@@ -117,4 +117,35 @@ def ROCM_UKernelIterationSizeConstraint
   let assemblyFormat = "`<` struct(params) `>`";
 }
 
+//===----------------------------------------------------------------------===//
+// rocm.pipeline_options
+//===----------------------------------------------------------------------===//
+
+def ROCM_PipelineOptionsAttr :
+    AttrDef<ROCM_Dialect, "PipelineOptions"> {
+  let mnemonic = "pipeline_options";
+  let summary = [{Options controlling ROCDL translation pipeline phases.}];
+  let description = [{
+    Wraps a ROCDLPipelineOptions C++ struct that controls which phases of
+    the translation pipeline execute. This enables compile-from/compile-to
+    functionality at the variant level.
+
+    The attribute is set on `hal.executable.variant` options during
+    configuration and consumed by the ROCM target backend during
+    translation.
+
+    Example:
+    ```
+    #rocm.pipeline_options<compile_to = pre-llvm>
+    #rocm.pipeline_options<compile_from = pre-llvm, compile_to = pre-serialization>
+    #rocm.pipeline_options<>  // default: run all phases
+    ```
+  }];
+  let parameters = (ins
+    AttrParameter<"ROCDLPipelineOptions",
+                  "pipeline phase options">:$value
+  );
+  let hasCustomAssemblyFormat = 1;
+}
+
 #endif // IREE_PLUGINS_TARGET_ROCM_DIALECT_ROCMATTRS

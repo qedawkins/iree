@@ -18,6 +18,16 @@ iree_compiler_register_plugin(
 )
 
 iree_compiler_cc_library(
+    name = "ROCDLPipelineOptions",
+    hdrs = [
+        "ROCDLPipelineOptions.h",
+    ],
+    deps = [
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+iree_compiler_cc_library(
     name = "ROCM",
     srcs = [
         "ROCMTarget.cpp",
@@ -27,6 +37,7 @@ iree_compiler_cc_library(
         "ROCMTargetUtils.h",
     ],
     deps = [
+        ":ROCDLPipelineOptions",
         "//compiler/plugins/target/ROCM/Dialect/ROCM/IR:ROCMDialect",
         "//compiler/plugins/target/ROCM/Dialect/ROCM/Transforms",
         "//compiler/plugins/target/ROCM/builtins/ukernel:iree_uk_amdgpu_bitcode",
