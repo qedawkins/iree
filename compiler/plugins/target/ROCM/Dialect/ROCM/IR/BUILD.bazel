@@ -58,6 +58,7 @@ iree_compiler_cc_library(
     deps = [
         ":ROCMAttrs",
         ":ROCMDialectGen",
+        "//compiler/plugins/target/ROCM:ROCDLPipelineOptions",
         "//compiler/plugins/target/ROCM/builtins/mlir_ukernel:iree_mlir_ukernel_patterns_amdgpu",
         "//compiler/plugins/target/ROCM/builtins/mlir_ukernel:iree_mlir_ukernels_amdgpu",
         "//compiler/plugins/target/ROCM/builtins/specialization:iree_specialization_patterns_amdgpu",

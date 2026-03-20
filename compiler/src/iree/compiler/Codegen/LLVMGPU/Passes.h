@@ -80,6 +80,13 @@ void buildLLVMGPUCodegenConfigurationPassPipeline(
 void buildLLVMGPUCodegenPassPipeline(OpPassManager &modulePassManager,
                                      bool useROCM, bool preserveDebugInfo);
 
+/// Populates passes to lower from linalg/loops/GPU/affine to LLVM+NVVM or
+/// LLVM+ROCDL. The pass manager should be nested on the ModuleOp within the
+/// variant. After this pipeline, the module contains the final llvm.module
+/// ready for serialization.
+void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager, bool forROCDL,
+                             bool preserveDebugInfo);
+
 /// Wraps GPUPipelineOptions and forROCDL for passing through
 /// PipelineAttrInterface::buildPipeline.
 struct GPUCodegenPipelineOptions final

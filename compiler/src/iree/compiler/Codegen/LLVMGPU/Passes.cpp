@@ -957,8 +957,8 @@ addLowerAndOptimizeAddressComputationPasses(FunctionLikeNest &funcPassManager) {
       .addPass(createIREELoopInvariantCodeMotionPass);
 }
 
-static void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager,
-                                    bool forROCDL, bool preserveDebugInfo) {
+void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager, bool forROCDL,
+                             bool preserveDebugInfo) {
   modulePassManager.addPass(
       createConvertHALDescriptorTypeToGPUAddressSpacePass());
   modulePassManager.addPass(createCanonicalizerPass());

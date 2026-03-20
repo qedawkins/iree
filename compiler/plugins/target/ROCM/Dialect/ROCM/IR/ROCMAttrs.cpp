@@ -237,6 +237,74 @@ Attribute TensorUKernelProviderAttr::getDataLayoutForUKernel(
 }
 
 //===----------------------------------------------------------------------===//
+// PipelineOptionsAttr
+//===----------------------------------------------------------------------===//
+
+Attribute PipelineOptionsAttr::parse(AsmParser &parser, Type type) {
+  ROCDLPipelineOptions opts;
+  if (parser.parseLess()) {
+    return {};
+  }
+  // Handle empty options: #rocm.pipeline_options<>.
+  if (parser.parseOptionalGreater().succeeded()) {
+    return PipelineOptionsAttr::get(parser.getContext(), opts);
+  }
+  // Parse key = value pairs.
+  bool first = true;
+  do {
+    if (!first) {
+      if (parser.parseComma()) {
+        return {};
+      }
+    }
+    first = false;
+    StringRef key;
+    if (parser.parseKeyword(&key) || parser.parseEqual()) {
+      return {};
+    }
+    StringRef value;
+    if (parser.parseKeyword(&value)) {
+      return {};
+    }
+    std::optional<TranslationPhase> phase = symbolizeTranslationPhase(value);
+    if (!phase) {
+      parser.emitError(parser.getCurrentLocation(),
+                       "unknown translation phase: ")
+          << value;
+      return {};
+    }
+    if (key == "compile_from") {
+      opts.compileFrom = *phase;
+    } else if (key == "compile_to") {
+      opts.compileTo = *phase;
+    } else {
+      parser.emitError(parser.getCurrentLocation(), "unknown key: ") << key;
+      return {};
+    }
+  } while (parser.parseOptionalGreater().failed());
+  return PipelineOptionsAttr::get(parser.getContext(), opts);
+}
+
+void PipelineOptionsAttr::print(AsmPrinter &printer) const {
+  ROCDLPipelineOptions opts = getValue();
+  printer << "<";
+  bool needsComma = false;
+  // Only print non-default values.
+  if (opts.compileFrom !=
+      TranslationPhase::ConfigurationControlledTranslation) {
+    printer << "compile_from = " << stringifyTranslationPhase(opts.compileFrom);
+    needsComma = true;
+  }
+  if (opts.compileTo != TranslationPhase::LLVMTranslation) {
+    if (needsComma) {
+      printer << ", ";
+    }
+    printer << "compile_to = " << stringifyTranslationPhase(opts.compileTo);
+  }
+  printer << ">";
+}
+
+//===----------------------------------------------------------------------===//
 // Attribute Registration
 //===----------------------------------------------------------------------===//
 
