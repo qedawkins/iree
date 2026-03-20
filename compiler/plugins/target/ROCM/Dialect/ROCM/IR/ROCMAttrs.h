@@ -8,6 +8,7 @@
 #define IREE_PLUGINS_TARGET_ROCM_DIALECT_ROCM_ROCMATTRS_H_
 
 #include "compiler/plugins/target/ROCM/Dialect/ROCM/IR/ROCMDialect.h"
+#include "compiler/plugins/target/ROCM/ROCDLPipelineOptions.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "mlir/IR/Builders.h"
