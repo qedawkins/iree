@@ -418,6 +418,120 @@ LogicalResult isAtBoundary(Operation *op) {
   return failure();
 }
 
+void addGPUTileAndFusePreDistributionPasses(
+    OpPassManager &funcPassManager,
+    const GPUPipelineOptions &pipelineOptions) {
+  // Step 0. Apply any user annotated lowering strategies.
+  funcPassManager.addPass(createLowerTensorUKernelsPass());
+  funcPassManager.addPass(createLoweringConfigInterpreterPass());
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  // Step 1. Promote matmul operands and pack to intrinsic shapes.
+  funcPassManager.addPass(createGPUPadOperandsPass());
+  funcPassManager.addPass(createGPUPromoteMatmulOperandsPass());
+  funcPassManager.addPass(createGPUTileAndConvertConvToMatmulPass());
+  funcPassManager.addPass(createGPUPackToIntrinsicsPass());
+  funcPassManager.addPass(createDecomposeBoundaryPackUnPackOpsPass());
+
+  // Step 1.5. Expand result shapes of MultiMmaOps before tiling.
+  {
+    IREE::GPU::ExpandUndistributedInnerTilesPassOptions options;
+    options.expandInputs = false;
+    options.expandOutputs = true;
+    funcPassManager.addPass(
+        IREE::GPU::createExpandUndistributedInnerTilesPass());
+  }
+  funcPassManager.addPass(createPropagateReshapesByExpansionPass());
+
+  // Step 2. Tile and fuse tileable ops to reduction loops.
+  {
+    GPUApplyTilingLevelPassOptions options;
+    options.tilingLevel = IREE::GPU::TilingLevel::Reduction;
+    options.normalizeLoops = pipelineOptions.useIgemmConvolution;
+    funcPassManager.addPass(createGPUApplyTilingLevelPass(options));
+    funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+    funcPassManager.addPass(createCSEPass());
+  }
+
+  funcPassManager.addPass(createGPUConvertToCoalescedDMAPass());
+
+  // Step 3. Decompose pack and unpack ops.
+  funcPassManager.addPass(createDecomposePackUnPackOpsPass(
+      DecomposePackUnPackOpsPassOptions{/*tileOuterToOne=*/false,
+                                        /*useOnlyReshapes=*/true}));
+
+  // Step 3.5. Expand inner dimensions of MultiMma ops.
+  {
+    IREE::GPU::ExpandUndistributedInnerTilesPassOptions options;
+    options.expandInputs = true;
+    options.expandOutputs = false;
+    funcPassManager.addPass(
+        IREE::GPU::createExpandUndistributedInnerTilesPass());
+  }
+
+  funcPassManager.addPass(createPropagateReshapesByExpansionPass());
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  // Step 4. Tile and fuse tileable ops to subgroups/threads.
+  {
+    GPUApplyTilingLevelPassOptions options;
+    options.tilingLevel = IREE::GPU::TilingLevel::Thread;
+    options.normalizeLoops = pipelineOptions.useIgemmConvolution;
+    options.fuseConsumers = false;
+    funcPassManager.addPass(createGPUApplyTilingLevelPass(options));
+    funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+    funcPassManager.addPass(createCSEPass());
+  }
+  {
+    GPUApplyTilingLevelPassOptions options;
+    options.tilingLevel = IREE::GPU::TilingLevel::Subgroup;
+    options.fuseConsumers = false;
+    funcPassManager.addPass(createGPUApplyTilingLevelPass(options));
+  }
+  funcPassManager.addPass(IREE::GPU::createDistributeInnerTiledToLanesPass());
+
+  // Step 4.5. Post-distribution cleanup.
+  funcPassManager.addPass(createLowerBitcodeUKernelsPass());
+  funcPassManager.addPass(iree_compiler::createNormalizeLoopBoundsPass(
+      NormalizeLoopBoundsPassOptions{/*normalizeFor=*/false,
+                                     /*normalizeForall=*/true}));
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
+  funcPassManager.addPass(createGPUBubbleResourceCastsPass());
+  {
+    OptimizeTensorInsertExtractSlicesPassOptions options;
+    options.foldIdentitySlices = true;
+    funcPassManager.addPass(
+        createOptimizeTensorInsertExtractSlicesPass(options));
+  }
+
+  // Step 5. Greedily fuse parallel loops and hoist from serial loops.
+  funcPassManager.addPass(createGPUFuseAndHoistParallelLoopsPass());
+  CombineResultLayoutTransformationPassOptions combineLayoutOptions;
+  combineLayoutOptions.scope =
+      IREE::Codegen::RelayoutCombinationScope::Workgroup;
+  funcPassManager.addPass(
+      createCombineResultLayoutTransformationPass(combineLayoutOptions));
+  funcPassManager.addPass(createGPUGreedilyDistributeToThreadsPass());
+  funcPassManager.addPass(createTileLargeTensorsPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
+  funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
+  funcPassManager.addPass(createGPUCombineValueSemanticBarriersPass());
+
+  // Step 6. Vectorize.
+  addGPUVectorizationPasses(funcPassManager, /*vectorizeCopies=*/false,
+                            /*enableMasking=*/true,
+                            /*foldIdentitySlices=*/true,
+                            /*decomposeMasks=*/false);
+  funcPassManager.addPass(createCleanupBufferAllocViewPass());
+  funcPassManager.addPass(createGPUCombineValueSemanticBarriersPass());
+}
+
 void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
                                    const GPUPipelineOptions &pipelineOptions,
                                    bool forROCDL) {

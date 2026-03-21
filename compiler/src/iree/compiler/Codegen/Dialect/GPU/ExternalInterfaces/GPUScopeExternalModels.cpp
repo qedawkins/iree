@@ -85,7 +85,10 @@ struct SubgroupScopeModel
     return gpu::AddressSpaceAttr::get(context, gpu::AddressSpace::Workgroup);
   }
 
-  int64_t getNativeNumIds(Attribute attr) const { return 1; }
+  int64_t getNativeNumProcessorIds(Attribute attr) const {
+    // SubgroupScope natively provides a single 1D processor ID (subgroup_id).
+    return 1;
+  }
 };
 
 /// External model for LaneScopeAttr implementing ScopeAttrInterface.
@@ -137,7 +140,10 @@ struct LaneScopeModel
     return failure();
   }
 
-  int64_t getNativeNumIds(Attribute attr) const { return 1; }
+  int64_t getNativeNumProcessorIds(Attribute attr) const {
+    // LaneScope natively provides a single 1D processor ID (lane_id).
+    return 1;
+  }
 };
 
 } // namespace

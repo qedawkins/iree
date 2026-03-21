@@ -35,6 +35,13 @@ using IREE::GPU::GPUPipelineOptions;
 /// module-level pass manager.
 void addGPUSimpleDistributePassPipeline(OpPassManager &funcPassManager);
 
+/// Pre-distribution TileAndFuse passes: user strategies, tiling, packing,
+/// thread/subgroup distribution, vectorization, and fuse-and-hoist.
+/// Does NOT include workgroup distribution or bufferization.
+void addGPUTileAndFusePreDistributionPasses(
+    OpPassManager &funcPassManager,
+    const GPUPipelineOptions &pipelineOptions);
+
 /// Lowering config driven pipeline that uses greedy tile + fuse to distribute
 /// to threads.
 void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
