@@ -262,24 +262,44 @@ Attribute PipelineOptionsAttr::parse(AsmParser &parser, Type type) {
     if (parser.parseKeyword(&key) || parser.parseEqual()) {
       return {};
     }
-    StringRef value;
-    if (parser.parseKeyword(&value)) {
-      return {};
-    }
-    std::optional<TranslationPhase> phase = symbolizeTranslationPhase(value);
-    if (!phase) {
-      parser.emitError(parser.getCurrentLocation(),
-                       "unknown translation phase: ")
-          << value;
-      return {};
-    }
-    if (key == "compile_from") {
-      opts.compileFrom = *phase;
-    } else if (key == "compile_to") {
-      opts.compileTo = *phase;
+    if (key == "experimental_staged_pipeline") {
+      // Parse a boolean value (true/false).
+      StringRef boolValue;
+      if (parser.parseKeyword(&boolValue)) {
+        return {};
+      }
+      if (boolValue == "true") {
+        opts.experimentalStagedPipeline = true;
+      } else if (boolValue == "false") {
+        opts.experimentalStagedPipeline = false;
+      } else {
+        parser.emitError(parser.getCurrentLocation(),
+                         "expected true or false for "
+                         "experimental_staged_pipeline, got: ")
+            << boolValue;
+        return {};
+      }
     } else {
-      parser.emitError(parser.getCurrentLocation(), "unknown key: ") << key;
-      return {};
+      // Parse a translation phase value.
+      StringRef value;
+      if (parser.parseKeyword(&value)) {
+        return {};
+      }
+      std::optional<TranslationPhase> phase = symbolizeTranslationPhase(value);
+      if (!phase) {
+        parser.emitError(parser.getCurrentLocation(),
+                         "unknown translation phase: ")
+            << value;
+        return {};
+      }
+      if (key == "compile_from") {
+        opts.compileFrom = *phase;
+      } else if (key == "compile_to") {
+        opts.compileTo = *phase;
+      } else {
+        parser.emitError(parser.getCurrentLocation(), "unknown key: ") << key;
+        return {};
+      }
     }
   } while (parser.parseOptionalGreater().failed());
   return PipelineOptionsAttr::get(parser.getContext(), opts);
@@ -300,6 +320,13 @@ void PipelineOptionsAttr::print(AsmPrinter &printer) const {
       printer << ", ";
     }
     printer << "compile_to = " << stringifyTranslationPhase(opts.compileTo);
+    needsComma = true;
+  }
+  if (opts.experimentalStagedPipeline) {
+    if (needsComma) {
+      printer << ", ";
+    }
+    printer << "experimental_staged_pipeline = true";
   }
   printer << ">";
 }
