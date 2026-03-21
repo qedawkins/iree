@@ -1408,7 +1408,7 @@ LogicalResult TileGroupOp::verify() {
 
   // Determine source rank.
   int64_t sourceRank =
-      tgType ? tgType.getScope().getNativeNumIds() : clusterType.getRank();
+      tgType ? tgType.getScope().getNativeNumProcessorIds() : clusterType.getRank();
 
   // Number of split dimension lists must match source rank.
   ArrayRef<int64_t> numSplits = getNumSplitsPerDim();
@@ -1615,7 +1615,7 @@ static LogicalResult verifyRunOp(Operation *op, ValueRange sources,
   // For RunThreadOp, add thread ID args.
   int64_t numThreadIds = 0;
   if (!isClusterMode) {
-    numThreadIds = scope.getNativeNumIds();
+    numThreadIds = scope.getNativeNumProcessorIds();
     for (int64_t i = 0; i < numThreadIds; ++i) {
       expectedArgTypes.push_back(IndexType::get(op->getContext()));
     }
@@ -1850,7 +1850,7 @@ static void printRunOp(OpAsmPrinter &p, Operation *op, ValueRange sources,
   if (isThreadMode) {
     ScopeAttrInterface scope =
         cast<ClusterType>(sources.front().getType()).getScope();
-    numStructArgs -= scope.getNativeNumIds();
+    numStructArgs -= scope.getNativeNumProcessorIds();
   }
 
   p.printNewline();
@@ -2069,6 +2069,80 @@ void GetMemrefOp::build(OpBuilder &b, OperationState &result, Type resultType,
 }
 
 //===----------------------------------------------------------------------===//
+// ExpandShapeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ExpandShapeOp::verify() {
+  ShapedRefType srcType = cast<ShapedRefType>(getSrc().getType());
+  ShapedRefType resultType = cast<ShapedRefType>(getResult().getType());
+
+  // Scope and element type must match.
+  if (srcType.getScope() != resultType.getScope()) {
+    return emitOpError("source and result must have the same scope");
+  }
+  if (srcType.getElementType() != resultType.getElementType()) {
+    return emitOpError("source and result must have the same element type");
+  }
+  if (srcType.getSyncScope() != resultType.getSyncScope()) {
+    return emitOpError("source and result must have the same sync scope");
+  }
+
+  // Validate reassociation dimensions.
+  ArrayAttr reassociation = getReassociation();
+  if (static_cast<int64_t>(reassociation.size()) != srcType.getRank()) {
+    return emitOpError("reassociation map count (")
+           << reassociation.size() << ") must match source rank ("
+           << srcType.getRank() << ")";
+  }
+
+  // Count total expanded dims.
+  int64_t totalExpandedDims = 0;
+  for (Attribute group : reassociation) {
+    totalExpandedDims += cast<ArrayAttr>(group).size();
+  }
+  if (totalExpandedDims != resultType.getRank()) {
+    return emitOpError("total expanded dimensions (")
+           << totalExpandedDims << ") must match result rank ("
+           << resultType.getRank() << ")";
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// SubviewOp
+//===----------------------------------------------------------------------===//
+
+void SubviewOp::build(OpBuilder &b, OperationState &result, Type resultType,
+                      Value source, ArrayRef<OpFoldResult> offsets,
+                      ArrayRef<OpFoldResult> sizes,
+                      ArrayRef<OpFoldResult> strides,
+                      ArrayRef<NamedAttribute> attrs) {
+  SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
+  SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
+  dispatchIndexOpFoldResults(offsets, dynamicOffsets, staticOffsets);
+  dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+  dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides);
+  result.addAttributes(attrs);
+  build(b, result, resultType, source, dynamicOffsets, dynamicSizes,
+        dynamicStrides, b.getDenseI64ArrayAttr(staticOffsets),
+        b.getDenseI64ArrayAttr(staticSizes),
+        b.getDenseI64ArrayAttr(staticStrides));
+}
+
+void SubviewOp::build(OpBuilder &b, OperationState &result, Type resultType,
+                      Value source, ValueRange offsets, ValueRange sizes,
+                      ValueRange strides, ArrayRef<NamedAttribute> attrs) {
+  SmallVector<OpFoldResult> offsetValues =
+      llvm::map_to_vector(offsets, llvm::StaticCastTo<OpFoldResult>);
+  SmallVector<OpFoldResult> sizeValues =
+      llvm::map_to_vector(sizes, llvm::StaticCastTo<OpFoldResult>);
+  SmallVector<OpFoldResult> strideValues =
+      llvm::map_to_vector(strides, llvm::StaticCastTo<OpFoldResult>);
+  build(b, result, resultType, source, offsetValues, sizeValues, strideValues);
+}
+
+//===----------------------------------------------------------------------===//
 // Folders
 //===----------------------------------------------------------------------===//
 
@@ -2141,6 +2215,33 @@ OpFoldResult ReadSliceOp::fold(FoldAdaptor adaptor) {
 }
 
 OpFoldResult GetMemrefOp::fold(FoldAdaptor adaptor) {
+  SmallVector<OpFoldResult> mixedOffsets = getMixedOffsets();
+  SmallVector<OpFoldResult> mixedStrides = getMixedStrides();
+
+  // Try to fold dynamic offsets/strides to static.
+  if (failed(foldDynamicIndexList(mixedOffsets, /*onlyNonNegative=*/true)) &&
+      failed(foldDynamicIndexList(mixedStrides))) {
+    return {};
+  }
+
+  OpBuilder builder(getContext());
+
+  // Dispatch back to static/dynamic.
+  SmallVector<int64_t> staticOffsets, staticStrides;
+  SmallVector<Value> dynamicOffsets, dynamicStrides;
+  dispatchIndexOpFoldResults(mixedOffsets, dynamicOffsets, staticOffsets);
+  dispatchIndexOpFoldResults(mixedStrides, dynamicStrides, staticStrides);
+
+  // Update the op's attributes in-place.
+  setStaticOffsetsAttr(builder.getDenseI64ArrayAttr(staticOffsets));
+  setStaticStridesAttr(builder.getDenseI64ArrayAttr(staticStrides));
+  getOffsetsMutable().assign(dynamicOffsets);
+  getStridesMutable().assign(dynamicStrides);
+
+  return {};
+}
+
+OpFoldResult SubviewOp::fold(FoldAdaptor adaptor) {
   SmallVector<OpFoldResult> mixedOffsets = getMixedOffsets();
   SmallVector<OpFoldResult> mixedStrides = getMixedStrides();
 

@@ -30,7 +30,7 @@ iree_cc_library(
     "Passes.h.inc"
     "Transforms.h"
   SRCS
-    "ConvertForallToLoops.cpp"
+    "ConvertForallToPCF.cpp"
     "ConvertSRefToMemRef.cpp"
     "DistributeAndLower.cpp"
     "DistributionInterface.cpp"
