@@ -460,6 +460,45 @@ static LogicalResult lowerTileGroup(TileGroupOp tileGroup) {
 // Distribution dispatch
 //===----------------------------------------------------------------------===//
 
+/// Distribute threadgroup-level ops within a shared_executor body by calling
+/// the distribution interface. This handles the case where the shared_executor
+/// body contains undistributed ops (e.g., vectorized code with to_layout
+/// anchors) without any tile_group/run_cluster structure.
+static LogicalResult
+distributeSharedExecutor(SharedExecutorOp sharedExec,
+                         DistributionInterface &distInterface) {
+  ScopeAttrInterface scope = sharedExec.getScope();
+  Location loc = sharedExec.getLoc();
+  OpBuilder builder(sharedExec);
+
+  // Get thread IDs and counts from the scope.
+  int64_t numIds = scope.getNativeNumProcessorIds();
+  SmallVector<Value> threadIDs = scope.getWorkerIDs(builder, loc, numIds);
+  SmallVector<Value> threadCounts =
+      scope.getWorkerCounts(builder, loc, numIds);
+
+  // The shared_executor body is the region to distribute.
+  SmallVector<Region *> regions;
+  regions.push_back(&sharedExec.getRegion());
+
+  // Collect ops to skip: any run_thread ops already inside.
+  DenseSet<Operation *> opsToSkip;
+  sharedExec.getRegion().walk([&](RunThreadOp rt) {
+    opsToSkip.insert(rt);
+  });
+
+  // Create an empty equivalence info (no cluster equivalences for
+  // direct shared_executor distribution).
+  ClusterEquivalenceInfo emptyEquivInfo;
+
+  if (failed(distInterface.distributeRegions(
+          regions, threadIDs, threadCounts, emptyEquivInfo, opsToSkip))) {
+    return sharedExec.emitOpError("distribution failed for shared_executor");
+  }
+
+  return success();
+}
+
 /// Distribute run_cluster ops within a tile_group by calling the distribution
 /// interface for each cluster ID group.
 static LogicalResult
@@ -879,7 +918,17 @@ struct DistributeAndLowerPass final
       }
 
       // Phase 2: Distribute threadgroup-level ops in shared_executor.
-      // TODO: Implement when needed.
+      // For shared_executors without tile_groups, the body contains
+      // undistributed ops (e.g., vectorized code with to_layout anchors).
+      // Distribute them using the DistributionInterface.
+      SmallVector<SharedExecutorOp> sharedExecs;
+      op->walk([&](SharedExecutorOp se) { sharedExecs.push_back(se); });
+
+      for (SharedExecutorOp se : sharedExecs) {
+        if (failed(distributeSharedExecutor(se, *distInterface))) {
+          return signalPassFailure();
+        }
+      }
     }
 
     // Phase 3: Structural lowering.
