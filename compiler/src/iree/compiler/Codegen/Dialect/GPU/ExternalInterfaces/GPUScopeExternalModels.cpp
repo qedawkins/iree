@@ -91,6 +91,74 @@ struct SubgroupScopeModel
   }
 };
 
+/// External model for ThreadScopeAttr implementing ScopeAttrInterface.
+/// Uses linearized 3D thread IDs for worker ID and product of block
+/// dimensions for worker count. Allocations use workgroup shared memory.
+struct ThreadScopeModel
+    : PCF::ScopeAttrInterface::ExternalModel<ThreadScopeModel,
+                                             GPU::ThreadScopeAttr> {
+  SmallVector<Value> getWorkerCounts(Attribute attr, OpBuilder &builder,
+                                     Location loc, int64_t numIds) const {
+    assert(numIds >= 1 && "expected at least one requested worker count");
+    SmallVector<Value> counts(numIds, Value());
+    // Total thread count = dimX * dimY * dimZ.
+    Value dimX = gpu::BlockDimOp::create(builder, loc, gpu::Dimension::x);
+    Value dimY = gpu::BlockDimOp::create(builder, loc, gpu::Dimension::y);
+    Value dimZ = gpu::BlockDimOp::create(builder, loc, gpu::Dimension::z);
+    Value total = arith::MulIOp::create(builder, loc, dimX, dimY);
+    total = arith::MulIOp::create(builder, loc, total, dimZ);
+    counts.front() = total;
+
+    // Pad remaining counts with 1.
+    if (numIds > 1) {
+      Value one = arith::ConstantIndexOp::create(builder, loc, 1);
+      llvm::fill(drop_begin(counts), one);
+    }
+    return counts;
+  }
+
+  SmallVector<Value> getWorkerIDs(Attribute attr, OpBuilder &builder,
+                                  Location loc, int64_t numIds) const {
+    assert(numIds >= 1 && "expected at least one requested worker id");
+    SmallVector<Value> ids(numIds, Value());
+    // Linearize 3D thread IDs: tid = z * (dimX * dimY) + y * dimX + x.
+    Value tidX = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
+    Value tidY = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::y);
+    Value tidZ = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::z);
+    Value dimX = gpu::BlockDimOp::create(builder, loc, gpu::Dimension::x);
+    Value dimY = gpu::BlockDimOp::create(builder, loc, gpu::Dimension::y);
+    Value xySize = arith::MulIOp::create(builder, loc, dimX, dimY);
+    Value linearId = arith::MulIOp::create(builder, loc, tidZ, xySize);
+    Value yOff = arith::MulIOp::create(builder, loc, tidY, dimX);
+    linearId = arith::AddIOp::create(builder, loc, linearId, yOff);
+    linearId = arith::AddIOp::create(builder, loc, linearId, tidX);
+    ids.front() = linearId;
+
+    // Pad remaining ids with 0.
+    if (numIds > 1) {
+      Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+      llvm::fill(drop_begin(ids), zero);
+    }
+    return ids;
+  }
+
+  LogicalResult addBarrier(Attribute attr, OpBuilder &builder) const {
+    gpu::BarrierOp::create(builder, builder.getUnknownLoc(),
+                           gpu::AddressSpace::Workgroup);
+    return success();
+  }
+
+  FailureOr<Attribute> getAllocMemSpace(Attribute attr,
+                                        MLIRContext *context) const {
+    return gpu::AddressSpaceAttr::get(context, gpu::AddressSpace::Workgroup);
+  }
+
+  int64_t getNativeNumProcessorIds(Attribute attr) const {
+    // Thread scope provides a single linearized ID.
+    return 1;
+  }
+};
+
 /// External model for LaneScopeAttr implementing ScopeAttrInterface.
 /// Uses gpu.subgroup_size for worker count and gpu.lane_id for worker ID.
 /// Allocations at this scope are not yet supported.
@@ -153,6 +221,7 @@ void registerGPUScopeExternalModels(DialectRegistry &registry) {
       +[](MLIRContext *context, GPU::IREEGPUDialect *dialect) {
         GPU::SubgroupScopeAttr::attachInterface<SubgroupScopeModel>(*context);
         GPU::LaneScopeAttr::attachInterface<LaneScopeModel>(*context);
+        GPU::ThreadScopeAttr::attachInterface<ThreadScopeModel>(*context);
 
         // Register the PCF conversion dialect interface to load required
         // dialects during PCF lowering passes.
