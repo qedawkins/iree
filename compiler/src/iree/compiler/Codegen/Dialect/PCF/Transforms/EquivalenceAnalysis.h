@@ -41,6 +41,9 @@ namespace mlir::iree_compiler::IREE::PCF {
 /// to equivalent cluster values must be distributed consistently.
 class ClusterEquivalenceInfo {
 public:
+  /// Default constructor for empty equivalence info (no clusters).
+  ClusterEquivalenceInfo() = default;
+
   /// Build equivalence info for all run_cluster ops in a tile_group.
   static ClusterEquivalenceInfo build(TileGroupOp tileGroup);
 
