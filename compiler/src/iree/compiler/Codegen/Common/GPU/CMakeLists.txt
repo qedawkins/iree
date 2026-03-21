@@ -94,6 +94,7 @@ iree_cc_library(
     "GPUVectorAlloc.cpp"
     "GPUVectorDistribution.cpp"
     "GPUVerifyDistribution.cpp"
+    "GPUWrapInSharedExecutor.cpp"
     "Passes.cpp"
     "VectorReductionToGPU.cpp"
     "WorkgroupReordering.cpp"

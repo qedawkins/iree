@@ -455,6 +455,21 @@ def GPUTileReductionPass :
   let dependentDialects = ["::mlir::scf::SCFDialect"];
 }
 
+def GPUWrapInSharedExecutorPass
+    : InterfacePass<"iree-gpu-wrap-in-shared-executor", "mlir::FunctionOpInterface"> {
+  let summary = "Wraps workgroup-scoped PCF ops in pcf.shared_executor with thread scope.";
+  let description = [{
+    Finds pcf.generic and pcf.loop ops with workgroup scope and wraps their
+    bodies in a pcf.shared_executor with GPU thread scope. The shared_executor
+    captures srefs from the enclosing generic/loop scope and provides a
+    threadgroup block argument for collective execution.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
+  ];
+}
+
 def GPUVerifyDistributionPass :
     InterfacePass<"iree-codegen-gpu-verify-distribution", "mlir::FunctionOpInterface"> {
   let summary = "Pass to verify writes before resolving distributed contexts.";
