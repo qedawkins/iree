@@ -538,6 +538,35 @@ public:
         LLVMGPUSelectLoweringStrategyPassOptions{codegenOptions}));
   }
 
+  /// Returns the LoweringPipeline for the given function op, if it has one.
+  static std::optional<IREE::GPU::LoweringPipeline>
+  getStagedPipelineKind(Operation *op) {
+    auto funcOp = dyn_cast<FunctionOpInterface>(op);
+    if (!funcOp) {
+      return std::nullopt;
+    }
+    IREE::Codegen::TranslationInfoAttr translationInfo =
+        getTranslationInfo(funcOp);
+    if (!translationInfo) {
+      return std::nullopt;
+    }
+    auto pipelineAttr =
+        dyn_cast_if_present<IREE::GPU::PipelineAttr>(
+            translationInfo.getPassPipeline());
+    if (!pipelineAttr) {
+      return std::nullopt;
+    }
+    return pipelineAttr.getValue();
+  }
+
+  /// Returns true if the given function op has a TileAndFuse lowering pipeline.
+  static bool hasTileAndFusePipeline(Operation *op) {
+    std::optional<IREE::GPU::LoweringPipeline> pipeline =
+        getStagedPipelineKind(op);
+    return pipeline &&
+           *pipeline == IREE::GPU::LoweringPipeline::TileAndFuse;
+  }
+
   /// Returns true if the given function op has a TileAndFuse or
   /// VectorDistribute lowering pipeline.
   static bool hasStagedPipeline(Operation *op) {
@@ -617,37 +646,32 @@ public:
     // workgroup and subgroup distribution.
 
     // --- func(Subgroup + lane distribution) ---
-    // DO NOT SUBMIT: Placeholder for shared_executor-based distribution.
-    // This is where the PCF distribution pipeline will go.
+    // Pipeline-specific distribution to subgroup + lane scopes.
+    // Currently supports TileAndFuse; VectorDistribute and hybrid are TODO.
+    {
+      MultiPipelineNest nest(modulePM);
 
-    // TODO: This is the most opinionated portion of the pipeline and needs careful thought.
-    // Here's the plan. We'll have 3 paths through here:
-    //
-    // 1. Pure VectorDistribute. The coarse steps are:
-    //     - Wrap the block level code in a pcf.shared_executor with thread scope.
-    //       We will have to add thread scope which is semantically a combination of subgroup + lane.
-    //       All implicit capture tensors turn into readonly srefs with `read_slice` to convert their
-    //       full shape back to a tensor. There should be no inits since we're just wrapping the full
-    //       block level pcf.loop/generic body meaning everything should be reading/writing directly
-    //       to the global output.
-    //     - Do reduction tiling, layout setting, vectorization etc. as normal in the pre-bufferization
-    //       phase of vector distribute.
-    //     - Add + run folding patterns to fold read_slice(tensor.extract_slice) to just `read_slice`
-    //       by slice composition all the way down until we hit just read_slice(vector.transfer_read)
-    //       or another vector reading op (like vector.gather). Then "bufferize" the transfer by
-    //       inserting a `pcf.get_memref` and having the transfer op read directly from that instead.
-    //     - Do VectorAlloc and VectorDistribute using the PCF distribution interface version.
-    // 2. Pure TileAndFuse. The coarse steps are:
-    //     - Do TileAndFuse like normal up through FuseAndHoistParallelLoops. Then take scf.forall
-    //       with subgroup/lane mappings and convert them to PCF using the existing conversion pass. 
-    //       You will want to port over the WIP changes to GPUConvertThreadForallToSubgroupLanePCF
-    //       found in 76ac573970eb14fa + 5621cb80ef373e56 along with the reshape and subview ops.
-    // 3. Hybrid: Stub for right now.
+      // TileAndFuse path: run pre-distribution passes then convert to PCF.
+      OpPassManager &tafFuncPM =
+          nest.nestIf([](Operation *op) { return hasTileAndFusePipeline(op); },
+                      func::FuncOp::getOperationName(),
+                      TypeID::get<func::FuncOp>());
+      {
+        GPUPipelineOptions tafOptions;
+        addGPUTileAndFusePreDistributionPasses(tafFuncPM, tafOptions);
+      }
+      tafFuncPM.addPass(
+          createGPUConvertThreadForallToSubgroupLanePCFPass());
 
-    // Do fusion into subgroup level pcf.loop/generic producers using the Common/GPU pass.
-    // By this point the expectation is that all analysis based distribution has finished
-    // and we're just cleaning up with a little bit of fusion. We'll probably also do
-    // workgroup level fusion too as a cleanup.
+      // TODO: VectorDistribute path.
+      // TODO: Hybrid path.
+
+      nest.commitPass();
+    }
+
+    // Fusion cleanup: fuse consumers into subgroup-level pcf producers.
+    FunctionLikeNest(modulePM)
+        .addPass(createGPUFuseSubgroupConsumersPass);
 
     // --- Module break: Bufferization ---
     // Bufferize with a default allocation function. By this point the code

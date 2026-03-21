@@ -591,7 +591,7 @@ lowerSharedExecutor(SharedExecutorOp sharedExec,
   ValueRange readwriteInits = sharedExec.getReadwriteInits();
 
   // Use the scope's native number of IDs for the iterator count.
-  int64_t numIterators = scope.getNativeNumIds();
+  int64_t numIterators = scope.getNativeNumProcessorIds();
   OpBuilder builder(sharedExec);
   GenericOp genericOp =
       GenericOp::create(builder, loc, scope, readwriteInits, numIterators);

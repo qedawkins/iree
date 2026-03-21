@@ -142,6 +142,34 @@ def GPUBubbleResourceCastsPass :
   ];
 }
 
+def GPUConvertThreadForallToSubgroupLanePCFPass :
+    InterfacePass<"iree-codegen-gpu-convert-thread-forall-to-subgroup-lane-pcf",
+                  "mlir::FunctionOpInterface"> {
+  let summary = [{
+    Converts thread-mapped scf.forall ops to nested pcf.generic with
+    subgroup + lane scopes, and converts barrier_region chains to PCF ops.
+  }];
+  let description = [{
+    Phase 1: Converts scf.forall ops with gpu::GPUThreadMappingAttr to nested
+    pcf.generic ops with subgroup (outer) and lane (inner) scopes.
+
+    Phase 2: Converts bufferization.alloc_tensor + barrier_region + consumer
+    chains to PCF ops (pcf.alloc, pcf.expand_shape, pcf.subview,
+    pcf.read_slice, pcf.write_slice).
+  }];
+  let dependentDialects = [
+    "::mlir::affine::AffineDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::bufferization::BufferizationDialect",
+    "::mlir::gpu::GPUDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::tensor::TensorDialect",
+    "::mlir::vector::VectorDialect",
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect",
+  ];
+}
+
 def GPUFuseSubgroupConsumersPass :
     Pass<"iree-codegen-gpu-fuse-subgroup-consumers", ""> {
   let summary = "Fuses tilable consumers into subgroup-scoped pcf.generic ops";

@@ -305,7 +305,10 @@ def PCF_TestScopeAttr
       auto castOp = UnrealizedConversionCastOp::create(builder, loc, types, ValueRange{});
       return SmallVector<Value>(castOp.getResults());
     }
-    int64_t getNativeNumIds() { return 1; }
+    int64_t getNativeNumProcessorIds() {
+      assert(false && "why are you here?");
+      return 1;
+    }
   }];
 }
 
@@ -333,7 +336,9 @@ def PCF_SequentialAttr
       SmallVector<Value> ids(numIds, zero);
       return ids;
     }
-    int64_t getNativeNumIds() { return 1; }
+    int64_t getNativeNumProcessorIds() {
+      return 1;
+    }
   }];
 }
 
