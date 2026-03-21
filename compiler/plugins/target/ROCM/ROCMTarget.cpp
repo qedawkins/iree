@@ -60,6 +60,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LogicalResult.h"
+#include "mlir/Transforms/Passes.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
@@ -535,6 +536,100 @@ public:
         LLVMGPUSelectLoweringStrategyPassOptions{codegenOptions}));
   }
 
+  /// Returns true if the given function op has a TileAndFuse or
+  /// VectorDistribute lowering pipeline.
+  static bool hasStagedPipeline(Operation *op) {
+    auto funcOp = dyn_cast<FunctionOpInterface>(op);
+    if (!funcOp) {
+      return false;
+    }
+    IREE::Codegen::TranslationInfoAttr translationInfo =
+        getTranslationInfo(funcOp);
+    if (!translationInfo) {
+      return false;
+    }
+    auto pipelineAttr =
+        dyn_cast_if_present<IREE::GPU::PipelineAttr>(
+            translationInfo.getPassPipeline());
+    if (!pipelineAttr) {
+      return false;
+    }
+    IREE::GPU::LoweringPipeline pipeline = pipelineAttr.getValue();
+    return pipeline == IREE::GPU::LoweringPipeline::TileAndFuse ||
+           pipeline == IREE::GPU::LoweringPipeline::VectorDistribute;
+  }
+
+  /// Builds the experimental staged pass pipeline. This splits the
+  /// ConfigurationControlledTranslation phase into staged sub-phases with
+  /// module-level break points:
+  ///   1. func(Workgroup distribution)
+  ///   2. module(Ukernel placeholder)
+  ///   3. func(Subgroup + thread distribution) -- DO NOT SUBMIT placeholder
+  ///   4. module(Bufferization placeholder)
+  ///   5. func(Post-bufferization placeholder)
+  void buildExperimentalStagedPipeline(OpPassManager &passManager) {
+    passManager.addPass(IREE::HAL::createHoistExecutableObjectsPass());
+    OpPassManager &modulePM = passManager.nest<ModuleOp>();
+
+    // Strategy selection (same as the default path).
+    modulePM.addPass(createLowerExecutableUsingTransformDialectPass());
+
+    // Phase 1: func(Workgroup distribution).
+    // For TileAndFuse/VectorDistribute pipelines, run only workgroup
+    // tiling + PCF conversion. For all other pipelines, run their
+    // full native pipeline via LLVMGPULowerExecutableTargetPass.
+    {
+      LLVMGPULowerExecutableTargetPassOptions lowerOpts;
+      lowerOpts.forROCDL = true;
+
+      MultiPipelineNest nest(modulePM);
+
+      // TileAndFuse/VectorDistribute: workgroup distribution only.
+      OpPassManager &stagedFuncPM =
+          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
+                      func::FuncOp::getOperationName(),
+                      TypeID::get<func::FuncOp>());
+      stagedFuncPM.addPass(
+          createTileAndDistributeToWorkgroupsWithReordering(false));
+      stagedFuncPM.addPass(createConfigTrackingCanonicalizerPass());
+      stagedFuncPM.addPass(createCSEPass());
+      stagedFuncPM.addPass(createConvertWorkgroupForallToPCFPass());
+
+      // All other pipelines: run their full native pipeline.
+      OpPassManager &defaultFuncPM =
+          nest.nestIf([](Operation *op) { return !hasStagedPipeline(op); },
+                      func::FuncOp::getOperationName(),
+                      TypeID::get<func::FuncOp>());
+      defaultFuncPM.addPass(
+          createLLVMGPULowerExecutableTargetPass(lowerOpts));
+
+      nest.commitPass();
+    }
+
+    // Shared post-workgroup-distribution passes.
+    FunctionLikeNest(modulePM)
+        .addPass(createVerifyWorkgroupDistributionPass)
+        .addPass(createRemoveIndexHintsPass);
+
+    // --- Module break: ukernel stuff ---
+    // Placeholder for ukernel passes that run at module level between
+    // workgroup and subgroup distribution.
+
+    // --- func(Subgroup + thread distribution) ---
+    // DO NOT SUBMIT: Placeholder for shared_executor-based distribution.
+    // This is where the PCF distribution pipeline will go.
+
+    // --- Module break: Bufferization ---
+    // Placeholder for bufferization passes.
+
+    // --- func(Post-bufferization) ---
+    // Placeholder for common post-bufferization passes.
+
+    // Reconcile workgroup counts.
+    passManager.addPass(createReconcileTranslationInfoPass());
+    passManager.addPass(createResolveWorkgroupCountHintsPass());
+  }
+
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
                                     Attribute options,
                                     OpPassManager &passManager) final {
@@ -552,22 +647,26 @@ public:
     // and workgroup count reconciliation.
     if (pipelineOpts.shouldRunPhase(
             ROCM::TranslationPhase::ConfigurationControlledTranslation)) {
-      passManager.addPass(IREE::HAL::createHoistExecutableObjectsPass());
-      {
-        OpPassManager &modulePM = passManager.nest<ModuleOp>();
-        modulePM.addPass(createLowerExecutableUsingTransformDialectPass());
-        LLVMGPULowerExecutableTargetPassOptions lowerOpts;
-        lowerOpts.forROCDL = true;
-        FunctionLikeNest(modulePM)
-            .addPass([&] {
-              return createLLVMGPULowerExecutableTargetPass(lowerOpts);
-            })
-            .addPass(createVerifyWorkgroupDistributionPass)
-            .addPass(createRemoveIndexHintsPass);
-      }
-      {
-        passManager.addPass(createReconcileTranslationInfoPass());
-        passManager.addPass(createResolveWorkgroupCountHintsPass());
+      if (pipelineOpts.experimentalStagedPipeline) {
+        buildExperimentalStagedPipeline(passManager);
+      } else {
+        passManager.addPass(IREE::HAL::createHoistExecutableObjectsPass());
+        {
+          OpPassManager &modulePM = passManager.nest<ModuleOp>();
+          modulePM.addPass(createLowerExecutableUsingTransformDialectPass());
+          LLVMGPULowerExecutableTargetPassOptions lowerOpts;
+          lowerOpts.forROCDL = true;
+          FunctionLikeNest(modulePM)
+              .addPass([&] {
+                return createLLVMGPULowerExecutableTargetPass(lowerOpts);
+              })
+              .addPass(createVerifyWorkgroupDistributionPass)
+              .addPass(createRemoveIndexHintsPass);
+        }
+        {
+          passManager.addPass(createReconcileTranslationInfoPass());
+          passManager.addPass(createResolveWorkgroupCountHintsPass());
+        }
       }
     }
 
