@@ -18,8 +18,10 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
+#include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Utils/CodegenOptions.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
@@ -606,24 +608,97 @@ public:
       nest.commitPass();
     }
 
-    // Shared post-workgroup-distribution passes.
-    FunctionLikeNest(modulePM)
-        .addPass(createVerifyWorkgroupDistributionPass)
-        .addPass(createRemoveIndexHintsPass);
+    // The expectation is that by the time we get here, all code has been distributed
+    // to a pcf.generic/loop with block level scope. So block level shared_executor
+    // should be resolved either now or right before now.
 
     // --- Module break: ukernel stuff ---
     // Placeholder for ukernel passes that run at module level between
     // workgroup and subgroup distribution.
 
-    // --- func(Subgroup + thread distribution) ---
+    // --- func(Subgroup + lane distribution) ---
     // DO NOT SUBMIT: Placeholder for shared_executor-based distribution.
     // This is where the PCF distribution pipeline will go.
 
+    // TODO: This is the most opinionated portion of the pipeline and needs careful thought.
+    // Here's the plan. We'll have 3 paths through here:
+    //
+    // 1. Pure VectorDistribute. The coarse steps are:
+    //     - Wrap the block level code in a pcf.shared_executor with thread scope.
+    //       We will have to add thread scope which is semantically a combination of subgroup + lane.
+    //       All implicit capture tensors turn into readonly srefs with `read_slice` to convert their
+    //       full shape back to a tensor. There should be no inits since we're just wrapping the full
+    //       block level pcf.loop/generic body meaning everything should be reading/writing directly
+    //       to the global output.
+    //     - Do reduction tiling, layout setting, vectorization etc. as normal in the pre-bufferization
+    //       phase of vector distribute.
+    //     - Add + run folding patterns to fold read_slice(tensor.extract_slice) to just `read_slice`
+    //       by slice composition all the way down until we hit just read_slice(vector.transfer_read)
+    //       or another vector reading op (like vector.gather). Then "bufferize" the transfer by
+    //       inserting a `pcf.get_memref` and having the transfer op read directly from that instead.
+    //     - Do VectorAlloc and VectorDistribute using the PCF distribution interface version.
+    // 2. Pure TileAndFuse. The coarse steps are:
+    //     - Do TileAndFuse like normal up through FuseAndHoistParallelLoops. Then take scf.forall
+    //       with subgroup/lane mappings and convert them to PCF using the existing conversion pass. 
+    //       You will want to port over the WIP changes to GPUConvertThreadForallToSubgroupLanePCF
+    //       found in 76ac573970eb14fa + 5621cb80ef373e56 along with the reshape and subview ops.
+    // 3. Hybrid: Stub for right now.
+
+    // Do fusion into subgroup level pcf.loop/generic producers using the Common/GPU pass.
+    // By this point the expectation is that all analysis based distribution has finished
+    // and we're just cleaning up with a little bit of fusion. We'll probably also do
+    // workgroup level fusion too as a cleanup.
+
     // --- Module break: Bufferization ---
-    // Placeholder for bufferization passes.
+    // Bufferize with a default allocation function. By this point the code
+    // is expected to be pcf.generic/loop with no inputs/results (everything
+    // fused away), so no fancy memory space handling is needed.
+    {
+      MultiPipelineNest nest(modulePM);
+
+      OpPassManager &stagedFuncPM =
+          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
+                      func::FuncOp::getOperationName(),
+                      TypeID::get<func::FuncOp>());
+      stagedFuncPM.addPass(createEliminateEmptyTensorsPass());
+      stagedFuncPM.addPass(
+          bufferization::createEmptyTensorToAllocTensorPass());
+      stagedFuncPM.addPass(createGPUBubbleResourceCastsPass());
+      // Use default allocation function (no memory space requirements).
+      BufferizationOptions::MemCpyFn memcpyFn =
+          [](OpBuilder &builder, Location loc, Value from, Value to) {
+            memref::CopyOp::create(builder, loc, from, to);
+            return success();
+          };
+      stagedFuncPM.addPass(createIREEComprehensiveBufferizePass(
+          /*allocationFn=*/std::nullopt, memcpyFn));
+      addIREEPostBufferizationPasses(stagedFuncPM);
+      stagedFuncPM.addPass(createCanonicalizerPass());
+      stagedFuncPM.addPass(createCSEPass());
+
+      nest.commitPass();
+    }
 
     // --- func(Post-bufferization) ---
-    // Placeholder for common post-bufferization passes.
+    {
+      MultiPipelineNest nest(modulePM);
+
+      OpPassManager &stagedFuncPM =
+          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
+                      func::FuncOp::getOperationName(),
+                      TypeID::get<func::FuncOp>());
+      stagedFuncPM.addPass(IREE::GPU::createUnrollToIntrinsicsPass());
+      stagedFuncPM.addPass(IREE::GPU::createLowerIREEGPUOpsPass());
+      stagedFuncPM.addPass(createCanonicalizerPass());
+      stagedFuncPM.addPass(createCSEPass());
+
+      nest.commitPass();
+    }
+
+    // Shared post-workgroup-distribution passes.
+    FunctionLikeNest(modulePM)
+        .addPass(createVerifyWorkgroupDistributionPass)
+        .addPass(createRemoveIndexHintsPass);
 
     // Reconcile workgroup counts.
     passManager.addPass(createReconcileTranslationInfoPass());
