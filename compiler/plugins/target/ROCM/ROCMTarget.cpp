@@ -19,6 +19,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
+#include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -680,8 +681,16 @@ public:
       // shared memory allocation).
       addGPUVectorDistributePreBufferizePasses(vdFuncPM);
 
-      // DO NOT SUBMIT: Distribution via PCF interface will go here.
-      // For now, the VectorDistribute step is deferred to a future task.
+      // Distribute vector ops inside shared_executor using VectorDistribute
+      // via the PCF distribution interface. Then lower shared_executor to
+      // pcf.generic.
+      {
+        PCF::DistributeAndLowerPassOptions opts;
+        opts.useVectorDistribution = true;
+        opts.subgroupSize = 64;
+        opts.workgroupSize = {64};
+        vdFuncPM.addPass(PCF::createDistributeAndLowerPass(opts));
+      }
 
       // TODO: Hybrid path.
 
