@@ -61,6 +61,13 @@ struct ROCDLPipelineOptions {
   /// The phase to compile up to (inclusive).
   TranslationPhase compileTo = TranslationPhase::LLVMTranslation;
 
+  /// When true, use the experimental staged pass pipeline instead of the
+  /// default ConfigurationControlledTranslation path. The staged pipeline
+  /// splits codegen into workgroup distribution, ukernels, subgroup/thread
+  /// distribution, bufferization, and post-bufferization phases with
+  /// module-level break points between them.
+  bool experimentalStagedPipeline = false;
+
   /// Returns true if the given phase should execute.
   bool shouldRunPhase(TranslationPhase phase) const {
     return static_cast<uint8_t>(phase) >= static_cast<uint8_t>(compileFrom) &&
@@ -68,7 +75,8 @@ struct ROCDLPipelineOptions {
   }
 
   bool operator==(const ROCDLPipelineOptions &rhs) const {
-    return compileFrom == rhs.compileFrom && compileTo == rhs.compileTo;
+    return compileFrom == rhs.compileFrom && compileTo == rhs.compileTo &&
+           experimentalStagedPipeline == rhs.experimentalStagedPipeline;
   }
 
   bool operator!=(const ROCDLPipelineOptions &rhs) const {
@@ -78,7 +86,8 @@ struct ROCDLPipelineOptions {
 
 inline llvm::hash_code hash_value(const ROCDLPipelineOptions &opts) {
   return llvm::hash_combine(static_cast<uint8_t>(opts.compileFrom),
-                            static_cast<uint8_t>(opts.compileTo));
+                            static_cast<uint8_t>(opts.compileTo),
+                            opts.experimentalStagedPipeline);
 }
 
 } // namespace mlir::iree_compiler::IREE::ROCM
