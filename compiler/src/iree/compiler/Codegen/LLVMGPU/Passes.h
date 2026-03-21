@@ -60,6 +60,13 @@ void addGPUVectorizationPassPipeline(OpPassManager &funcPassManager);
 /// with different tiling and distribution passes.
 void addGPUWinogradVectorizePassPipeline(OpPassManager &funcPassManager);
 
+/// Pre-bufferization passes for the VectorDistribute pipeline. Covers
+/// everything after workgroup tiling and before bufferization: reduction
+/// tiling, partial reduction, serial tiling, attention decomposition,
+/// convolution-to-matmul conversion, layout configuration, vectorization,
+/// and shared memory allocation.
+void addGPUVectorDistributePreBufferizePasses(OpPassManager &funcPassManager);
+
 /// Lowering based on vector distribution patterns.
 void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
                                         const GPUPipelineOptions &options,

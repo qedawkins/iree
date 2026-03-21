@@ -840,16 +840,9 @@ static LogicalResult gpuVectorCopyFn(OpBuilder &builder, Location loc,
   return success();
 }
 
-void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
-                                        const GPUPipelineOptions &options,
-                                        bool forROCDL) {
-  ReorderWorkgroupsStrategy reorderStrategy =
-      getReorderWorkgroupsStrategy(options.reorderStrategy);
-
-  tileAndDistributeToWorkgroup(funcPassManager,
-                               /*strategy=*/reorderStrategy);
-
-  // Some of the elementwise fusion can benefit from this pass.
+void addGPUVectorDistributePreBufferizePasses(
+    OpPassManager &funcPassManager) {
+  // Rematerialize parallel ops for elementwise fusion.
   funcPassManager.addPass(createRematerializeParallelOpsPass());
 
   funcPassManager.addPass(
@@ -872,7 +865,7 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
     funcPassManager.addPass(createCSEPass());
   }
 
-  // Tile to reduction loops.
+  // Tile to partial reduction.
   {
     GPUApplyPaddingLevelPassOptions padOptions;
     padOptions.tilingLevel = IREE::GPU::TilingLevel::PartialReduction;
@@ -928,7 +921,7 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
   funcPassManager.addPass(tensor::createFoldTensorSubsetOpsPass());
 
-  // Linalg -> Vector
+  // Linalg -> Vector.
   addGPUVectorizationPasses(funcPassManager, /*vectorizeCopies=*/true,
                             /*enableMasking=*/true,
                             /*foldIdentitySlices=*/false,
@@ -939,8 +932,20 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
   funcPassManager.addPass(createGPUCombineValueSemanticBarriersPass());
+}
 
-  // Tensor -> Memref
+void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
+                                        const GPUPipelineOptions &options,
+                                        bool forROCDL) {
+  ReorderWorkgroupsStrategy reorderStrategy =
+      getReorderWorkgroupsStrategy(options.reorderStrategy);
+
+  tileAndDistributeToWorkgroup(funcPassManager,
+                               /*strategy=*/reorderStrategy);
+
+  addGPUVectorDistributePreBufferizePasses(funcPassManager);
+
+  // Tensor -> Memref.
   addGPUBufferizePasses(funcPassManager);
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());

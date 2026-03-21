@@ -676,6 +676,13 @@ public:
           func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
       vdFuncPM.addPass(createGPUWrapInSharedExecutorPass());
 
+      // Pre-bufferization VectorDistribute passes (tiling, vectorization,
+      // shared memory allocation).
+      addGPUVectorDistributePreBufferizePasses(vdFuncPM);
+
+      // DO NOT SUBMIT: Distribution via PCF interface will go here.
+      // For now, the VectorDistribute step is deferred to a future task.
+
       // TODO: Hybrid path.
 
       nest.commitPass();
