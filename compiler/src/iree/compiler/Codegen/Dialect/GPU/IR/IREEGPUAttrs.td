@@ -1127,4 +1127,21 @@ def IREEGPU_LaneScopeAttr : AttrDef<IREEGPU_Dialect, "LaneScope"> {
   let assemblyFormat = [{}];
 }
 
+def IREEGPU_ThreadScopeAttr : AttrDef<IREEGPU_Dialect, "ThreadScope"> {
+  let mnemonic = "thread_scope";
+  let summary = [{Attribute representing execution across all threads in a workgroup.}];
+  let description = [{
+    Scope for the combined subgroup + lane parallelism level. This represents
+    all threads in a workgroup as a single flat scope. Memory allocated at
+    this scope uses workgroup shared memory, and gpu.barrier synchronizes
+    all threads.
+
+    Thread IDs are linearized from the 3D GPU thread grid into a single
+    scalar ID. Worker counts return the total number of threads (product of
+    workgroup dimensions).
+  }];
+  let parameters = (ins);
+  let assemblyFormat = [{}];
+}
+
 #endif // IREE_COMPILER_CODEGEN_DIALECT_GPU_IREEGPUATTRS

@@ -663,7 +663,19 @@ public:
       tafFuncPM.addPass(
           createGPUConvertThreadForallToSubgroupLanePCFPass());
 
-      // TODO: VectorDistribute path.
+      // VectorDistribute path: wrap workgroup-scoped PCF ops in
+      // shared_executor with thread scope.
+      OpPassManager &vdFuncPM = nest.nestIf(
+          [](Operation *op) {
+            std::optional<IREE::GPU::LoweringPipeline> pipeline =
+                getStagedPipelineKind(op);
+            return pipeline &&
+                   *pipeline ==
+                       IREE::GPU::LoweringPipeline::VectorDistribute;
+          },
+          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
+      vdFuncPM.addPass(createGPUWrapInSharedExecutorPass());
+
       // TODO: Hybrid path.
 
       nest.commitPass();
