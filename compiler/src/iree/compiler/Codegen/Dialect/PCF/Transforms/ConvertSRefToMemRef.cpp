@@ -348,6 +348,54 @@ ChangeStatus StridedLayoutValueElement::updateOpResult(
           newState.invalidate();
         }
       })
+      .Case([&](PCF::SubviewOp subviewOp) {
+        // Derive the result memref type from the source sref's resolved type.
+        auto sourceState = solver.getElementFor<StridedLayoutValueElement>(
+            *this, Position::forValue(subviewOp.getSource()),
+            DFX::Resolution::REQUIRED);
+        if (!sourceState.isValidState()) {
+          newState.invalidate();
+          return;
+        }
+        MemRefType sourceMemRefType = sourceState.getAssumed();
+        // Compute the subview result type.
+        MemRefType subviewType = memref::SubViewOp::inferResultType(
+            sourceMemRefType, subviewOp.getMixedOffsets(),
+            subviewOp.getMixedSizes(), subviewOp.getMixedStrides());
+        newState.setAssumed(subviewType);
+        newState.indicateOptimisticFixpoint();
+      })
+      .Case([&](PCF::ExpandShapeOp expandOp) {
+        // Derive the result memref type from the source sref's resolved type.
+        auto sourceState = solver.getElementFor<StridedLayoutValueElement>(
+            *this, Position::forValue(expandOp.getSrc()),
+            DFX::Resolution::REQUIRED);
+        if (!sourceState.isValidState()) {
+          newState.invalidate();
+          return;
+        }
+        MemRefType sourceMemRefType = sourceState.getAssumed();
+        // Compute the expand_shape result type.
+        SmallVector<ReassociationIndices> reassociation;
+        for (Attribute group : expandOp.getReassociation()) {
+          ReassociationIndices indices;
+          for (Attribute idx : cast<ArrayAttr>(group)) {
+            indices.push_back(cast<IntegerAttr>(idx).getInt());
+          }
+          reassociation.push_back(indices);
+        }
+        // Use the result sref's static shape for the expanded type.
+        auto resultSrefType =
+            cast<PCF::ShapedRefType>(expandOp.getResult().getType());
+        auto expandedType = memref::ExpandShapeOp::computeExpandedType(
+            sourceMemRefType, resultSrefType.getShape(), reassociation);
+        if (failed(expandedType)) {
+          newState.invalidate();
+          return;
+        }
+        newState.setAssumed(*expandedType);
+        newState.indicateOptimisticFixpoint();
+      })
       .Case([&](Util::OptimizationBarrierOp barrierOp) {
         auto returnState = solver.getElementFor<StridedLayoutValueElement>(
             *this,
@@ -1051,6 +1099,60 @@ struct ConvertToSrefOp final : OpConversionPattern<PCF::ToSrefOp> {
   }
 };
 
+struct ConvertSubviewOp final : OpConversionPattern<PCF::SubviewOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(PCF::SubviewOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Convert pcf.subview to memref.subview.
+    std::optional<MemRefType> convertedType =
+        getTypeConverter()->convertType<MemRefType>(op.getResult());
+    if (!convertedType) {
+      return rewriter.notifyMatchFailure(op, "failed to convert result type");
+    }
+    rewriter.replaceOpWithNewOp<memref::SubViewOp>(
+        op, *convertedType, adaptor.getSource(),
+        op.getMixedOffsets(), op.getMixedSizes(), op.getMixedStrides());
+    return success();
+  }
+};
+
+struct ConvertExpandShapeOp final
+    : OpConversionPattern<PCF::ExpandShapeOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(PCF::ExpandShapeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Convert pcf.expand_shape to memref.expand_shape.
+    std::optional<MemRefType> convertedType =
+        getTypeConverter()->convertType<MemRefType>(op.getResult());
+    if (!convertedType) {
+      return rewriter.notifyMatchFailure(op, "failed to convert result type");
+    }
+    // Convert ArrayAttr reassociation to SmallVector<ReassociationIndices>.
+    SmallVector<ReassociationIndices> reassociation;
+    for (Attribute group : op.getReassociation()) {
+      ReassociationIndices indices;
+      for (Attribute idx : cast<ArrayAttr>(group)) {
+        indices.push_back(cast<IntegerAttr>(idx).getInt());
+      }
+      reassociation.push_back(indices);
+    }
+    // Only pass dynamic output shape values for dimensions that are
+    // actually dynamic in the result type.
+    SmallVector<OpFoldResult> outputShape;
+    for (int64_t dim : convertedType->getShape()) {
+      outputShape.push_back(rewriter.getIndexAttr(dim));
+    }
+    rewriter.replaceOpWithNewOp<memref::ExpandShapeOp>(
+        op, *convertedType, adaptor.getSrc(),
+        reassociation, outputShape);
+    return success();
+  }
+};
+
 struct ConvertOptimizationBarrier final
     : OpConversionPattern<Util::OptimizationBarrierOp> {
   using Base::Base;
@@ -1329,7 +1431,8 @@ void ConvertSRefToMemRefPass::runOnOperation() {
 
   patterns.add<ConvertGenericOp, ConvertLoopOp, ConvertWriteSliceOp,
                ConvertReadSliceOp, ConvertGetMemrefOp, ConvertAllocOp,
-               ConvertToSrefOp, ConvertOptimizationBarrier,
+               ConvertToSrefOp, ConvertSubviewOp, ConvertExpandShapeOp,
+               ConvertOptimizationBarrier,
                ConvertVectorExtTransferReadOp, ConvertVectorExtTransferWriteOp>(
       typeConverter, context);
 
