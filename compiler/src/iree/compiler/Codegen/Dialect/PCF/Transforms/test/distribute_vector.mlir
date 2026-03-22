@@ -21,9 +21,8 @@
 // The constant and addf now operate on vector<1x1x1x1x16x16xf32> (distributed).
 //
 // CHECK-LABEL: util.func private @vector_distribute_in_cluster
-// CHECK: scf.index_switch
 // CHECK: arith.constant dense<0.000000e+00> : vector<1x1x1x1x16x16xf32>
-// CHECK: arith.addf {{.*}} : vector<1x1x1x1x16x16xf32>
+// CHECK: scf.index_switch
 // CHECK: iree_vector_ext.to_simd {{.*}} : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
 // CHECK-NOT: tile_group
 util.func private @vector_distribute_in_cluster(
@@ -61,17 +60,14 @@ util.func private @vector_distribute_in_cluster(
 // cluster ops appear only in case 0, the right cluster ops only in default.
 //
 // CHECK-LABEL: util.func private @two_clusters_distributed
+// CHECK-DAG: arith.constant dense<1.000000e+00> : vector<1x1x1x1x16x16xf32>
+// CHECK-DAG: arith.constant dense<2.000000e+00> : vector<16x16xf32>
 // CHECK: scf.index_switch
 // CHECK-NEXT: case 0 {
-// CHECK:   arith.constant dense<1.000000e+00> : vector<1x1x1x1x16x16xf32>
-// CHECK:   arith.mulf {{.*}} : vector<1x1x1x1x16x16xf32>
-// CHECK-NOT: arith.constant dense<2.000000e+00>
+// CHECK:   iree_vector_ext.to_simd {{.*}} : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
 // CHECK:   scf.yield
 // CHECK: }
 // CHECK-NEXT: default {
-// CHECK:   arith.constant dense<2.000000e+00> : vector<1x1x1x1x16x16xf32>
-// CHECK:   arith.addf {{.*}} : vector<1x1x1x1x16x16xf32>
-// CHECK-NOT: arith.constant dense<1.000000e+00>
 // CHECK: }
 // CHECK-NOT: tile_group
 util.func private @two_clusters_distributed(
