@@ -8,6 +8,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/DistributionInterface.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/EquivalenceAnalysis.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
+#include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -879,8 +880,102 @@ lowerSharedExecutor(SharedExecutorOp sharedExec,
 }
 
 //===----------------------------------------------------------------------===//
+// Public utility function
+//===----------------------------------------------------------------------===//
+
+} // namespace
+
+LogicalResult
+distributeAndLowerSharedExecutors(Operation *rootOp,
+                                  DistributionInterface *distInterface) {
+  // Phase 1: Distribute children within tile_groups.
+  if (distInterface) {
+    SmallVector<TileGroupOp> tileGroups;
+    rootOp->walk(
+        [&](TileGroupOp tileGroup) { tileGroups.push_back(tileGroup); });
+
+    for (TileGroupOp tileGroup : tileGroups) {
+      if (failed(distributeWithinTileGroup(tileGroup, *distInterface))) {
+        return failure();
+      }
+    }
+
+    // Phase 2: Distribute threadgroup-level ops in shared_executor.
+    // For shared_executors without tile_groups, the body contains
+    // undistributed ops (e.g., vectorized code with to_layout anchors).
+    // Distribute them using the DistributionInterface.
+    SmallVector<SharedExecutorOp> sharedExecs;
+    rootOp->walk([&](SharedExecutorOp se) { sharedExecs.push_back(se); });
+
+    for (SharedExecutorOp se : sharedExecs) {
+      if (failed(distributeSharedExecutor(se, *distInterface))) {
+        return failure();
+      }
+    }
+  }
+
+  // Phase 3: Structural lowering.
+  // Re-collect tile_group ops since distribution may have modified IR.
+  // Use post-order walk to process inner tile_groups before outer ones.
+  SmallVector<TileGroupOp> tileGroupsForLowering;
+  rootOp->walk<WalkOrder::PostOrder>([&](TileGroupOp tileGroup) {
+    tileGroupsForLowering.push_back(tileGroup);
+  });
+
+  for (TileGroupOp tileGroup : tileGroupsForLowering) {
+    if (failed(lowerTileGroup(tileGroup))) {
+      return failure();
+    }
+  }
+
+  // Phase 4: Lower shared_executor -> pcf.generic.
+  // Collect after Phase 3 since tile_groups inside shared_executors are now
+  // lowered. Only lower top-level shared_executors (not those nested inside
+  // a pcf.generic, which are child shared_executors created during this
+  // phase for telescoping distribution).
+  SmallVector<SharedExecutorOp> sharedExecs;
+  rootOp->walk([&](SharedExecutorOp sharedExec) {
+    sharedExecs.push_back(sharedExec);
+  });
+
+  for (SharedExecutorOp sharedExec : sharedExecs) {
+    // Auto-detect child scope from telescope ops in the body.
+    ScopeAttrInterface detectedChildScope = detectChildScope(sharedExec);
+    if (failed(lowerSharedExecutor(sharedExec, detectedChildScope))) {
+      return failure();
+    }
+  }
+
+  // Phase 5: Verify all tile_group ops were lowered. SharedExecutorOps
+  // may remain as children inside pcf.generic when telescoping was used.
+  WalkResult result = rootOp->walk([](Operation *innerOp) -> WalkResult {
+    if (isa<TileGroupOp>(innerOp)) {
+      innerOp->emitOpError(
+          "expected to be lowered by distributeAndLowerSharedExecutors");
+      return WalkResult::interrupt();
+    }
+    // SharedExecutorOps nested inside pcf.generic are expected (child
+    // scopes from telescoping). Only flag top-level ones.
+    if (isa<SharedExecutorOp>(innerOp) &&
+        !innerOp->getParentOfType<GenericOp>()) {
+      innerOp->emitOpError(
+          "expected to be lowered by distributeAndLowerSharedExecutors");
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (result.wasInterrupted()) {
+    return failure();
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
+
+namespace {
 
 struct DistributeAndLowerPass final
     : impl::DistributeAndLowerPassBase<DistributeAndLowerPass> {
@@ -906,86 +1001,8 @@ struct DistributeAndLowerPass final
       }
     }
 
-    // Phase 1: Distribute children within tile_groups.
-    if (distInterface) {
-      SmallVector<TileGroupOp> tileGroups;
-      op->walk([&](TileGroupOp tileGroup) { tileGroups.push_back(tileGroup); });
-
-      for (TileGroupOp tileGroup : tileGroups) {
-        if (failed(distributeWithinTileGroup(tileGroup, *distInterface))) {
-          return signalPassFailure();
-        }
-      }
-
-      // Phase 2: Distribute threadgroup-level ops in shared_executor.
-      // For shared_executors without tile_groups, the body contains
-      // undistributed ops (e.g., vectorized code with to_layout anchors).
-      // Distribute them using the DistributionInterface.
-      SmallVector<SharedExecutorOp> sharedExecs;
-      op->walk([&](SharedExecutorOp se) { sharedExecs.push_back(se); });
-
-      for (SharedExecutorOp se : sharedExecs) {
-        if (failed(distributeSharedExecutor(se, *distInterface))) {
-          return signalPassFailure();
-        }
-      }
-    }
-
-    // Phase 3: Structural lowering.
-    // Re-collect tile_group ops since distribution may have modified IR.
-    // Use post-order walk to process inner tile_groups before outer ones.
-    SmallVector<TileGroupOp> tileGroupsForLowering;
-    op->walk<WalkOrder::PostOrder>([&](TileGroupOp tileGroup) {
-      tileGroupsForLowering.push_back(tileGroup);
-    });
-
-    for (TileGroupOp tileGroup : tileGroupsForLowering) {
-      if (failed(lowerTileGroup(tileGroup))) {
-        signalPassFailure();
-        return;
-      }
-    }
-
-    // Phase 4: Lower shared_executor → pcf.generic.
-    // Collect after Phase 3 since tile_groups inside shared_executors are now
-    // lowered. Only lower top-level shared_executors (not those nested inside
-    // a pcf.generic, which are child shared_executors created during this
-    // phase for telescoping distribution).
-    SmallVector<SharedExecutorOp> sharedExecs;
-    op->walk([&](SharedExecutorOp sharedExec) {
-      sharedExecs.push_back(sharedExec);
-    });
-
-    for (SharedExecutorOp sharedExec : sharedExecs) {
-      // Auto-detect child scope from telescope ops in the body.
-      ScopeAttrInterface detectedChildScope = detectChildScope(sharedExec);
-      if (failed(lowerSharedExecutor(sharedExec, detectedChildScope))) {
-        signalPassFailure();
-        return;
-      }
-    }
-
-    // Phase 5: Verify all tile_group ops were lowered. SharedExecutorOps
-    // may remain as children inside pcf.generic when telescoping was used.
-    WalkResult result = op->walk([](Operation *innerOp) -> WalkResult {
-      if (isa<TileGroupOp>(innerOp)) {
-        innerOp->emitOpError(
-            "expected to be lowered by DistributeAndLowerPass");
-        return WalkResult::interrupt();
-      }
-      // SharedExecutorOps nested inside pcf.generic are expected (child
-      // scopes from telescoping). Only flag top-level ones.
-      if (isa<SharedExecutorOp>(innerOp) &&
-          !innerOp->getParentOfType<GenericOp>()) {
-        innerOp->emitOpError(
-            "expected to be lowered by DistributeAndLowerPass");
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    if (result.wasInterrupted()) {
-      signalPassFailure();
-      return;
+    if (failed(distributeAndLowerSharedExecutors(op, distInterface.get()))) {
+      return signalPassFailure();
     }
   }
 };
