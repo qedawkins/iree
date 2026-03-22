@@ -20,6 +20,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
+#include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -636,13 +637,45 @@ public:
   }
 
   /// Returns true if the given function op has a VectorDistribute lowering
-  /// pipeline. Only VectorDistribute is supported in the experimental staged
-  /// pipeline; TileAndFuse is routed through the default path.
+  /// pipeline and is suitable for the experimental staged pipeline.
+  /// Dispatches with dynamic shapes are excluded because the pre-bufferization
+  /// distribution path does not yet handle dynamic tensor dimensions.
   static bool hasStagedPipeline(Operation *op) {
     std::optional<IREE::GPU::LoweringPipeline> pipeline =
         getStagedPipelineKind(op);
-    return pipeline &&
-           *pipeline == IREE::GPU::LoweringPipeline::VectorDistribute;
+    if (!pipeline ||
+        *pipeline != IREE::GPU::LoweringPipeline::VectorDistribute) {
+      return false;
+    }
+    // Check for dispatches that can't be handled by the staged pipeline.
+    // Use a sticky attribute to mark dispatches as excluded during Phase 1
+    // (when dynamic shapes are still visible). Later phases check the
+    // attribute since dynamic shapes may have been resolved by then.
+    auto funcOp = cast<FunctionOpInterface>(op);
+    StringRef excludeAttrName = "__iree_exclude_staged_pipeline__";
+    if (funcOp->hasAttr(excludeAttrName)) {
+      return false;
+    }
+    // Walk for dynamic tensor shapes. If found, mark the function so later
+    // phases also exclude it.
+    bool hasDynamicShapes = false;
+    funcOp->walk([&](Operation *inner) -> WalkResult {
+      for (Type type : inner->getResultTypes()) {
+        if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
+          if (!tensorType.hasStaticShape()) {
+            hasDynamicShapes = true;
+            return WalkResult::interrupt();
+          }
+        }
+      }
+      return WalkResult::advance();
+    });
+    if (hasDynamicShapes) {
+      funcOp->setAttr(excludeAttrName,
+                      UnitAttr::get(funcOp->getContext()));
+      return false;
+    }
+    return true;
   }
 
   /// Builds the experimental staged pass pipeline. This splits the
@@ -773,6 +806,8 @@ public:
           nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
                       func::FuncOp::getOperationName(),
                       TypeID::get<func::FuncOp>());
+      stagedFuncPM.addPass(
+          IREE::LinalgExt::createDecomposeMapStorePass());
       stagedFuncPM.addPass(IREE::GPU::createUnrollToIntrinsicsPass());
       stagedFuncPM.addPass(IREE::GPU::createLowerIREEGPUOpsPass());
       stagedFuncPM.addPass(createCanonicalizerPass());
