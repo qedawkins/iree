@@ -332,14 +332,21 @@ ChangeStatus StridedLayoutValueElement::updateOpResult(
         }
       })
       .Case([&](PCF::ToSrefOp toSrefOp) {
-        // The input is a memref after bufferization. Use its type directly.
-        auto inputType = dyn_cast<MemRefType>(toSrefOp.getInput().getType());
-        if (!inputType) {
+        // The input is a memref after bufferization, or a tensor if
+        // bufferization has not yet run. Use its type directly.
+        if (auto inputType =
+                dyn_cast<MemRefType>(toSrefOp.getInput().getType())) {
+          newState.setAssumed(inputType);
+          newState.indicateOptimisticFixpoint();
+        } else if (auto tensorType = dyn_cast<RankedTensorType>(
+                       toSrefOp.getInput().getType())) {
+          // Pre-bufferization: derive a default memref type from the tensor.
+          newState.setAssumed(MemRefType::get(tensorType.getShape(),
+                                              tensorType.getElementType()));
+          newState.indicateOptimisticFixpoint();
+        } else {
           newState.invalidate();
-          return;
         }
-        newState.setAssumed(inputType);
-        newState.indicateOptimisticFixpoint();
       })
       .Case([&](Util::OptimizationBarrierOp barrierOp) {
         auto returnState = solver.getElementFor<StridedLayoutValueElement>(
@@ -359,17 +366,25 @@ ChangeStatus StridedLayoutValueElement::updateBlockArgument(
         llvm::TypeSwitch<Operation *, bool>(bbArg.getOwner()->getParentOp())
             .Case([&](PCF::GenericOp genericOp) {
               if (genericOp.isRegionRefArg(bbArg)) {
-                auto resultType = dyn_cast<MemRefType>(
-                    genericOp.getTiedResult(bbArg).getType());
-                if (!resultType ||
-                    !isDefaultOrStrided(resultType.getLayout())) {
-                  genericOp->emitOpError(
-                      "unexpected non-strided or default memref result type ")
-                      << resultType;
-                  newState.invalidate();
-                } else {
-                  newState.setAssumed(resultType);
+                Type tiedResultType =
+                    genericOp.getTiedResult(bbArg).getType();
+                if (auto resultType = dyn_cast<MemRefType>(tiedResultType)) {
+                  if (!isDefaultOrStrided(resultType.getLayout())) {
+                    genericOp->emitOpError(
+                        "unexpected non-strided or default memref result type ")
+                        << resultType;
+                    newState.invalidate();
+                  } else {
+                    newState.setAssumed(resultType);
+                    newState.indicateOptimisticFixpoint();
+                  }
+                } else if (auto tensorType =
+                               dyn_cast<RankedTensorType>(tiedResultType)) {
+                  newState.setAssumed(MemRefType::get(
+                      tensorType.getShape(), tensorType.getElementType()));
                   newState.indicateOptimisticFixpoint();
+                } else {
+                  newState.invalidate();
                 }
               } else {
                 // pcf.sref arguments must either be result tied or
@@ -389,16 +404,25 @@ ChangeStatus StridedLayoutValueElement::updateBlockArgument(
               return true;
             })
             .Case([&](PCF::LoopOp loopOp) {
-              auto resultType =
-                  dyn_cast<MemRefType>(loopOp.getTiedResult(bbArg).getType());
-              if (!resultType || !isDefaultOrStrided(resultType.getLayout())) {
-                loopOp->emitOpError(
-                    "unexpected non-strided or default memref result type ")
-                    << resultType;
-                newState.invalidate();
-              } else {
-                newState.setAssumed(resultType);
+              Type tiedResultType = loopOp.getTiedResult(bbArg).getType();
+              if (auto resultType = dyn_cast<MemRefType>(tiedResultType)) {
+                if (!isDefaultOrStrided(resultType.getLayout())) {
+                  loopOp->emitOpError(
+                      "unexpected non-strided or default memref result type ")
+                      << resultType;
+                  newState.invalidate();
+                } else {
+                  newState.setAssumed(resultType);
+                  newState.indicateOptimisticFixpoint();
+                }
+              } else if (auto tensorType =
+                             dyn_cast<RankedTensorType>(tiedResultType)) {
+                // Pre-bufferization: derive default memref from tensor.
+                newState.setAssumed(MemRefType::get(tensorType.getShape(),
+                                                    tensorType.getElementType()));
                 newState.indicateOptimisticFixpoint();
+              } else {
+                newState.invalidate();
               }
               return true;
             })
@@ -653,9 +677,10 @@ struct ConvertGenericOp final : OpConversionPattern<PCF::GenericOp> {
   LogicalResult
   matchAndRewrite(PCF::GenericOp genericOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (!llvm::all_of(genericOp.getResultTypes(), llvm::IsaPred<MemRefType>)) {
+    if (llvm::any_of(genericOp.getResultTypes(),
+                     llvm::IsaPred<PCF::ShapedRefType>)) {
       return rewriter.notifyMatchFailure(
-          genericOp, "expected all parallel op results to be of memref type");
+          genericOp, "unexpected sref result type");
     }
 
     Location loc = genericOp.getLoc();
@@ -740,9 +765,12 @@ struct ConvertLoopOp final : OpConversionPattern<PCF::LoopOp> {
   LogicalResult
   matchAndRewrite(PCF::LoopOp loopOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (!llvm::all_of(loopOp.getResultTypes(), llvm::IsaPred<MemRefType>)) {
+    // Results may be memrefs (post-bufferization) or tensors
+    // (pre-bufferization). Only sref results are unexpected at this point.
+    if (llvm::any_of(loopOp.getResultTypes(),
+                     llvm::IsaPred<PCF::ShapedRefType>)) {
       return rewriter.notifyMatchFailure(
-          loopOp, "expected all parallel op results to be of memref type");
+          loopOp, "unexpected non-strided or default memref result type");
     }
 
     Location loc = loopOp.getLoc();
@@ -761,9 +789,12 @@ struct ConvertLoopOp final : OpConversionPattern<PCF::LoopOp> {
         continue;
       }
 
-      int64_t numDynamicDims = cast<ShapedType>(resultType).getNumDynamicDims();
+      // Self-allocated results must be memref type.
+      auto memrefType = cast<MemRefType>(resultType);
+      int64_t numDynamicDims = memrefType.getNumDynamicDims();
       replacements.push_back(memref::AllocOp::create(
-          rewriter, loc, resultType, dynamicSizes.take_front(numDynamicDims),
+          rewriter, loc, memrefType,
+          dynamicSizes.take_front(numDynamicDims),
           /*symbolOperands=*/ValueRange(), alignment));
       dynamicSizes = dynamicSizes.drop_front(numDynamicDims);
     }
