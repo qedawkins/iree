@@ -84,6 +84,7 @@ iree_cc_library(
     "GPUPatterns.cpp"
     "GPUPipelining.cpp"
     "GPUPromoteMatmulOperands.cpp"
+    "GPUPromoteSharedMemToPCFAlloc.cpp"
     "GPUReduceBankConflicts.cpp"
     "GPUReuseSharedMemoryAllocs.cpp"
     "GPUTensorAlloc.cpp"
