@@ -171,21 +171,22 @@ static LogicalResult distributeVectorOpsImpl(
       return failure();
     }
   } else {
-    // Multi-root, may not be IsolatedFromAbove.
-    SmallVector<Operation *> conversionOps;
-    for (Operation *root : roots) {
-      root->walk([&](Operation *op) {
-        if (isa<IREE::VectorExt::ToSIMDOp, IREE::VectorExt::ToSIMTOp>(op)) {
-          conversionOps.push_back(op);
-        }
-      });
+    // Multi-root, may not be IsolatedFromAbove. Find the nearest isolated
+    // ancestor and run greedy canonicalization there to ensure all ToSIMD/
+    // ToSIMT ops are resolved, including any created during canonicalization.
+    Operation *isolatedAncestor = roots.front()->getParentOp();
+    while (isolatedAncestor &&
+           !isolatedAncestor->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
+      isolatedAncestor = isolatedAncestor->getParentOp();
     }
-    RewritePatternSet patterns(ctx);
-    IREE::VectorExt::ToSIMDOp::getCanonicalizationPatterns(patterns, ctx);
-    IREE::VectorExt::ToSIMTOp::getCanonicalizationPatterns(patterns, ctx);
-    FrozenRewritePatternSet canonPatterns(std::move(patterns));
-    if (failed(applyOpPatternsGreedily(conversionOps, canonPatterns))) {
-      return failure();
+    if (isolatedAncestor) {
+      RewritePatternSet patterns(ctx);
+      IREE::VectorExt::ToSIMDOp::getCanonicalizationPatterns(patterns, ctx);
+      IREE::VectorExt::ToSIMTOp::getCanonicalizationPatterns(patterns, ctx);
+      if (failed(
+              applyPatternsGreedily(isolatedAncestor, std::move(patterns)))) {
+        return failure();
+      }
     }
   }
 
