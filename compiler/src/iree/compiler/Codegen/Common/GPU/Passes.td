@@ -13,6 +13,16 @@ include "mlir/Pass/PassBase.td"
 // Common Passes used for GPU-like backends (keep alphabetical)
 //===---------------------------------------------------------------------===//
 
+def GPUAbsorbTensorReadsIntoPCFPass
+    : InterfacePass<"iree-gpu-absorb-tensor-reads-into-pcf",
+                    "mlir::FunctionOpInterface"> {
+  let summary = "Converts vector reads on tensors to reads on pcf.sref inside shared_executor.";
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::iree_compiler::IREE::VectorExt::IREEVectorExtDialect",
+  ];
+}
+
 def DecomposeHorizontallyFusedGemmsPass :
     InterfacePass<"iree-codegen-gpu-decompose-horizontally-fused-gemms",
                   "mlir::FunctionOpInterface"> {

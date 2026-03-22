@@ -52,6 +52,7 @@ iree_cc_library(
     "AMDGPULowerCoalescedDMAToGatherLDS.cpp"
     "DecomposeHorizontallyFusedGemms.cpp"
     "ExpandGPUOps.cpp"
+    "GPUAbsorbTensorReadsIntoPCF.cpp"
     "GPUAllocPrivateMemoryForDPSOps.cpp"
     "GPUApplyPaddingLevel.cpp"
     "GPUApplyTilingLevel.cpp"
