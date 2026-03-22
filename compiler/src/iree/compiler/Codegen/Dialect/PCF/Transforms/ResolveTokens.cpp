@@ -10,6 +10,8 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/ConversionDialectInterface.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
+#include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
+#include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVectorExtras.h"
@@ -245,6 +247,52 @@ struct ConvertOptimizationBarrier final
   }
 };
 
+/// Resolve synced sref on iree_vector_ext.transfer_read source.
+/// Takes the first value from the 1:N expanded source (the unscoped sref).
+struct ConvertVectorExtTransferReadOp final
+    : OpConversionPattern<IREE::VectorExt::TransferReadOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(IREE::VectorExt::TransferReadOp readOp,
+                  OneToNOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ValueRange expandedSource = adaptor.getSource();
+    if (expandedSource.size() < 1) {
+      return rewriter.notifyMatchFailure(readOp, "no converted source");
+    }
+    // Take the first value (unscoped sref), drop sync tokens.
+    Value newSource = expandedSource.front();
+    rewriter.startOpModification(readOp);
+    readOp.getSourceMutable().assign(newSource);
+    rewriter.finalizeOpModification(readOp);
+    return success();
+  }
+};
+
+/// Resolve synced sref on iree_vector_ext.transfer_write dest.
+/// Takes the first value from the 1:N expanded dest (the unscoped sref).
+struct ConvertVectorExtTransferWriteOp final
+    : OpConversionPattern<IREE::VectorExt::TransferWriteOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(IREE::VectorExt::TransferWriteOp writeOp,
+                  OneToNOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ValueRange expandedDest = adaptor.getDest();
+    if (expandedDest.size() < 1) {
+      return rewriter.notifyMatchFailure(writeOp, "no converted dest");
+    }
+    // Take the first value (unscoped sref), drop sync tokens.
+    Value newDest = expandedDest.front();
+    rewriter.startOpModification(writeOp);
+    writeOp.getDestMutable().assign(newDest);
+    rewriter.finalizeOpModification(writeOp);
+    return success();
+  }
+};
+
 void ResolveTokensPass::runOnOperation() {
   MLIRContext *context = &getContext();
 
@@ -286,7 +334,9 @@ void ResolveTokensPass::runOnOperation() {
 
   patterns
       .add<ConvertGenericOp, ConvertLoopOp, ConvertAllocOp, ConvertWriteSliceOp,
-           ConvertOptimizationBarrier, ConvertBranchOp>(typeConverter, context);
+           ConvertOptimizationBarrier, ConvertBranchOp,
+           ConvertVectorExtTransferReadOp, ConvertVectorExtTransferWriteOp>(
+          typeConverter, context);
 
   // Verify that all operand, result, and region argument types have been
   // converted.

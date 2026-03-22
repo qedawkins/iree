@@ -14,6 +14,7 @@
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 
 namespace mlir::iree_compiler::IREE::Codegen {
 
@@ -108,6 +109,13 @@ struct WorkgroupScopeAttrModel final
 
     return ids;
   }
+  LogicalResult addBarrier(Attribute attr, OpBuilder &builder) const {
+    // Workgroup-level barrier using gpu.barrier with workgroup memory fence.
+    gpu::BarrierOp::create(builder, builder.getUnknownLoc(),
+                           gpu::AddressSpace::Workgroup);
+    return success();
+  }
+
   FailureOr<Attribute> getAllocMemSpace(Attribute, MLIRContext *) const {
     // Allocating workgroup memory unsupported.
     return failure();
@@ -127,8 +135,8 @@ public:
   using PCFConversionDialectInterface::PCFConversionDialectInterface;
   void
   loadStructuralLoweringDependentDialects(MLIRContext *context) const override {
-    // HAL For workgroup ID/Counts.
-    context->loadDialect<IREE::HAL::HALDialect>();
+    // HAL for workgroup ID/Counts, GPU for gpu.barrier.
+    context->loadDialect<IREE::HAL::HALDialect, gpu::GPUDialect>();
   }
 };
 

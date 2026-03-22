@@ -736,6 +736,27 @@ public:
       nest.commitPass();
     }
 
+    // --- func(PCF lowering) ---
+    // Lower PCF ops to memref/scf: resolve sync tokens, convert srefs to
+    // memrefs (including iree_vector_ext.transfer_{read,write} to
+    // vector.transfer_{read,write}), then lower structural pcf.generic/loop
+    // to scf.
+    {
+      MultiPipelineNest nest(modulePM);
+
+      OpPassManager &stagedFuncPM =
+          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
+                      func::FuncOp::getOperationName(),
+                      TypeID::get<func::FuncOp>());
+      stagedFuncPM.addPass(PCF::createResolveTokensPass());
+      stagedFuncPM.addPass(PCF::createConvertSRefToMemRefPass());
+      stagedFuncPM.addPass(PCF::createLowerStructuralPCFPass());
+      stagedFuncPM.addPass(createCanonicalizerPass());
+      stagedFuncPM.addPass(createCSEPass());
+
+      nest.commitPass();
+    }
+
     // --- func(Post-bufferization) ---
     {
       MultiPipelineNest nest(modulePM);
