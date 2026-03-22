@@ -687,15 +687,9 @@ public:
       vdFuncPM.addPass(createGPUPromoteSharedMemToPCFAllocPass());
 
       // Distribute vector ops inside shared_executor using VectorDistribute
-      // via the PCF distribution interface. Then lower shared_executor to
-      // pcf.generic.
-      {
-        PCF::DistributeAndLowerPassOptions opts;
-        opts.useVectorDistribution = true;
-        opts.subgroupSize = 64;
-        opts.workgroupSize = {64};
-        vdFuncPM.addPass(PCF::createDistributeAndLowerPass(opts));
-      }
+      // via the PCF distribution interface, then lower shared_executor to
+      // pcf.generic. Workgroup/subgroup sizes are read from translation_info.
+      vdFuncPM.addPass(createGPUDistributeSharedExecutorPass());
 
       // TODO: Hybrid path.
 
