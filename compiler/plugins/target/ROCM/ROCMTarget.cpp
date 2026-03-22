@@ -684,6 +684,7 @@ public:
       // Absorb tensor reads/writes into PCF sref ops, then promote shared
       // memory alloc_tensors to pcf.alloc in the shared_executor initializer.
       vdFuncPM.addPass(createGPUAbsorbTensorReadsIntoPCFPass());
+      vdFuncPM.addPass(createGPUPromoteSharedMemToPCFAllocPass());
 
       // Distribute vector ops inside shared_executor using VectorDistribute
       // via the PCF distribution interface. Then lower shared_executor to

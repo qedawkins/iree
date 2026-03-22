@@ -337,6 +337,17 @@ def GPUAllocPrivateMemoryForDPSOpsPass :
   ];
 }
 
+def GPUPromoteSharedMemToPCFAllocPass
+    : InterfacePass<"iree-gpu-promote-shared-mem-to-pcf-alloc",
+                    "mlir::FunctionOpInterface"> {
+  let summary = "Converts bufferization.alloc_tensor shared memory to pcf.alloc in shared_executor initializer.";
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::iree_compiler::IREE::VectorExt::IREEVectorExtDialect",
+    "::mlir::gpu::GPUDialect",
+  ];
+}
+
 def GPUReduceBankConflictsPass :
     InterfacePass<"iree-codegen-gpu-reduce-bank-conflicts", "mlir::FunctionOpInterface"> {
   let summary = "Pass to try to reduce the number of bank conflicts by padding memref.alloc ops.";
