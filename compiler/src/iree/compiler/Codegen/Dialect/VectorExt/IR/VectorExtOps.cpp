@@ -7,6 +7,7 @@
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtOps.h"
 #include "llvm/Support/InterleavedRange.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Matchers.h"
@@ -33,19 +34,81 @@ void ToLayoutOp::populateBoundsForShapedValueDim(
 }
 
 // to_simd -> to_simt
-OpFoldResult ToSIMDOp::fold(FoldAdaptor) {
+OpFoldResult ToSIMDOp::fold(FoldAdaptor adaptor) {
   if (auto simtOp = getOperand().getDefiningOp<ToSIMTOp>()) {
     return simtOp.getOperand();
+  }
+  // to_simd(splat_constant) -> splat_constant in SIMD shape.
+  if (auto denseAttr =
+          dyn_cast_if_present<DenseElementsAttr>(adaptor.getInput())) {
+    if (denseAttr.isSplat()) {
+      return DenseElementsAttr::get(cast<ShapedType>(getType()),
+                                    denseAttr.getSplatValue<Attribute>());
+    }
   }
   return {};
 }
 
 // to_simt -> to_simd
-OpFoldResult ToSIMTOp::fold(FoldAdaptor) {
+OpFoldResult ToSIMTOp::fold(FoldAdaptor adaptor) {
   if (auto simdOp = getOperand().getDefiningOp<ToSIMDOp>()) {
     return simdOp.getOperand();
   }
   return {};
+}
+
+namespace {
+/// Canonicalize to_simt(splat_constant) -> arith.constant(splat in distributed
+/// shape). This can't be a fold because the fold framework may fail to
+/// materialize the constant for the VectorExt dialect's result type.
+struct FoldToSIMTSplatConstant final : OpRewritePattern<ToSIMTOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(ToSIMTOp op,
+                                PatternRewriter &rewriter) const override {
+    auto constOp = op.getInput().getDefiningOp<arith::ConstantOp>();
+    if (!constOp) {
+      return failure();
+    }
+    auto denseAttr = dyn_cast<DenseElementsAttr>(constOp.getValue());
+    if (!denseAttr || !denseAttr.isSplat()) {
+      return failure();
+    }
+    auto newAttr = DenseElementsAttr::get(cast<ShapedType>(op.getType()),
+                                          denseAttr.getSplatValue<Attribute>());
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, newAttr);
+    return success();
+  }
+};
+
+/// Canonicalize to_simd(splat_constant) -> arith.constant(splat in SIMD shape).
+struct FoldToSIMDSplatConstant final : OpRewritePattern<ToSIMDOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(ToSIMDOp op,
+                                PatternRewriter &rewriter) const override {
+    auto constOp = op.getInput().getDefiningOp<arith::ConstantOp>();
+    if (!constOp) {
+      return failure();
+    }
+    auto denseAttr = dyn_cast<DenseElementsAttr>(constOp.getValue());
+    if (!denseAttr || !denseAttr.isSplat()) {
+      return failure();
+    }
+    auto newAttr = DenseElementsAttr::get(cast<ShapedType>(op.getType()),
+                                          denseAttr.getSplatValue<Attribute>());
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, newAttr);
+    return success();
+  }
+};
+} // namespace
+
+void ToSIMTOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                           MLIRContext *context) {
+  results.add<FoldToSIMTSplatConstant>(context);
+}
+
+void ToSIMDOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                           MLIRContext *context) {
+  results.add<FoldToSIMDSplatConstant>(context);
 }
 
 //===----------------------------------------------------------------------===//
