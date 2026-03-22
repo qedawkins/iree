@@ -736,27 +736,6 @@ public:
       nest.commitPass();
     }
 
-    // --- func(PCF lowering) ---
-    // Lower PCF ops to memref/scf: resolve sync tokens, convert srefs to
-    // memrefs (including iree_vector_ext.transfer_{read,write} to
-    // vector.transfer_{read,write}), then lower structural pcf.generic/loop
-    // to scf.
-    {
-      MultiPipelineNest nest(modulePM);
-
-      OpPassManager &stagedFuncPM =
-          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
-                      func::FuncOp::getOperationName(),
-                      TypeID::get<func::FuncOp>());
-      stagedFuncPM.addPass(PCF::createResolveTokensPass());
-      stagedFuncPM.addPass(PCF::createConvertSRefToMemRefPass());
-      stagedFuncPM.addPass(PCF::createLowerStructuralPCFPass());
-      stagedFuncPM.addPass(createCanonicalizerPass());
-      stagedFuncPM.addPass(createCSEPass());
-
-      nest.commitPass();
-    }
-
     // --- func(Post-bufferization) ---
     {
       MultiPipelineNest nest(modulePM);
@@ -824,11 +803,21 @@ public:
     }
 
     // Phase 2: LLVMTranslation.
-    // Covers linalg-to-loops, buffer optimizations, address computation,
-    // and the final ROCDL conversion + kernel annotation.
+    // Covers PCF lowering, linalg-to-loops, buffer optimizations, address
+    // computation, and the final ROCDL conversion + kernel annotation.
     if (pipelineOpts.shouldRunPhase(ROCM::TranslationPhase::LLVMTranslation)) {
-      addLowerToLLVMGPUPasses(passManager.nest<ModuleOp>(),
-                              /*forROCDL=*/true, preserveDebugInfo);
+      OpPassManager &modulePM = passManager.nest<ModuleOp>();
+      // Lower PCF ops to memref/scf before LLVM lowering. This runs after
+      // bufferization has converted all tensors to memrefs.
+      if (pipelineOpts.experimentalStagedPipeline) {
+        FunctionLikeNest(modulePM)
+            .addPass(PCF::createResolveTokensPass)
+            .addPass(PCF::createConvertSRefToMemRefPass)
+            .addPass(PCF::createLowerStructuralPCFPass)
+            .addPass(createCanonicalizerPass)
+            .addPass(createCSEPass);
+      }
+      addLowerToLLVMGPUPasses(modulePM, /*forROCDL=*/true, preserveDebugInfo);
     }
 
     LLVM_DEBUG({
