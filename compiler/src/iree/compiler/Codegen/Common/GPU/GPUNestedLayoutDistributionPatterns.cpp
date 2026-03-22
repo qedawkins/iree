@@ -584,6 +584,150 @@ struct DistributeTransferWrite final
   std::optional<int64_t> numThreadsInWorkgroup = std::nullopt;
 };
 
+/// Pattern to distribute `iree_vector_ext.transfer_read` ops with nested
+/// layouts. This mirrors DistributeTransferRead but accepts any ShapedType
+/// source (including pcf.sref).
+struct DistributeVectorExtTransferRead final
+    : OpDistributionPattern<IREE::VectorExt::TransferReadOp> {
+  using OpDistributionPattern::OpDistributionPattern;
+
+  DistributeVectorExtTransferRead(MLIRContext *context, Value threadId,
+                                  int64_t subgroupSize)
+      : OpDistributionPattern(context), threadId(threadId),
+        subgroupSize(subgroupSize) {}
+
+  LogicalResult matchAndRewrite(IREE::VectorExt::TransferReadOp readOp,
+                                DistributionSignature &signature,
+                                PatternRewriter &rewriter) const override {
+    NestedLayoutAttr vectorLayout =
+        dyn_cast<NestedLayoutAttr>(signature[readOp.getResult()]);
+    if (!vectorLayout) {
+      return rewriter.notifyMatchFailure(readOp,
+                                         "non-nested transfer_read layout");
+    }
+
+    SmallVector<int64_t> distShape = vectorLayout.getDistributedShape();
+    SmallVector<int64_t> tileShape = getElementVectorTileShape(vectorLayout);
+    int64_t rank = vectorLayout.getRank();
+
+    Type elementType =
+        cast<ShapedType>(readOp.getSource().getType()).getElementType();
+    auto vectorType = VectorType::get(distShape, elementType);
+    auto innerVectorType =
+        VectorType::get(vectorLayout.getElementTile(), elementType);
+
+    // Initialize the full distributed vector for unrolling the batch/outer
+    // vector dimensions.
+    Value zero =
+        arith::ConstantOp::create(rewriter, readOp.getLoc(), vectorType,
+                                  rewriter.getZeroAttr(vectorType));
+    VectorValue acc = cast<VectorValue>(zero);
+
+    SmallVector<Value> warpIndices, threadIndices;
+    if (failed(populateWarpAndThreadIndices(rewriter, threadId, subgroupSize,
+                                            vectorLayout, warpIndices,
+                                            threadIndices))) {
+      return rewriter.notifyMatchFailure(
+          readOp, "warp or thread tiles have overlapping strides");
+    }
+
+    ValueRange indices = readOp.getIndices();
+    AffineMap permMap = readOp.getEffectivePermutationMap();
+    SmallVector<int64_t> strides(rank, 1);
+
+    for (SmallVector<int64_t> offsets :
+         StaticTileOffsetRange(distShape, tileShape)) {
+      SmallVector<Value> slicedIndices = getTransferIndicesFromNestedLayout(
+          rewriter, indices, offsets, vectorLayout, permMap, warpIndices,
+          threadIndices);
+
+      VectorValue slicedRead = IREE::VectorExt::TransferReadOp::create(
+          rewriter, readOp.getLoc(), innerVectorType, readOp.getSource(),
+          slicedIndices, readOp.getPadding(),
+          SmallVector<bool>(innerVectorType.getRank(), true), permMap,
+          /*mask=*/Value());
+
+      if (acc.getType().getRank() == 0) {
+        acc = slicedRead;
+      } else {
+        acc = vector::InsertStridedSliceOp::create(
+            rewriter, readOp.getLoc(), slicedRead, acc, offsets, strides);
+      }
+    }
+
+    replaceOpWithDistributedValues(rewriter, readOp, acc);
+    return success();
+  }
+
+  Value threadId;
+  int64_t subgroupSize;
+};
+
+/// Pattern to distribute `iree_vector_ext.transfer_write` ops with nested
+/// layouts. This mirrors DistributeTransferWrite but accepts any ShapedType
+/// destination (including pcf.sref).
+struct DistributeVectorExtTransferWrite final
+    : OpDistributionPattern<IREE::VectorExt::TransferWriteOp> {
+  using OpDistributionPattern::OpDistributionPattern;
+
+  DistributeVectorExtTransferWrite(MLIRContext *context, Value threadId,
+                                   int64_t subgroupSize)
+      : OpDistributionPattern(context), threadId(threadId),
+        subgroupSize(subgroupSize) {}
+
+  LogicalResult matchAndRewrite(IREE::VectorExt::TransferWriteOp writeOp,
+                                DistributionSignature &signature,
+                                PatternRewriter &rewriter) const override {
+    NestedLayoutAttr vectorLayout =
+        dyn_cast<NestedLayoutAttr>(signature[writeOp.getValue()]);
+    if (!vectorLayout) {
+      return rewriter.notifyMatchFailure(writeOp,
+                                         "non-nested transfer_write layout");
+    }
+
+    SmallVector<int64_t> distShape = vectorLayout.getDistributedShape();
+    SmallVector<int64_t> tileShape = getElementVectorTileShape(vectorLayout);
+    int64_t rank = vectorLayout.getRank();
+    SmallVector<Value> warpIndices, threadIndices;
+    if (failed(populateWarpAndThreadIndices(rewriter, threadId, subgroupSize,
+                                            vectorLayout, warpIndices,
+                                            threadIndices))) {
+      return rewriter.notifyMatchFailure(
+          writeOp, "warp or thread tiles have overlapping strides");
+    }
+
+    Value distributedVector =
+        getDistributed(rewriter, writeOp.getValue(), vectorLayout);
+
+    ValueRange indices = writeOp.getIndices();
+    AffineMap permMap = writeOp.getEffectivePermutationMap();
+
+    for (SmallVector<int64_t> offsets :
+         StaticTileOffsetRange(distShape, tileShape)) {
+      SmallVector<Value> slicedIndices = getTransferIndicesFromNestedLayout(
+          rewriter, indices, offsets, vectorLayout, permMap, warpIndices,
+          threadIndices);
+      // Extract the element vector from the distributed vector.
+      ArrayRef<int64_t> offsetArray(offsets);
+      VectorValue slicedVector =
+          extractSliceAsVector(rewriter, writeOp.getLoc(), distributedVector,
+                               offsetArray.take_front(rank * 2));
+
+      IREE::VectorExt::TransferWriteOp::create(
+          rewriter, writeOp.getLoc(), slicedVector, writeOp.getDest(),
+          slicedIndices,
+          SmallVector<bool>(slicedVector.getType().getRank(), true), permMap,
+          /*mask=*/Value());
+    }
+
+    rewriter.eraseOp(writeOp);
+    return success();
+  }
+
+  Value threadId;
+  int64_t subgroupSize;
+};
+
 /// Pattern to distribute `vector.transfer_gather` ops with nested layouts.
 struct DistributeTransferGather final
     : OpDistributionPattern<IREE::VectorExt::TransferGatherOp> {
@@ -2212,10 +2356,12 @@ void IREE::VectorExt::populateNestedLayoutDistributionPatterns(
     RewritePatternSet &patterns, Value threadId, int64_t subgroupSize,
     ArrayRef<int64_t> workgroupSize, int64_t maxBitsPerShuffle) {
   patterns.add<DistributeTransferRead, DistributeTransferGather,
-               DistributeMapStore>(patterns.getContext(), threadId,
-                                   subgroupSize);
+               DistributeMapStore, DistributeVectorExtTransferRead>(
+      patterns.getContext(), threadId, subgroupSize);
   patterns.add<DistributeTransferWrite>(patterns.getContext(), threadId,
                                         subgroupSize, workgroupSize);
+  patterns.add<DistributeVectorExtTransferWrite>(patterns.getContext(),
+                                                 threadId, subgroupSize);
   patterns.add<DistributeBroadcast, DistributeTranspose, DistributeShapeCast>(
       patterns.getContext());
   patterns.add<DistributeMultiReduction>(patterns.getContext(), subgroupSize,

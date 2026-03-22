@@ -881,6 +881,135 @@ LogicalResult ArgCompareOp::verify() {
   return success();
 }
 
+//===----------------------------------------------------------------------===//
+// TransferReadOp
+//===----------------------------------------------------------------------===//
+
+void TransferReadOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  if (isa<MemRefType>(getSource().getType())) {
+    effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable(),
+                         SideEffects::DefaultResource::get());
+  }
+  // For non-memref types (e.g., pcf.sref), assume read side effect.
+  if (!isa<MemRefType, RankedTensorType>(getSource().getType())) {
+    effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable(),
+                         SideEffects::DefaultResource::get());
+  }
+}
+
+LogicalResult TransferReadOp::verify() {
+  ShapedType sourceType = getSourceType();
+  VectorType vectorType = getVectorType();
+
+  // Check index count matches source rank.
+  int64_t sourceRank = sourceType.getRank();
+  if (static_cast<int64_t>(getIndices().size()) != sourceRank) {
+    return emitOpError("requires ")
+           << sourceRank << " indices, but got " << getIndices().size();
+  }
+
+  // Check in_bounds size matches vector rank.
+  int64_t vectorRank = vectorType.getRank();
+  if (static_cast<int64_t>(getInBounds().size()) != vectorRank) {
+    return emitOpError("requires in_bounds of size ")
+           << vectorRank << ", but got " << getInBounds().size();
+  }
+
+  // Check padding element type matches source element type.
+  Type sourceElemType = sourceType.getElementType();
+  if (getPadding().getType() != sourceElemType) {
+    return emitOpError("padding type ")
+           << getPadding().getType()
+           << " does not match source element type " << sourceElemType;
+  }
+
+  // Check vector element type matches source element type.
+  if (vectorType.getElementType() != sourceElemType) {
+    return emitOpError("vector element type ")
+           << vectorType.getElementType()
+           << " does not match source element type " << sourceElemType;
+  }
+
+  // Validate permutation map if provided.
+  if (std::optional<AffineMap> map = getPermutationMap()) {
+    if (map->getNumResults() != vectorRank) {
+      return emitOpError("permutation map results (")
+             << map->getNumResults() << ") must match vector rank ("
+             << vectorRank << ")";
+    }
+    if (map->getNumDims() != sourceRank) {
+      return emitOpError("permutation map dims (")
+             << map->getNumDims() << ") must match source rank (" << sourceRank
+             << ")";
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// TransferWriteOp
+//===----------------------------------------------------------------------===//
+
+void TransferWriteOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  if (isa<MemRefType>(getDest().getType())) {
+    effects.emplace_back(MemoryEffects::Write::get(), &getDestMutable(),
+                         SideEffects::DefaultResource::get());
+  }
+  // For non-memref types (e.g., pcf.sref), assume write side effect.
+  if (!isa<MemRefType, RankedTensorType>(getDest().getType())) {
+    effects.emplace_back(MemoryEffects::Write::get(), &getDestMutable(),
+                         SideEffects::DefaultResource::get());
+  }
+}
+
+LogicalResult TransferWriteOp::verify() {
+  ShapedType destType = getDestType();
+  VectorType vectorType = getVectorType();
+
+  // Check index count matches dest rank.
+  int64_t destRank = destType.getRank();
+  if (static_cast<int64_t>(getIndices().size()) != destRank) {
+    return emitOpError("requires ")
+           << destRank << " indices, but got " << getIndices().size();
+  }
+
+  // Check in_bounds size matches vector rank.
+  int64_t vectorRank = vectorType.getRank();
+  if (static_cast<int64_t>(getInBounds().size()) != vectorRank) {
+    return emitOpError("requires in_bounds of size ")
+           << vectorRank << ", but got " << getInBounds().size();
+  }
+
+  // Check vector element type matches dest element type.
+  Type destElemType = destType.getElementType();
+  if (vectorType.getElementType() != destElemType) {
+    return emitOpError("vector element type ")
+           << vectorType.getElementType()
+           << " does not match dest element type " << destElemType;
+  }
+
+  // Validate permutation map if provided.
+  if (std::optional<AffineMap> map = getPermutationMap()) {
+    if (map->getNumResults() != vectorRank) {
+      return emitOpError("permutation map results (")
+             << map->getNumResults() << ") must match vector rank ("
+             << vectorRank << ")";
+    }
+    if (map->getNumDims() != destRank) {
+      return emitOpError("permutation map dims (")
+             << map->getNumDims() << ") must match dest rank (" << destRank
+             << ")";
+    }
+  }
+
+  return success();
+}
+
 // clang-format off
 #define GET_OP_CLASSES
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtOps.cpp.inc" // IWYU pragma: keep

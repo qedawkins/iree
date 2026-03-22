@@ -425,4 +425,171 @@ def IREEVectorExt_ArgCompareOp : IREEVectorExt_PureOp<"arg_compare", [
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// Transfer read/write ops for sref and memref sources.
+//===----------------------------------------------------------------------===//
+
+def IREEVectorExt_TransferReadOp : IREEVectorExt_PureOp<"transfer_read", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+    AttrSizedOperandSegments,
+    TypesMatchWith<"padding type must match source element type",
+                   "source", "padding", "getElementTypeOrSelf($_self)">
+  ]> {
+  let summary = "Read a vector from a shaped source (sref or memref).";
+  let description = [{
+    Reads a vector from a shaped source. This op mirrors `vector.transfer_read`
+    but accepts `pcf.sref` types in addition to memref, enabling vector
+    distribution on pre-bufferization IR.
+
+    The `permutation_map` attribute is an optional affine map that describes
+    how the source dimensions map to the vector dimensions. If not specified,
+    the identity map is used. The `in_bounds` attribute specifies whether each
+    vector dimension is guaranteed to be in-bounds.
+
+    Example:
+    ```mlir
+    %v = iree_vector_ext.transfer_read %sref[%i, %j], %pad
+        {in_bounds = [true, true]}
+        : !pcf.sref<256x256xf16, #scope>, vector<64x128xf16>
+    ```
+  }];
+  let arguments = (ins
+    AnyShaped:$source,
+    Variadic<Index>:$indices,
+    AnyType:$padding,
+    OptionalAttr<AffineMapAttr>:$permutation_map,
+    BoolArrayAttr:$in_bounds,
+    Optional<VectorOfAnyRankOf<[I1]>>:$mask
+  );
+  let results = (outs AnyVectorOfAnyRank:$result);
+
+  let assemblyFormat = [{
+    $source `[` $indices `]` `,` $padding
+    (`,` $mask^ `:` type($mask))?
+    attr-dict `:` type($source) `,` type($result)
+  }];
+
+  let hasVerifier = 1;
+
+  let builders = [
+    OpBuilder<(ins "VectorType":$vectorType,
+                   "Value":$source,
+                   "ValueRange":$indices,
+                   "Value":$padding,
+                   "ArrayRef<bool>":$inBounds,
+                   CArg<"AffineMap", "{}">:$permutationMap,
+                   CArg<"Value", "{}">:$mask), [{
+      SmallVector<Attribute> inBoundsAttr =
+          llvm::map_to_vector(inBounds, [&](bool b) -> Attribute {
+            return $_builder.getBoolAttr(b);
+          });
+      AffineMapAttr permMapAttr;
+      if (permutationMap)
+        permMapAttr = AffineMapAttr::get(permutationMap);
+      build($_builder, $_state, vectorType, source, indices, padding,
+            permMapAttr, $_builder.getArrayAttr(inBoundsAttr), mask);
+    }]>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Return the permutation map, defaulting to identity if not set.
+    AffineMap getEffectivePermutationMap() {
+      if (std::optional<AffineMap> map = getPermutationMap()) {
+        return *map;
+      }
+      return AffineMap::getMultiDimIdentityMap(
+          cast<ShapedType>(getSource().getType()).getRank(),
+          getContext());
+    }
+
+    ShapedType getSourceType() {
+      return cast<ShapedType>(getSource().getType());
+    }
+
+    VectorType getVectorType() {
+      return getResult().getType();
+    }
+  }];
+}
+
+def IREEVectorExt_TransferWriteOp : IREEVectorExt_PureOp<"transfer_write", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+    AttrSizedOperandSegments
+  ]> {
+  let summary = "Write a vector to a shaped destination (sref or memref).";
+  let description = [{
+    Writes a vector to a shaped destination. This op mirrors
+    `vector.transfer_write` but accepts `pcf.sref` types in addition to memref,
+    enabling vector distribution on pre-bufferization IR.
+
+    The `permutation_map` attribute is an optional affine map that describes
+    how the vector dimensions map to the destination dimensions. If not
+    specified, the identity map is used. The `in_bounds` attribute specifies
+    whether each vector dimension is guaranteed to be in-bounds.
+
+    Example:
+    ```mlir
+    iree_vector_ext.transfer_write %v, %sref[%i, %j]
+        {in_bounds = [true, true]}
+        : vector<64x128xf16>, !pcf.sref<256x256xf16, #scope>
+    ```
+  }];
+  let arguments = (ins
+    AnyVectorOfAnyRank:$value,
+    AnyShaped:$dest,
+    Variadic<Index>:$indices,
+    OptionalAttr<AffineMapAttr>:$permutation_map,
+    BoolArrayAttr:$in_bounds,
+    Optional<VectorOfAnyRankOf<[I1]>>:$mask
+  );
+  let results = (outs);
+
+  let assemblyFormat = [{
+    $value `,` $dest `[` $indices `]`
+    (`,` $mask^ `:` type($mask))?
+    attr-dict `:` type($value) `,` type($dest)
+  }];
+
+  let hasVerifier = 1;
+
+  let builders = [
+    OpBuilder<(ins "Value":$value,
+                   "Value":$dest,
+                   "ValueRange":$indices,
+                   "ArrayRef<bool>":$inBounds,
+                   CArg<"AffineMap", "{}">:$permutationMap,
+                   CArg<"Value", "{}">:$mask), [{
+      SmallVector<Attribute> inBoundsAttr =
+          llvm::map_to_vector(inBounds, [&](bool b) -> Attribute {
+            return $_builder.getBoolAttr(b);
+          });
+      AffineMapAttr permMapAttr;
+      if (permutationMap)
+        permMapAttr = AffineMapAttr::get(permutationMap);
+      build($_builder, $_state, value, dest, indices,
+            permMapAttr, $_builder.getArrayAttr(inBoundsAttr), mask);
+    }]>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Return the permutation map, defaulting to identity if not set.
+    AffineMap getEffectivePermutationMap() {
+      if (std::optional<AffineMap> map = getPermutationMap()) {
+        return *map;
+      }
+      return AffineMap::getMultiDimIdentityMap(
+          cast<ShapedType>(getDest().getType()).getRank(),
+          getContext());
+    }
+
+    ShapedType getDestType() {
+      return cast<ShapedType>(getDest().getType());
+    }
+
+    VectorType getVectorType() {
+      return cast<VectorType>(getValue().getType());
+    }
+  }];
+}
+
 #endif  // IREE_DIALECT_VECTOREXT_OPS
