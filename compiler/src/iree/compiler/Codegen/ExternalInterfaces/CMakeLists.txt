@@ -31,6 +31,7 @@ iree_cc_library(
     LLVMSupport
     MLIRAffineDialect
     MLIRArithDialect
+    MLIRGPUDialect
     MLIRIR
     MLIRLinalgDialect
     MLIRLinalgTransforms

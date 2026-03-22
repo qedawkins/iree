@@ -10,6 +10,8 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/ConversionDialectInterface.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
+#include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
+#include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtOps.h"
 #include "iree/compiler/Dialect/Util/Analysis/DFX/Element.h"
 #include "iree/compiler/Dialect/Util/Analysis/DFX/Solver.h"
 #include "iree/compiler/Dialect/Util/Analysis/DFX/State.h"
@@ -68,8 +70,10 @@ struct ConvertSRefToMemRefPass final
   void getDependentDialects(DialectRegistry &registry) const override {
     // Direct dialect deps.
     registry.insert<iree_compiler::IREE::Codegen::IREECodegenDialect,
-                    iree_compiler::IREE::PCF::PCFDialect, arith::ArithDialect,
-                    memref::MemRefDialect, vector::VectorDialect>();
+                    iree_compiler::IREE::PCF::PCFDialect,
+                    iree_compiler::IREE::VectorExt::IREEVectorExtDialect,
+                    arith::ArithDialect, memref::MemRefDialect,
+                    vector::VectorDialect>();
     registry.addExtensions<LoadDependentDialectExtension>();
   }
   void runOnOperation() override;
@@ -448,13 +452,30 @@ public:
   AsmState &getAsmState() { return solver.getAsmState(); }
   Explorer &getExplorer() { return explorer; }
 
-  LogicalResult run() {
+  LogicalResult run(Operation *rootOp) {
     // Initialize all shaped ref values to maximally dynamic layouts.
-    explorer.walkValuesOfType<PCF::ShapedRefType>([&](Value v) {
+    // When rootOp is a callable (e.g., func.func nested in a module),
+    // the SCC-based walkValuesOfType may skip it because the parent
+    // module has SHALLOW traversal. Use walkValues(op, fn) directly
+    // in that case. When rootOp is a module, the SCC walk works
+    // correctly.
+    auto initFn = [&](Value v) {
+      if (!isa<PCF::ShapedRefType>(v.getType())) {
+        return WalkResult::advance();
+      }
       solver.getOrCreateElementFor<StridedLayoutValueElement>(
           Position::forValue(v));
       return WalkResult::advance();
-    });
+    };
+    if (isa<CallableOpInterface>(rootOp)) {
+      explorer.walkValues(rootOp, initFn);
+    } else {
+      explorer.walkValuesOfType<PCF::ShapedRefType>([&](Value v) {
+        solver.getOrCreateElementFor<StridedLayoutValueElement>(
+            Position::forValue(v));
+        return WalkResult::advance();
+      });
+    }
 
     // Run solver to completion.
     LogicalResult result = solver.run();
@@ -854,6 +875,64 @@ struct ConvertReadSliceOp final : OpConversionPattern<PCF::ReadSliceOp> {
   }
 };
 
+/// Converts `iree_vector_ext.transfer_read` to `vector.transfer_read`.
+/// After type conversion, the source sref is a memref, so this is a
+/// straightforward op replacement.
+struct ConvertVectorExtTransferReadOp final
+    : OpConversionPattern<IREE::VectorExt::TransferReadOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(IREE::VectorExt::TransferReadOp readOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Value source = adaptor.getSource();
+    if (!isa<MemRefType>(source.getType())) {
+      return rewriter.notifyMatchFailure(readOp,
+                                         "source not converted to memref");
+    }
+    // Build the permutation map, defaulting to identity if not set.
+    AffineMap permMap = readOp.getEffectivePermutationMap();
+    SmallVector<bool> inBounds;
+    for (Attribute attr : readOp.getInBounds()) {
+      inBounds.push_back(cast<BoolAttr>(attr).getValue());
+    }
+    rewriter.replaceOpWithNewOp<vector::TransferReadOp>(
+        readOp, readOp.getVectorType(), source, adaptor.getIndices(),
+        AffineMapAttr::get(permMap), adaptor.getPadding(),
+        /*mask=*/adaptor.getMask(), rewriter.getBoolArrayAttr(inBounds));
+    return success();
+  }
+};
+
+/// Converts `iree_vector_ext.transfer_write` to `vector.transfer_write`.
+/// After type conversion, the dest sref is a memref, so this is a
+/// straightforward op replacement.
+struct ConvertVectorExtTransferWriteOp final
+    : OpConversionPattern<IREE::VectorExt::TransferWriteOp> {
+  using Base::Base;
+
+  LogicalResult
+  matchAndRewrite(IREE::VectorExt::TransferWriteOp writeOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Value dest = adaptor.getDest();
+    if (!isa<MemRefType>(dest.getType())) {
+      return rewriter.notifyMatchFailure(writeOp,
+                                         "dest not converted to memref");
+    }
+    // Build the permutation map, defaulting to identity if not set.
+    AffineMap permMap = writeOp.getEffectivePermutationMap();
+    SmallVector<bool> inBounds;
+    for (Attribute attr : writeOp.getInBounds()) {
+      inBounds.push_back(cast<BoolAttr>(attr).getValue());
+    }
+    rewriter.replaceOpWithNewOp<vector::TransferWriteOp>(
+        writeOp, adaptor.getValue(), dest, adaptor.getIndices(),
+        AffineMapAttr::get(permMap), /*mask=*/adaptor.getMask(),
+        rewriter.getBoolArrayAttr(inBounds));
+    return success();
+  }
+};
+
 /// `pcf.get_memref` always returns a maximally dynamic memref and relies on
 /// propagation patterns after this pass to update everything. As a result
 /// this conversion pattern simply creates a `memref.cast` +
@@ -1158,7 +1237,7 @@ void ConvertSRefToMemRefPass::runOnOperation() {
   MLIRContext *context = &getContext();
 
   SRefLayoutAnalysis analysis(getOperation());
-  if (failed(analysis.run())) {
+  if (failed(analysis.run(getOperation()))) {
     return signalPassFailure();
   }
 
@@ -1219,8 +1298,9 @@ void ConvertSRefToMemRefPass::runOnOperation() {
 
   patterns.add<ConvertGenericOp, ConvertLoopOp, ConvertWriteSliceOp,
                ConvertReadSliceOp, ConvertGetMemrefOp, ConvertAllocOp,
-               ConvertToSrefOp, ConvertOptimizationBarrier>(typeConverter,
-                                                            context);
+               ConvertToSrefOp, ConvertOptimizationBarrier,
+               ConvertVectorExtTransferReadOp, ConvertVectorExtTransferWriteOp>(
+      typeConverter, context);
 
   // Function related conversion patterns need the analysis to lookup function
   // type conversions.
