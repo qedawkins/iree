@@ -102,6 +102,7 @@ struct ROCMOptions {
       IREE::Codegen::DenormalFpMath::None;
   bool enableRegSpillWarning = false;
   bool debugSymbols = false;
+  bool experimentalStagedPipeline = false;
 
   void bindOptions(OptionsBinder &binder) {
     using namespace llvm;
@@ -262,6 +263,12 @@ struct ROCMOptions {
         "iree-hip-emit-debug-info", debugSymbols, cl::cat(category),
         cl::desc("Deprecated; use --iree-rocm-emit-debug-info instead."),
         Deprecated("use --iree-rocm-emit-debug-info instead"));
+    binder.opt<bool>(
+        "iree-rocm-experimental-staged-pipeline",
+        experimentalStagedPipeline, cl::cat(category),
+        cl::desc("Enable experimental staged pipeline for VectorDistribute "
+                 "dispatches. When set, VectorDistribute dispatches use the "
+                 "PCF-based staged pipeline instead of the monolithic one."));
   }
 
   LogicalResult verify(mlir::Builder &builder) const {
@@ -600,9 +607,11 @@ public:
     modulePassManager.addPass(createLLVMGPUSelectLoweringStrategyPass(
         LLVMGPUSelectLoweringStrategyPassOptions{codegenOptions}));
 
-    // After strategy selection, auto-enable the experimental staged pipeline
-    // for variants with VectorDistribute functions.
-    passManager.addPass(std::make_unique<AutoEnableStagedPipelinePass>());
+    // After strategy selection, optionally auto-enable the experimental
+    // staged pipeline for variants with VectorDistribute functions.
+    if (targetOptions.experimentalStagedPipeline) {
+      passManager.addPass(std::make_unique<AutoEnableStagedPipelinePass>());
+    }
   }
 
   /// Returns the LoweringPipeline for the given function op, if it has one.
