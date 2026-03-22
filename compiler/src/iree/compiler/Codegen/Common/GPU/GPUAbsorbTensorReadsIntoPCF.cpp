@@ -7,6 +7,8 @@
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
@@ -47,8 +49,39 @@ static Value getOrCreateSref(OpBuilder &builder, Location loc, Value tensor,
   return sref;
 }
 
-/// Convert vector.transfer_read on a captured tensor to
-/// iree_vector_ext.transfer_read on a pcf.sref.
+/// Traces through view-like tensor ops (extract_slice, expand_shape) to find
+/// the root tensor defined outside the region. Returns the chain of ops from
+/// root to the immediate source of the transfer_read (outermost first).
+/// Returns std::nullopt if the chain does not trace to an outside tensor.
+static std::optional<SmallVector<Operation *>>
+traceToOutsideTensor(Value source, Region &region) {
+  SmallVector<Operation *> chain;
+  Value current = source;
+  while (!isDefinedOutside(current, region)) {
+    Operation *defOp = current.getDefiningOp();
+    if (!defOp) {
+      return std::nullopt;
+    }
+    if (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(defOp)) {
+      chain.push_back(defOp);
+      current = extractSlice.getSource();
+    } else if (auto expandShape = dyn_cast<tensor::ExpandShapeOp>(defOp)) {
+      chain.push_back(defOp);
+      current = expandShape.getSrc();
+    } else {
+      // Unsupported op in the chain.
+      return std::nullopt;
+    }
+  }
+  // Reverse so chain goes from root outward to the transfer_read source.
+  std::reverse(chain.begin(), chain.end());
+  return chain;
+}
+
+/// Convert vector.transfer_read on a captured tensor (or a view-like chain
+/// from a captured tensor) to iree_vector_ext.transfer_read on a pcf.sref.
+/// Tensor extract_slice/expand_shape ops in the chain are converted to
+/// pcf.subview/pcf.expand_shape on the sref.
 static void convertInputReads(SharedExecutorOp sharedExec,
                               ScopeAttrInterface scope,
                               IRRewriter &rewriter) {
@@ -59,37 +92,102 @@ static void convertInputReads(SharedExecutorOp sharedExec,
   SmallVector<vector::TransferReadOp> readsToConvert;
   region.walk([&](vector::TransferReadOp readOp) {
     Value source = readOp.getBase();
-    if (isa<RankedTensorType>(source.getType()) &&
-        isDefinedOutside(source, region)) {
+    if (!isa<RankedTensorType>(source.getType())) {
+      return;
+    }
+    // Direct outside read or traceable chain to outside.
+    if (isDefinedOutside(source, region) ||
+        traceToOutsideTensor(source, region).has_value()) {
       readsToConvert.push_back(readOp);
     }
   });
 
   for (vector::TransferReadOp readOp : readsToConvert) {
     Value source = readOp.getBase();
-    rewriter.setInsertionPoint(readOp);
+    Location loc = readOp.getLoc();
 
-    // Create pcf.to_sref at the start of the region body.
-    OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointToStart(&region.front());
-    Value sref = getOrCreateSref(rewriter, readOp.getLoc(), source, scope,
-                                 srefCache);
+    // Find the root tensor and chain of view-like ops.
+    Value rootTensor = source;
+    SmallVector<Operation *> chain;
+    if (isDefinedOutside(source, region)) {
+      rootTensor = source;
+    } else {
+      auto maybeChain = traceToOutsideTensor(source, region);
+      assert(maybeChain && "should have been filtered above");
+      chain = std::move(*maybeChain);
+      // Walk to the root.
+      Value current = source;
+      while (!isDefinedOutside(current, region)) {
+        Operation *defOp = current.getDefiningOp();
+        if (auto es = dyn_cast<tensor::ExtractSliceOp>(defOp)) {
+          current = es.getSource();
+        } else if (auto exp = dyn_cast<tensor::ExpandShapeOp>(defOp)) {
+          current = exp.getSrc();
+        } else {
+          break;
+        }
+      }
+      rootTensor = current;
+    }
 
-    // Create iree_vector_ext.transfer_read on the sref.
+    // Create pcf.to_sref for the root tensor.
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(&region.front());
+      getOrCreateSref(rewriter, loc, rootTensor, scope, srefCache);
+    }
+    Value sref = srefCache[rootTensor];
+
+    // Replay the chain as PCF ops on the sref.
     rewriter.setInsertionPoint(readOp);
+    for (Operation *op : chain) {
+      if (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(op)) {
+        // Create pcf.subview.
+        auto resultTensorType =
+            cast<RankedTensorType>(extractSlice.getResult().getType());
+        ShapedRefType resultSrefType = ShapedRefType::get(
+            rewriter.getContext(), resultTensorType.getShape(),
+            resultTensorType.getElementType(), scope);
+        sref = SubviewOp::create(
+            rewriter, loc, resultSrefType, sref,
+            extractSlice.getMixedOffsets(), extractSlice.getMixedSizes(),
+            extractSlice.getMixedStrides());
+      } else if (auto expandShape = dyn_cast<tensor::ExpandShapeOp>(op)) {
+        // Create pcf.expand_shape.
+        auto resultTensorType =
+            cast<RankedTensorType>(expandShape.getResult().getType());
+        ShapedRefType resultSrefType = ShapedRefType::get(
+            rewriter.getContext(), resultTensorType.getShape(),
+            resultTensorType.getElementType(), scope);
+        SmallVector<Value> outputShape;
+        for (int64_t dim : resultTensorType.getShape()) {
+          outputShape.push_back(
+              rewriter.create<arith::ConstantIndexOp>(loc, dim));
+        }
+        sref = ExpandShapeOp::create(
+            rewriter, loc, resultSrefType, sref,
+            expandShape.getReassociation(), outputShape);
+      }
+    }
+
+    // Create iree_vector_ext.transfer_read on the final sref.
     VectorType vecType = readOp.getVectorType();
-
-    // Extract in_bounds as bool array.
     SmallVector<bool> inBounds;
     for (Attribute attr : readOp.getInBounds()) {
       inBounds.push_back(cast<BoolAttr>(attr).getValue());
     }
-
     AffineMap permMap = readOp.getPermutationMap();
     Value newRead = TransferReadOp::create(
-        rewriter, readOp.getLoc(), vecType, sref, readOp.getIndices(),
+        rewriter, loc, vecType, sref, readOp.getIndices(),
         readOp.getPadding(), inBounds, permMap, readOp.getMask());
     rewriter.replaceOp(readOp, newRead);
+
+    // Clean up dead tensor ops in the chain.
+    for (Operation *op : llvm::reverse(chain)) {
+      if (op->use_empty()) {
+        rewriter.eraseOp(op);
+      }
+    }
   }
 }
 
