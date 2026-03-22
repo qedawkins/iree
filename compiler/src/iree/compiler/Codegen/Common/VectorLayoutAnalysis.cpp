@@ -404,14 +404,19 @@ void LayoutAnalysis::fixupOp(Operation *op) {
     if (!layout || !isa<VectorType>(broadcast.getSourceType())) {
       return;
     }
-    assert(broadcast.computeBroadcastedUnitDims().empty() &&
-           "Stretching in broadcasting not implemented yet.");
+    // Skip layout propagation for broadcasts with stretched unit dims.
+    // The layout's tile sizes are incompatible with the source's unit
+    // dimensions and cannot be projected without a dedicated "unstretch"
+    // operation on the layout interface.
+    if (!broadcast.computeBroadcastedUnitDims().empty()) {
+      return;
+    }
     int64_t numBroadcastedDims =
         broadcast.getResultVectorType().getRank() -
         cast<VectorType>(broadcast.getSourceType()).getRank();
     SmallVector<bool> reductionMask(layout.getRank(), false);
-    std::fill(reductionMask.begin(), reductionMask.begin() + numBroadcastedDims,
-              true);
+    std::fill(reductionMask.begin(),
+              reductionMask.begin() + numBroadcastedDims, true);
     setLayoutOrClone(&broadcast.getSourceMutable(),
                      layout.project(reductionMask));
     return;
