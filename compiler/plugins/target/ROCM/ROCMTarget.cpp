@@ -487,6 +487,68 @@ public:
     registerTransformDialectTranslationDependentDialects(registry);
   }
 
+  /// Pass that auto-enables the experimental staged pipeline for variants
+  /// containing VectorDistribute functions. This runs at the end of
+  /// configuration (after strategy selection) and sets the variant's options
+  /// attribute so the translation pipeline picks up the staged path.
+  struct AutoEnableStagedPipelinePass
+      : PassWrapper<AutoEnableStagedPipelinePass,
+                    OperationPass<IREE::HAL::ExecutableVariantOp>> {
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+        AutoEnableStagedPipelinePass)
+
+    StringRef getArgument() const override {
+      return "iree-rocm-auto-enable-staged-pipeline";
+    }
+    StringRef getDescription() const override {
+      return "Auto-enable experimental staged pipeline for VectorDistribute "
+             "variants.";
+    }
+
+    void runOnOperation() override {
+      IREE::HAL::ExecutableVariantOp variantOp = getOperation();
+
+      // Only apply to ROCM targets.
+      if (variantOp.getTarget().getBackend() != "rocm") {
+        return;
+      }
+
+      // Check if any function uses VectorDistribute.
+      bool hasVectorDistribute = false;
+      variantOp.walk([&](FunctionOpInterface funcOp) {
+        IREE::Codegen::TranslationInfoAttr translationInfo =
+            getTranslationInfo(funcOp);
+        if (!translationInfo) {
+          return;
+        }
+        auto pipelineAttr = dyn_cast_if_present<IREE::GPU::PipelineAttr>(
+            translationInfo.getPassPipeline());
+        if (!pipelineAttr) {
+          return;
+        }
+        if (pipelineAttr.getValue() ==
+            IREE::GPU::LoweringPipeline::VectorDistribute) {
+          hasVectorDistribute = true;
+        }
+      });
+
+      if (!hasVectorDistribute) {
+        return;
+      }
+
+      // Set experimental_staged_pipeline = true on the variant options.
+      ROCM::ROCDLPipelineOptions opts;
+      if (auto existingOpts =
+              dyn_cast_if_present<ROCM::PipelineOptionsAttr>(
+                  variantOp.getOptionsAttr())) {
+        opts = existingOpts.getValue();
+      }
+      opts.experimentalStagedPipeline = true;
+      variantOp.setOptionsAttr(
+          ROCM::PipelineOptionsAttr::get(variantOp.getContext(), opts));
+    }
+  };
+
   void
   buildConfigurationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
                                  OpPassManager &passManager) final {
@@ -537,6 +599,10 @@ public:
     modulePassManager.addPass(createMaterializeUserConfigsPass());
     modulePassManager.addPass(createLLVMGPUSelectLoweringStrategyPass(
         LLVMGPUSelectLoweringStrategyPassOptions{codegenOptions}));
+
+    // After strategy selection, auto-enable the experimental staged pipeline
+    // for variants with VectorDistribute functions.
+    passManager.addPass(std::make_unique<AutoEnableStagedPipelinePass>());
   }
 
   /// Returns the LoweringPipeline for the given function op, if it has one.
@@ -560,35 +626,14 @@ public:
     return pipelineAttr.getValue();
   }
 
-  /// Returns true if the given function op has a TileAndFuse lowering pipeline.
-  static bool hasTileAndFusePipeline(Operation *op) {
+  /// Returns true if the given function op has a VectorDistribute lowering
+  /// pipeline. Only VectorDistribute is supported in the experimental staged
+  /// pipeline; TileAndFuse is routed through the default path.
+  static bool hasStagedPipeline(Operation *op) {
     std::optional<IREE::GPU::LoweringPipeline> pipeline =
         getStagedPipelineKind(op);
     return pipeline &&
-           *pipeline == IREE::GPU::LoweringPipeline::TileAndFuse;
-  }
-
-  /// Returns true if the given function op has a TileAndFuse or
-  /// VectorDistribute lowering pipeline.
-  static bool hasStagedPipeline(Operation *op) {
-    auto funcOp = dyn_cast<FunctionOpInterface>(op);
-    if (!funcOp) {
-      return false;
-    }
-    IREE::Codegen::TranslationInfoAttr translationInfo =
-        getTranslationInfo(funcOp);
-    if (!translationInfo) {
-      return false;
-    }
-    auto pipelineAttr =
-        dyn_cast_if_present<IREE::GPU::PipelineAttr>(
-            translationInfo.getPassPipeline());
-    if (!pipelineAttr) {
-      return false;
-    }
-    IREE::GPU::LoweringPipeline pipeline = pipelineAttr.getValue();
-    return pipeline == IREE::GPU::LoweringPipeline::TileAndFuse ||
-           pipeline == IREE::GPU::LoweringPipeline::VectorDistribute;
+           *pipeline == IREE::GPU::LoweringPipeline::VectorDistribute;
   }
 
   /// Builds the experimental staged pass pipeline. This splits the
@@ -607,16 +652,16 @@ public:
     modulePM.addPass(createLowerExecutableUsingTransformDialectPass());
 
     // Phase 1: func(Workgroup distribution).
-    // For TileAndFuse/VectorDistribute pipelines, run only workgroup
-    // tiling + PCF conversion. For all other pipelines, run their
-    // full native pipeline via LLVMGPULowerExecutableTargetPass.
+    // For VectorDistribute pipelines, run only workgroup tiling + PCF
+    // conversion. For all other pipelines (including TileAndFuse), run
+    // their full native pipeline via LLVMGPULowerExecutableTargetPass.
     {
       LLVMGPULowerExecutableTargetPassOptions lowerOpts;
       lowerOpts.forROCDL = true;
 
       MultiPipelineNest nest(modulePM);
 
-      // TileAndFuse/VectorDistribute: workgroup distribution only.
+      // VectorDistribute: workgroup distribution only.
       OpPassManager &stagedFuncPM =
           nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
                       func::FuncOp::getOperationName(),
@@ -648,33 +693,16 @@ public:
 
     // --- func(Subgroup + lane distribution) ---
     // Pipeline-specific distribution to subgroup + lane scopes.
-    // Currently supports TileAndFuse; VectorDistribute and hybrid are TODO.
+    // Currently supports VectorDistribute only.
     {
       MultiPipelineNest nest(modulePM);
 
-      // TileAndFuse path: run pre-distribution passes then convert to PCF.
-      OpPassManager &tafFuncPM =
-          nest.nestIf([](Operation *op) { return hasTileAndFusePipeline(op); },
-                      func::FuncOp::getOperationName(),
-                      TypeID::get<func::FuncOp>());
-      {
-        GPUPipelineOptions tafOptions;
-        addGPUTileAndFusePreDistributionPasses(tafFuncPM, tafOptions);
-      }
-      tafFuncPM.addPass(
-          createGPUConvertThreadForallToSubgroupLanePCFPass());
-
       // VectorDistribute path: wrap workgroup-scoped PCF ops in
       // shared_executor with thread scope.
-      OpPassManager &vdFuncPM = nest.nestIf(
-          [](Operation *op) {
-            std::optional<IREE::GPU::LoweringPipeline> pipeline =
-                getStagedPipelineKind(op);
-            return pipeline &&
-                   *pipeline ==
-                       IREE::GPU::LoweringPipeline::VectorDistribute;
-          },
-          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
+      OpPassManager &vdFuncPM =
+          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
+                      func::FuncOp::getOperationName(),
+                      TypeID::get<func::FuncOp>());
       vdFuncPM.addPass(createGPUWrapInSharedExecutorPass());
 
       // Pre-bufferization VectorDistribute passes (tiling, vectorization,
@@ -690,8 +718,6 @@ public:
       // via the PCF distribution interface, then lower shared_executor to
       // pcf.generic. Workgroup/subgroup sizes are read from translation_info.
       vdFuncPM.addPass(createGPUDistributeSharedExecutorPass());
-
-      // TODO: Hybrid path.
 
       nest.commitPass();
     }
