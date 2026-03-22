@@ -450,10 +450,18 @@ void LayoutAnalysis::fixupOp(Operation *op) {
     if (!layout || !isa<VectorType>(broadcast.getSourceType())) {
       return;
     }
+    LDBG() << "Backward fixup broadcast: " << broadcast << "\n";
+    LDBG() << "  result layout: " << layout << "\n";
+    LDBG() << "  source has layout: " << hasResolvedLayout(broadcast.getSource()) << "\n";
+    if (hasResolvedLayout(broadcast.getSource())) {
+      LDBG() << "  source layout: " << getResolvedLayout(broadcast.getSource()) << "\n";
+    }
+    LDBG() << "  broadcastedUnitDims empty: " << broadcast.computeBroadcastedUnitDims().empty() << "\n";
     // Skip layout propagation for broadcasts with stretched unit dims.
-    // The layout's tile sizes are incompatible with the source's unit
-    // dimensions and cannot be projected without a dedicated "unstretch"
-    // operation on the layout interface.
+    // This occurs when the vectorizer produces direct broadcasts (e.g.,
+    // vector<1x1xf32> → vector<1x1x256xf32>) instead of broadcast+transpose.
+    // The monolithic pipeline avoids this via a different vectorization
+    // pattern, but the PCF staged pipeline can produce it.
     if (!broadcast.computeBroadcastedUnitDims().empty()) {
       return;
     }
