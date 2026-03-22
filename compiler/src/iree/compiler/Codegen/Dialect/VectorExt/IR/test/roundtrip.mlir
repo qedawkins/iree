@@ -455,3 +455,55 @@ func.func @arg_compare_1d_to_0d(%input: vector<128xf32>,
   } -> vector<f32>, vector<i32>
   return %result#0, %result#1 : vector<f32>, vector<i32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @transfer_read_memref
+func.func @transfer_read_memref(%src: memref<256x256xf16>, %i: index, %j: index) -> vector<64x128xf16> {
+  %pad = arith.constant 0.0 : f16
+  // CHECK: iree_vector_ext.transfer_read
+  // CHECK-SAME: memref<256x256xf16>, vector<64x128xf16>
+  %v = iree_vector_ext.transfer_read %src[%i, %j], %pad
+      {in_bounds = [true, true]}
+      : memref<256x256xf16>, vector<64x128xf16>
+  return %v : vector<64x128xf16>
+}
+
+// -----
+
+// CHECK: #[[$MAP:.+]] = affine_map<(d0, d1) -> (d1)>
+// CHECK-LABEL: func.func @transfer_read_memref_permutation
+func.func @transfer_read_memref_permutation(%src: memref<256x256xf16>, %i: index, %j: index) -> vector<64xf16> {
+  %pad = arith.constant 0.0 : f16
+  // CHECK: iree_vector_ext.transfer_read
+  // CHECK-SAME: permutation_map = #[[$MAP]]
+  %v = iree_vector_ext.transfer_read %src[%i, %j], %pad
+      {in_bounds = [true], permutation_map = affine_map<(d0, d1) -> (d1)>}
+      : memref<256x256xf16>, vector<64xf16>
+  return %v : vector<64xf16>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @transfer_write_memref
+func.func @transfer_write_memref(%v: vector<64x128xf16>, %dst: memref<256x256xf16>, %i: index, %j: index) {
+  // CHECK: iree_vector_ext.transfer_write
+  // CHECK-SAME: vector<64x128xf16>, memref<256x256xf16>
+  iree_vector_ext.transfer_write %v, %dst[%i, %j]
+      {in_bounds = [true, true]}
+      : vector<64x128xf16>, memref<256x256xf16>
+  return
+}
+
+// -----
+
+// CHECK: #[[$MAP:.+]] = affine_map<(d0, d1) -> (d1)>
+// CHECK-LABEL: func.func @transfer_write_memref_permutation
+func.func @transfer_write_memref_permutation(%v: vector<64xf16>, %dst: memref<256x256xf16>, %i: index, %j: index) {
+  // CHECK: iree_vector_ext.transfer_write
+  // CHECK-SAME: permutation_map = #[[$MAP]]
+  iree_vector_ext.transfer_write %v, %dst[%i, %j]
+      {in_bounds = [true], permutation_map = affine_map<(d0, d1) -> (d1)>}
+      : vector<64xf16>, memref<256x256xf16>
+  return
+}
