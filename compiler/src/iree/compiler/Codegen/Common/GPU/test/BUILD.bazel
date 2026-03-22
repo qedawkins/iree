@@ -38,6 +38,7 @@ iree_lit_test_suite(
             "gpu_distribute_copy_using_forall.mlir",
             "gpu_distribute_forall.mlir",
             "gpu_distribute_scf_for.mlir",
+            "gpu_distribute_shared_executor.mlir",
             "gpu_distribute_shared_memory.mlir",
             "gpu_fold_swizzle_hint_ops.mlir",
             "gpu_fuse_and_hoist_forall.mlir",

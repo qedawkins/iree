@@ -30,6 +30,8 @@ class ExtractSliceOp;
 
 namespace mlir::iree_compiler::IREE::PCF {
 
+class DistributionInterface;
+
 /// Converts scf.forall ops to pcf.loop by linearizing/delinearizing ids beyond
 /// |numIds| into the slowest varying id. Uses DeviceMappingAttrInterface to
 /// infer the order of ids from slowest to fastest varying. If |numIds| <= 0,
@@ -196,6 +198,21 @@ fuseCollapseShapeIntoProducerGeneric(RewriterBase &rewriter,
 FailureOr<PCF::WriteSliceOp>
 composeWriteSliceWithParallelInsert(RewriterBase &rewriter,
                                     PCF::WriteSliceOp writeSliceOp);
+
+/// Distributes and lowers all shared_executor and tile_group ops under
+/// |rootOp|. When |distInterface| is non-null, it is used for vector
+/// distribution (Phase 1-2). When null, only structural lowering is performed
+/// (Phase 3-5).
+///
+/// Phases:
+///   1. Distribute within tile_groups via the distribution interface.
+///   2. Distribute shared_executor bodies via the distribution interface.
+///   3. Lower tile_groups to scf.index_switch.
+///   4. Lower shared_executors to pcf.generic.
+///   5. Verify all tile_groups/shared_executors were lowered.
+LogicalResult
+distributeAndLowerSharedExecutors(Operation *rootOp,
+                                  DistributionInterface *distInterface);
 
 } // namespace mlir::iree_compiler::IREE::PCF
 

@@ -125,6 +125,28 @@ def GPUDistributePass :
   ];
 }
 
+def GPUDistributeSharedExecutorPass
+    : InterfacePass<"iree-gpu-distribute-shared-executor",
+                    "mlir::FunctionOpInterface"> {
+  let summary = "Distributes and lowers shared_executor ops using translation_info sizes.";
+  let description = [{
+    Reads workgroup_size and subgroup_size from the function's translation_info
+    attribute and uses them to create a VectorDistributionImpl. Then distributes
+    and lowers all shared_executor and tile_group ops under the function.
+
+    This pass replaces the direct use of iree-pcf-distribute-and-lower with
+    explicit size options, instead deriving sizes from the function's
+    translation_info attribute set during pipeline configuration.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::iree_compiler::IREE::VectorExt::IREEVectorExtDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+  ];
+}
+
 def GPUDistributeSharedMemoryCopyPass :
     InterfacePass<"iree-codegen-gpu-distribute-shared-memory-copy", "mlir::FunctionOpInterface"> {
   let summary = "Pass to distribute shared memory copies to threads.";
