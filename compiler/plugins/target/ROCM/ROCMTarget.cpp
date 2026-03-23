@@ -21,6 +21,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -675,6 +676,22 @@ public:
                       UnitAttr::get(funcOp->getContext()));
       return false;
     }
+    // Exclude single-workgroup dispatches (no workgroup-mapped forall).
+    // These have no workgroup tiling and won't produce pcf.loop ops,
+    // so the staged pipeline's PCF-based distribution won't apply.
+    bool hasWorkgroupForall = false;
+    funcOp->walk([&](scf::ForallOp forallOp) -> WalkResult {
+      if (forallOp.getMapping()) {
+        hasWorkgroupForall = true;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (!hasWorkgroupForall) {
+      funcOp->setAttr(excludeAttrName,
+                      UnitAttr::get(funcOp->getContext()));
+      return false;
+    }
     return true;
   }
 
@@ -750,6 +767,12 @@ public:
       // Pre-bufferization VectorDistribute passes (tiling, vectorization,
       // shared memory allocation).
       addGPUVectorDistributePreBufferizePasses(vdFuncPM);
+
+      // Fuse pcf.write_slice with scf.forall parallel_insert_slice, moving
+      // the write inside the loop body so each iteration writes directly to
+      // the sref. This must run before absorb so that the write pattern is
+      // visible to convertOutputWrites.
+      vdFuncPM.addPass(PCF::createFusePCFWritesPass());
 
       // Absorb tensor reads/writes into PCF sref ops, then promote shared
       // memory alloc_tensors to pcf.alloc in the shared_executor initializer.

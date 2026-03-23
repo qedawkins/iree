@@ -33,6 +33,16 @@ void ToLayoutOp::populateBoundsForShapedValueDim(
   cstr.bound(value)[dim] == cstr.getExpr(getInput(), dim);
 }
 
+// to_layout on rank-0 vectors is always identity (nothing to distribute).
+OpFoldResult ToLayoutOp::fold(FoldAdaptor) {
+  if (auto vecType = dyn_cast<VectorType>(getInput().getType())) {
+    if (vecType.getRank() == 0) {
+      return getInput();
+    }
+  }
+  return {};
+}
+
 // to_simd -> to_simt
 OpFoldResult ToSIMDOp::fold(FoldAdaptor adaptor) {
   if (auto simtOp = getOperand().getDefiningOp<ToSIMTOp>()) {
