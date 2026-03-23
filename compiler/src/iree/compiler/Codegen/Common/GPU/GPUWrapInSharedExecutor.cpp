@@ -167,7 +167,8 @@ struct GPUWrapInSharedExecutorPass final
     });
 
     // If no PCF ops were found (single-workgroup dispatch), wrap the
-    // function body directly.
+    // function body directly. Keep binding infrastructure outside and
+    // capture tensor results as readonly sref inputs.
     FunctionOpInterface funcOp = getOperation();
     bool hasPCFOps = false;
     funcOp->walk([&](Operation *inner) {
@@ -179,10 +180,101 @@ struct GPUWrapInSharedExecutorPass final
       return;
     }
 
-    Region &funcBody = funcOp.getFunctionBody();
-    if (failed(wrapBodyInSharedExecutor(funcOp, funcBody, rewriter))) {
-      funcOp->emitError("failed to wrap function body in shared_executor");
-      return signalPassFailure();
+    Block &funcBody = funcOp.getFunctionBody().front();
+    Operation *funcTerminator = funcBody.getTerminator();
+
+    // Partition: binding/constant ops stay outside, everything else moves in.
+    // Tensors produced by load_from_buffer become readonly sref inputs.
+    SmallVector<Operation *> opsToKeep;
+    SmallVector<Operation *> opsToMove;
+    SetVector<Value> capturedTensors;
+
+    for (Operation &op : funcBody.getOperations()) {
+      if (&op == funcTerminator) {
+        continue;
+      }
+      StringRef dialect = op.getDialect()
+                              ? op.getDialect()->getNamespace()
+                              : "";
+      bool keep = dialect == "hal" || dialect == "amdgpu" ||
+                  isa<IREE::Codegen::LoadFromBufferOp>(op) ||
+                  isa<IREE::Codegen::WorkgroupCountHintOp>(op) ||
+                  op.hasTrait<OpTrait::ConstantLike>();
+      if (keep) {
+        opsToKeep.push_back(&op);
+        // If this produces a tensor, it may need to be captured.
+        for (Value result : op.getResults()) {
+          if (isa<RankedTensorType>(result.getType())) {
+            capturedTensors.insert(result);
+          }
+        }
+      } else {
+        opsToMove.push_back(&op);
+      }
+    }
+
+    if (opsToMove.empty()) {
+      return;
+    }
+
+    // Filter capturedTensors to only those actually used by opsToMove.
+    SetVector<Value> usedCaptures;
+    DenseSet<Operation *> moveSet(opsToMove.begin(), opsToMove.end());
+    for (Value tensor : capturedTensors) {
+      for (OpOperand &use : tensor.getUses()) {
+        if (moveSet.contains(use.getOwner())) {
+          usedCaptures.insert(tensor);
+          break;
+        }
+      }
+    }
+
+    // Create shared_executor with readonly inputs.
+    rewriter.setInsertionPoint(opsToMove.front());
+    Attribute threadScopeAttr = ThreadScopeAttr::get(rewriter.getContext());
+    IREE::PCF::ScopeAttrInterface threadScope =
+        cast<IREE::PCF::ScopeAttrInterface>(threadScopeAttr);
+    SharedExecutorOp sharedExec = SharedExecutorOp::create(
+        rewriter, funcOp.getLoc(), threadScope,
+        /*readonlyInits=*/usedCaptures.getArrayRef(),
+        /*readwriteInits=*/ValueRange());
+
+    Block &execBlock = sharedExec.getRegion().front();
+    for (Operation *op : opsToMove) {
+      op->moveBefore(&execBlock, execBlock.end());
+    }
+
+    // Replace captured tensor uses with pcf.read_slice from sref block args.
+    ArrayRef<BlockArgument> readonlyRefs = sharedExec.getReadonlyRefArgs();
+    SmallVector<Value> captureList(usedCaptures.begin(), usedCaptures.end());
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(&execBlock);
+      for (auto [tensor, srefArg] :
+           llvm::zip_equal(captureList, readonlyRefs)) {
+        auto tensorType = cast<RankedTensorType>(tensor.getType());
+        int64_t rank = tensorType.getRank();
+        SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
+        SmallVector<OpFoldResult> sizes;
+        for (int64_t i = 0; i < rank; ++i) {
+          sizes.push_back(rewriter.getIndexAttr(tensorType.getDimSize(i)));
+        }
+        SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
+        Value readSlice = ReadSliceOp::create(
+            rewriter, funcOp.getLoc(), tensorType, srefArg, offsets, sizes,
+            strides);
+        tensor.replaceUsesWithIf(readSlice, [&](OpOperand &use) {
+          return sharedExec.getRegion().isAncestor(
+              use.getOwner()->getParentRegion());
+        });
+      }
+    }
+
+    // Add pcf.return terminator.
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToEnd(&execBlock);
+      ReturnOp::create(rewriter, funcOp.getLoc());
     }
   }
 };
