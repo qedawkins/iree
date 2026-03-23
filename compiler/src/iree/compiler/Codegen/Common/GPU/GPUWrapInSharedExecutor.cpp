@@ -9,6 +9,8 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/IRMapping.h"
 
 namespace mlir::iree_compiler {
 
@@ -20,10 +22,11 @@ using namespace IREE::PCF;
 
 namespace {
 
-/// Wraps the body of a workgroup-scoped pcf.generic or pcf.loop op in a
-/// pcf.shared_executor with thread scope. The shared_executor captures srefs
-/// from the enclosing scope (since it is not IsolatedFromAbove) and provides
-/// a threadgroup block argument for collective execution.
+/// Wraps the body of a region in a pcf.shared_executor with thread scope.
+/// Tensor values used by ops in the body but defined outside the region are
+/// captured as readonly sref inputs to the shared_executor. Inside the body,
+/// pcf.read_slice ops produce full-sized tensor loads from the sref block
+/// arguments, and uses of the original tensors are replaced.
 static LogicalResult wrapBodyInSharedExecutor(Operation *op, Region &bodyRegion,
                                               IRRewriter &rewriter) {
   Block &body = bodyRegion.front();
@@ -43,20 +46,73 @@ static LogicalResult wrapBodyInSharedExecutor(Operation *op, Region &bodyRegion,
     return success();
   }
 
-  // Create the shared_executor with thread scope just before the terminator.
+  // Identify tensor values used by ops to move that are defined outside.
+  // These will become readonly sref inputs to the shared_executor.
+  SetVector<Value> capturedTensors;
+  for (Operation *bodyOp : opsToMove) {
+    for (Value operand : bodyOp->getOperands()) {
+      if (!isa<RankedTensorType>(operand.getType())) {
+        continue;
+      }
+      // Check if defined outside the body region.
+      if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
+        if (!bodyRegion.isAncestor(blockArg.getOwner()->getParent())) {
+          capturedTensors.insert(operand);
+        }
+      } else if (!bodyRegion.isAncestor(
+                     operand.getDefiningOp()->getParentRegion())) {
+        capturedTensors.insert(operand);
+      }
+    }
+  }
+
+  // Create the shared_executor with readonly inputs.
   rewriter.setInsertionPoint(terminator);
   Attribute threadScopeAttr = ThreadScopeAttr::get(rewriter.getContext());
   IREE::PCF::ScopeAttrInterface threadScope =
       cast<IREE::PCF::ScopeAttrInterface>(threadScopeAttr);
   SharedExecutorOp sharedExec = SharedExecutorOp::create(
       rewriter, op->getLoc(), threadScope,
+      /*readonlyInits=*/capturedTensors.getArrayRef(),
       /*readwriteInits=*/ValueRange());
 
-  // Move all ops into the shared_executor's execute region, then add a
-  // pcf.return terminator.
+  // Move all ops into the shared_executor's execute region.
   Block &execBlock = sharedExec.getRegion().front();
   for (Operation *bodyOp : opsToMove) {
     bodyOp->moveBefore(&execBlock, execBlock.end());
+  }
+
+  // Replace uses of captured tensors with pcf.read_slice from sref block args.
+  ArrayRef<BlockArgument> readonlyRefs = sharedExec.getReadonlyRefArgs();
+  SmallVector<Value> capturedList(capturedTensors.begin(),
+                                  capturedTensors.end());
+  assert(readonlyRefs.size() == capturedList.size());
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(&execBlock);
+
+    for (auto [tensor, srefArg] :
+         llvm::zip_equal(capturedList, readonlyRefs)) {
+      auto tensorType = cast<RankedTensorType>(tensor.getType());
+      int64_t rank = tensorType.getRank();
+
+      // Create pcf.read_slice with full size (identity slice).
+      SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
+      SmallVector<OpFoldResult> sizes;
+      for (int64_t i = 0; i < rank; ++i) {
+        sizes.push_back(rewriter.getIndexAttr(tensorType.getDimSize(i)));
+      }
+      SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
+
+      Value readSlice = ReadSliceOp::create(
+          rewriter, op->getLoc(), tensorType, srefArg, offsets, sizes, strides);
+
+      // Replace all uses of the original tensor within the execute region.
+      tensor.replaceUsesWithIf(readSlice, [&](OpOperand &use) {
+        return sharedExec.getRegion().isAncestor(
+            use.getOwner()->getParentRegion());
+      });
+    }
   }
 
   // Add the pcf.return terminator to the shared_executor body.
@@ -110,11 +166,8 @@ struct GPUWrapInSharedExecutorPass final
       }
     });
 
-    // If no PCF ops were found (single-workgroup dispatch with no workgroup
-    // tiling), wrap the function body directly. Keep binding ops
-    // (hal.interface.binding.subspan, amdgpu.fat_raw_buffer_cast,
-    // iree_codegen.load_from_buffer, constants) outside the shared_executor
-    // and move everything else inside.
+    // If no PCF ops were found (single-workgroup dispatch), wrap the
+    // function body directly.
     FunctionOpInterface funcOp = getOperation();
     bool hasPCFOps = false;
     funcOp->walk([&](Operation *inner) {
@@ -126,51 +179,10 @@ struct GPUWrapInSharedExecutorPass final
       return;
     }
 
-    Block &funcBody = funcOp.getFunctionBody().front();
-    Operation *funcTerminator = funcBody.getTerminator();
-
-    // Partition ops into "keep outside" and "move inside".
-    SmallVector<Operation *> opsToMove;
-    for (Operation &op : funcBody.getOperations()) {
-      if (&op == funcTerminator) {
-        continue;
-      }
-      // Keep binding-related ops and constants outside.
-      StringRef dialect = op.getDialect()
-                              ? op.getDialect()->getNamespace()
-                              : "";
-      if (dialect == "hal" || dialect == "amdgpu" ||
-          isa<IREE::Codegen::LoadFromBufferOp,
-              IREE::Codegen::WorkgroupCountHintOp>(op) ||
-          op.hasTrait<OpTrait::ConstantLike>()) {
-        continue;
-      }
-      opsToMove.push_back(&op);
-    }
-
-    if (opsToMove.empty()) {
-      return;
-    }
-
-    // Create shared_executor before the first op to move.
-    rewriter.setInsertionPoint(opsToMove.front());
-    Attribute threadScopeAttr = ThreadScopeAttr::get(rewriter.getContext());
-    IREE::PCF::ScopeAttrInterface threadScope =
-        cast<IREE::PCF::ScopeAttrInterface>(threadScopeAttr);
-    SharedExecutorOp sharedExec = SharedExecutorOp::create(
-        rewriter, funcOp.getLoc(), threadScope,
-        /*readwriteInits=*/ValueRange());
-
-    Block &execBlock = sharedExec.getRegion().front();
-    for (Operation *op : opsToMove) {
-      op->moveBefore(&execBlock, execBlock.end());
-    }
-
-    // Add pcf.return terminator.
-    {
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToEnd(&execBlock);
-      ReturnOp::create(rewriter, funcOp.getLoc());
+    Region &funcBody = funcOp.getFunctionBody();
+    if (failed(wrapBodyInSharedExecutor(funcOp, funcBody, rewriter))) {
+      funcOp->emitError("failed to wrap function body in shared_executor");
+      return signalPassFailure();
     }
   }
 };
