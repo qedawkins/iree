@@ -31,36 +31,31 @@ static bool isDefinedOutside(Value val, Region &region) {
   return !region.isAncestor(val.getDefiningOp()->getParentRegion());
 }
 
-/// Creates a pcf.to_sref op for a tensor value, caching to avoid duplicates.
-static Value getOrCreateSref(OpBuilder &builder, Location loc, Value tensor,
-                             ScopeAttrInterface scope,
-                             DenseMap<Value, Value> &srefCache) {
-  auto it = srefCache.find(tensor);
-  if (it != srefCache.end()) {
-    return it->second;
-  }
 
-  auto tensorType = cast<RankedTensorType>(tensor.getType());
-  ShapedRefType srefType = ShapedRefType::get(
-      builder.getContext(), tensorType.getShape(),
-      tensorType.getElementType(), scope);
-  Value sref = ToSrefOp::create(builder, loc, srefType, tensor);
-  srefCache[tensor] = sref;
-  return sref;
-}
+/// Result of tracing a tensor value back to its sref source.
+struct TraceResult {
+  /// Chain of view-like ops from root to the transfer_read source.
+  SmallVector<Operation *> chain;
+  /// The sref value at the root (from pcf.read_slice source or pcf.to_sref).
+  Value sref;
+};
 
-/// Traces through view-like tensor ops (extract_slice, expand_shape) to find
-/// the root tensor defined outside the region. Returns the chain of ops from
-/// root to the immediate source of the transfer_read (outermost first).
-/// Returns std::nullopt if the chain does not trace to an outside tensor.
-static std::optional<SmallVector<Operation *>>
-traceToOutsideTensor(Value source, Region &region) {
+/// Traces through view-like tensor ops (read_slice, extract_slice,
+/// expand_shape) to find the root sref. The chain starts at the transfer_read
+/// source and walks backward. Returns std::nullopt if no sref root is found.
+static std::optional<TraceResult> traceToSref(Value source) {
   SmallVector<Operation *> chain;
   Value current = source;
-  while (!isDefinedOutside(current, region)) {
+  while (true) {
     Operation *defOp = current.getDefiningOp();
     if (!defOp) {
       return std::nullopt;
+    }
+    if (auto readSlice = dyn_cast<IREE::PCF::ReadSliceOp>(defOp)) {
+      // Found the root — the read_slice source is the sref block arg.
+      chain.push_back(defOp);
+      std::reverse(chain.begin(), chain.end());
+      return TraceResult{chain, readSlice.getSource()};
     }
     if (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(defOp)) {
       chain.push_back(defOp);
@@ -69,24 +64,19 @@ traceToOutsideTensor(Value source, Region &region) {
       chain.push_back(defOp);
       current = expandShape.getSrc();
     } else {
-      // Unsupported op in the chain.
       return std::nullopt;
     }
   }
-  // Reverse so chain goes from root outward to the transfer_read source.
-  std::reverse(chain.begin(), chain.end());
-  return chain;
 }
 
-/// Convert vector.transfer_read on a captured tensor (or a view-like chain
-/// from a captured tensor) to iree_vector_ext.transfer_read on a pcf.sref.
-/// Tensor extract_slice/expand_shape ops in the chain are converted to
-/// pcf.subview/pcf.expand_shape on the sref.
+/// Convert vector.transfer_read ops whose tensor source traces back through
+/// pcf.read_slice (and optional extract_slice/expand_shape) to the sref block
+/// argument. The chain is replaced with pcf.subview/pcf.expand_shape ops on
+/// the sref, and the transfer_read becomes an iree_vector_ext.transfer_read.
 static void convertInputReads(SharedExecutorOp sharedExec,
                               ScopeAttrInterface scope,
                               IRRewriter &rewriter) {
   Region &region = sharedExec.getRegion();
-  DenseMap<Value, Value> srefCache;
 
   // Collect reads first to avoid modifying the IR while iterating.
   SmallVector<vector::TransferReadOp> readsToConvert;
@@ -95,9 +85,7 @@ static void convertInputReads(SharedExecutorOp sharedExec,
     if (!isa<RankedTensorType>(source.getType())) {
       return;
     }
-    // Direct outside read or traceable chain to outside.
-    if (isDefinedOutside(source, region) ||
-        traceToOutsideTensor(source, region).has_value()) {
+    if (traceToSref(source).has_value()) {
       readsToConvert.push_back(readOp);
     }
   });
@@ -106,43 +94,19 @@ static void convertInputReads(SharedExecutorOp sharedExec,
     Value source = readOp.getBase();
     Location loc = readOp.getLoc();
 
-    // Find the root tensor and chain of view-like ops.
-    Value rootTensor = source;
-    SmallVector<Operation *> chain;
-    if (isDefinedOutside(source, region)) {
-      rootTensor = source;
-    } else {
-      auto maybeChain = traceToOutsideTensor(source, region);
-      assert(maybeChain && "should have been filtered above");
-      chain = std::move(*maybeChain);
-      // Walk to the root.
-      Value current = source;
-      while (!isDefinedOutside(current, region)) {
-        Operation *defOp = current.getDefiningOp();
-        if (auto es = dyn_cast<tensor::ExtractSliceOp>(defOp)) {
-          current = es.getSource();
-        } else if (auto exp = dyn_cast<tensor::ExpandShapeOp>(defOp)) {
-          current = exp.getSrc();
-        } else {
-          break;
-        }
-      }
-      rootTensor = current;
-    }
+    auto traceResult = traceToSref(source);
+    assert(traceResult && "should have been filtered above");
+    Value sref = traceResult->sref;
 
-    // Create pcf.to_sref for the root tensor.
-    {
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(&region.front());
-      getOrCreateSref(rewriter, loc, rootTensor, scope, srefCache);
-    }
-    Value sref = srefCache[rootTensor];
-
-    // Replay the chain as PCF ops on the sref.
+    // Replay the chain as PCF ops on the sref. Skip the read_slice itself
+    // (first in chain) since its source IS the sref.
     rewriter.setInsertionPoint(readOp);
-    for (Operation *op : chain) {
+    for (Operation *op : traceResult->chain) {
+      if (isa<ReadSliceOp>(op)) {
+        // The read_slice source is the sref — already have it.
+        continue;
+      }
       if (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(op)) {
-        // Create pcf.subview.
         auto resultTensorType =
             cast<RankedTensorType>(extractSlice.getResult().getType());
         ShapedRefType resultSrefType = ShapedRefType::get(
@@ -153,7 +117,6 @@ static void convertInputReads(SharedExecutorOp sharedExec,
             extractSlice.getMixedOffsets(), extractSlice.getMixedSizes(),
             extractSlice.getMixedStrides());
       } else if (auto expandShape = dyn_cast<tensor::ExpandShapeOp>(op)) {
-        // Create pcf.expand_shape.
         auto resultTensorType =
             cast<RankedTensorType>(expandShape.getResult().getType());
         ShapedRefType resultSrefType = ShapedRefType::get(
@@ -183,7 +146,7 @@ static void convertInputReads(SharedExecutorOp sharedExec,
     rewriter.replaceOp(readOp, newRead);
 
     // Clean up dead tensor ops in the chain.
-    for (Operation *op : llvm::reverse(chain)) {
+    for (Operation *op : llvm::reverse(traceResult->chain)) {
       if (op->use_empty()) {
         rewriter.eraseOp(op);
       }
