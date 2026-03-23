@@ -45,6 +45,10 @@ OpFoldResult ToLayoutOp::fold(FoldAdaptor) {
 
 // to_simd -> to_simt
 OpFoldResult ToSIMDOp::fold(FoldAdaptor adaptor) {
+  // Identity: source type == result type.
+  if (getInput().getType() == getType()) {
+    return getInput();
+  }
   if (auto simtOp = getOperand().getDefiningOp<ToSIMTOp>()) {
     return simtOp.getOperand();
   }
@@ -61,6 +65,10 @@ OpFoldResult ToSIMDOp::fold(FoldAdaptor adaptor) {
 
 // to_simt -> to_simd
 OpFoldResult ToSIMTOp::fold(FoldAdaptor adaptor) {
+  // Identity: source type == result type.
+  if (getInput().getType() == getType()) {
+    return getInput();
+  }
   if (auto simdOp = getOperand().getDefiningOp<ToSIMDOp>()) {
     return simdOp.getOperand();
   }
