@@ -19,6 +19,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -672,22 +673,6 @@ public:
       return WalkResult::advance();
     });
     if (hasDynamicShapes) {
-      funcOp->setAttr(excludeAttrName,
-                      UnitAttr::get(funcOp->getContext()));
-      return false;
-    }
-    // Exclude single-workgroup dispatches (no workgroup-mapped forall).
-    // These have no workgroup tiling and won't produce pcf.loop ops,
-    // so the staged pipeline's PCF-based distribution won't apply.
-    bool hasWorkgroupForall = false;
-    funcOp->walk([&](scf::ForallOp forallOp) -> WalkResult {
-      if (forallOp.getMapping()) {
-        hasWorkgroupForall = true;
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    if (!hasWorkgroupForall) {
       funcOp->setAttr(excludeAttrName,
                       UnitAttr::get(funcOp->getContext()));
       return false;

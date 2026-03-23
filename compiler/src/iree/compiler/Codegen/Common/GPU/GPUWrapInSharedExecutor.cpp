@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 
@@ -108,6 +109,69 @@ struct GPUWrapInSharedExecutorPass final
         return signalPassFailure();
       }
     });
+
+    // If no PCF ops were found (single-workgroup dispatch with no workgroup
+    // tiling), wrap the function body directly. Keep binding ops
+    // (hal.interface.binding.subspan, amdgpu.fat_raw_buffer_cast,
+    // iree_codegen.load_from_buffer, constants) outside the shared_executor
+    // and move everything else inside.
+    FunctionOpInterface funcOp = getOperation();
+    bool hasPCFOps = false;
+    funcOp->walk([&](Operation *inner) {
+      if (isa<GenericOp, LoopOp, SharedExecutorOp>(inner)) {
+        hasPCFOps = true;
+      }
+    });
+    if (hasPCFOps) {
+      return;
+    }
+
+    Block &funcBody = funcOp.getFunctionBody().front();
+    Operation *funcTerminator = funcBody.getTerminator();
+
+    // Partition ops into "keep outside" and "move inside".
+    SmallVector<Operation *> opsToMove;
+    for (Operation &op : funcBody.getOperations()) {
+      if (&op == funcTerminator) {
+        continue;
+      }
+      // Keep binding-related ops and constants outside.
+      StringRef dialect = op.getDialect()
+                              ? op.getDialect()->getNamespace()
+                              : "";
+      if (dialect == "hal" || dialect == "amdgpu" ||
+          isa<IREE::Codegen::LoadFromBufferOp,
+              IREE::Codegen::WorkgroupCountHintOp>(op) ||
+          op.hasTrait<OpTrait::ConstantLike>()) {
+        continue;
+      }
+      opsToMove.push_back(&op);
+    }
+
+    if (opsToMove.empty()) {
+      return;
+    }
+
+    // Create shared_executor before the first op to move.
+    rewriter.setInsertionPoint(opsToMove.front());
+    Attribute threadScopeAttr = ThreadScopeAttr::get(rewriter.getContext());
+    IREE::PCF::ScopeAttrInterface threadScope =
+        cast<IREE::PCF::ScopeAttrInterface>(threadScopeAttr);
+    SharedExecutorOp sharedExec = SharedExecutorOp::create(
+        rewriter, funcOp.getLoc(), threadScope,
+        /*readwriteInits=*/ValueRange());
+
+    Block &execBlock = sharedExec.getRegion().front();
+    for (Operation *op : opsToMove) {
+      op->moveBefore(&execBlock, execBlock.end());
+    }
+
+    // Add pcf.return terminator.
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToEnd(&execBlock);
+      ReturnOp::create(rewriter, funcOp.getLoc());
+    }
   }
 };
 
