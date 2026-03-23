@@ -69,6 +69,7 @@ def IREEVectorExt_ToLayoutOp : IREEVectorExt_PureOp<"to_layout", [
   }];
   let assemblyFormat = "$input `to` `layout` `(` $layout `)` attr-dict `:` type($input)";
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 def IREEVectorExt_ToSIMDOp : IREEVectorExt_PureOp<"to_simd",
