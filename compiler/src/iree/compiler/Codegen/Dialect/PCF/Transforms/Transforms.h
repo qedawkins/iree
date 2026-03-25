@@ -177,6 +177,32 @@ void fuseTilableProducer(RewriterBase &rewriter, PCF::GenericOp genericOp,
 void fuseTilableProducer(RewriterBase &rewriter, PCF::LoopOp loopOp,
                          const ProducerFusionParams &params);
 
+// Distributed producer fusion using PCFTilingOpInterface. Same match
+// semantics as matchTilableProducer but uses getDistributedImplementation
+// and appends readonly sref args for non-fused input operands of the producer.
+struct DistributedProducerFusionParams {
+  // Which result index of the scoped op has a fusable producer init.
+  unsigned resultIndex;
+  // The producer op (implements PCFTilingOpInterface + DPS).
+  Operation *producer;
+  // Read sites on the corresponding sref arg that consume the init value.
+  SmallVector<PCF::ReadSliceOp> readSlices;
+};
+
+LogicalResult matchDistributedProducer(RewriterBase &rewriter,
+                                        PCF::GenericOp genericOp,
+                                        DistributedProducerFusionParams &params);
+LogicalResult matchDistributedProducer(RewriterBase &rewriter,
+                                        PCF::LoopOp loopOp,
+                                        DistributedProducerFusionParams &params);
+
+void fuseDistributedProducer(RewriterBase &rewriter,
+                              PCF::GenericOp genericOp,
+                              const DistributedProducerFusionParams &params);
+void fuseDistributedProducer(RewriterBase &rewriter,
+                              PCF::LoopOp loopOp,
+                              const DistributedProducerFusionParams &params);
+
 // Pattern set for dropping unused results from scoped ops. Due to memory
 // effects this requires cascading operation erasure and is unsuitable for
 // a canonicalization pattern.
