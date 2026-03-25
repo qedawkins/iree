@@ -24,6 +24,7 @@ iree_cc_library(
     "PCFOpInterfaces.h.inc"
     "PCFOps.h"
     "PCFOps.h.inc"
+    "PCFTilingInterface.h"
     "PCFTypes.h"
     "PCFTypes.h.inc"
   SRCS
@@ -51,6 +52,7 @@ iree_cc_library(
     MLIRSideEffectInterfaces
     MLIRSupport
     MLIRTransformUtils
+    MLIRTilingInterface
     MLIRViewLikeInterface
   PUBLIC
 )

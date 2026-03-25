@@ -13,6 +13,9 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/Interfaces/TilingInterface.h"
+
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTilingInterface.h" // IWYU pragma: export
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrInterfaces.h.inc" // IWYU pragma: export
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOpInterfaces.h.inc" // IWYU pragma: export
