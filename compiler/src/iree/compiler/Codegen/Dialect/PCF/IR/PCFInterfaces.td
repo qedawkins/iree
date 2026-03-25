@@ -8,6 +8,7 @@
 #define IREE_CODEGEN_DIALECT_PCF_INTERFACES
 
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/TilingInterface.td"
 
 //===----------------------------------------------------------------------===//
 // IREE::PCF::ScopeAttrInterface
@@ -232,6 +233,82 @@ def PCF_NamespaceOpInterface : OpInterface<"NamespaceOpInterface"> {
       /*args=*/(ins)
     >,
   ];
+}
+
+//===----------------------------------------------------------------------===//
+// IREE::PCF::PCFTilingOpInterface
+//===----------------------------------------------------------------------===//
+
+def PCF_TilingOpInterface : OpInterface<"PCFTilingOpInterface",
+    [TilingInterface]> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::PCF";
+
+  let description = [{
+    Interface for distributing ops into PCF parallel constructs.
+
+    Extends TilingInterface with a single `getDistributedImplementation`
+    method that replaces the combination of `getTiledImplementation`,
+    `generateResultTileValue`, and `getTiledImplementationFromOperandTiles`.
+
+    The caller provides structured info about how operands are supplied
+    (as tiles or full values, potentially from srefs) and how results should
+    be produced (returned as tiles or written to destination srefs).
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the indices of operands that are tileable. Non-tileable
+        operands are passed through as full values. All results are
+        implicitly tileable (required for distribution into parallel
+        constructs).
+      }],
+      /*retTy=*/"SmallVector<unsigned>",
+      /*methodName=*/"getTileableOperandIndices",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/""
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the distributed/tiled implementation of this op.
+
+        The `offsets` and `sizes` describe the current iteration tile in the
+        iteration domain (same semantics as `getTiledImplementation`).
+
+        `operandInfo` provides a `DistributedOperandInfo` for each operand
+        (inputs + DPS inits), indexed by operand number. Each entry specifies
+        the replacement value and whether it is a tile.
+
+        `resultInfo` provides a `DistributedResultInfo` for each result,
+        indexed by result number. When `destSref` is non-null, the
+        implementation should write the result to that sref (via
+        `pcf.write_slice` or similar) and leave the corresponding
+        `tiledValues` entry empty. When null, a tensor tile should be
+        returned in `tiledValues`.
+
+        Returns a `TilingResult` containing the tiled ops and tile values.
+      }],
+      /*retTy=*/"FailureOr<mlir::TilingResult>",
+      /*methodName=*/"getDistributedImplementation",
+      /*args=*/(ins
+        "OpBuilder &":$b,
+        "ArrayRef<OpFoldResult>":$offsets,
+        "ArrayRef<OpFoldResult>":$sizes,
+        "ArrayRef<::mlir::iree_compiler::IREE::PCF::DistributedOperandInfo>":$operandInfo,
+        "ArrayRef<::mlir::iree_compiler::IREE::PCF::DistributedResultInfo>":$resultInfo),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/""
+    >,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns true if the operand at the given index is tileable.
+    bool isOperandTileable(unsigned operandIndex) {
+      SmallVector<unsigned> indices = getTileableOperandIndices();
+      return llvm::is_contained(indices, operandIndex);
+    }
+  }];
 }
 
 #endif  // IREE_CODEGEN_DIALECT_PCF_INTERFACES

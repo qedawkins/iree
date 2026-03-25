@@ -14,6 +14,7 @@
 #define IREE_COMPILER_CODEGEN_DIALECT_PCF_TRANSFORMS_TRANSFORMS_H_
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTilingInterface.h"
 #include "mlir/IR/PatternMatch.h"
 
 // Forward declares.
@@ -31,6 +32,7 @@ class ExtractSliceOp;
 namespace mlir::iree_compiler::IREE::PCF {
 
 class DistributionInterface;
+class PCFTilingOpInterface;
 
 /// Converts scf.forall ops to pcf.loop by linearizing/delinearizing ids beyond
 /// |numIds| into the slowest varying id. Uses DeviceMappingAttrInterface to
@@ -54,6 +56,24 @@ FailureOr<PCF::LoopOp> convertForallToPCFLoop(RewriterBase &rewriter,
 FailureOr<PCF::GenericOp>
 convertForallToGenericNest(RewriterBase &rewriter, scf::ForallOp forallOp,
                            ArrayRef<PCF::ScopeAttrInterface> scopes);
+
+/// Tiles a PCFTilingOpInterface op into a pcf.loop with the given scope and
+/// tile sizes. Tile size semantics match scf::tileUsingSCF: zero means don't
+/// tile, non-zero is the tile size, iteration count = ceil(dim / tileSize).
+/// Tileable input operands become readonly sref args, DPS inits become
+/// readwrite sref args tied to results. Inside the body,
+/// getDistributedImplementation is called with the tile offsets/sizes.
+FailureOr<PCF::LoopOp> tileToPCFLoop(RewriterBase &rewriter,
+                                      PCFTilingOpInterface target,
+                                      ScopeAttrInterface scope,
+                                      ArrayRef<OpFoldResult> tileSizes);
+
+/// Same as tileToPCFLoop but creates a pcf.generic with nested scf.forall
+/// for spillover iterations.
+FailureOr<PCF::GenericOp> tileToPCFGeneric(RewriterBase &rewriter,
+                                            PCFTilingOpInterface target,
+                                            ScopeAttrInterface scope,
+                                            ArrayRef<OpFoldResult> tileSizes);
 
 struct ConsumerFusionParams {
   // List of operands in the consumer that are fused along.

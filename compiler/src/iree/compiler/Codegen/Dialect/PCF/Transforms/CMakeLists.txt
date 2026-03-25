@@ -43,6 +43,7 @@ iree_cc_library(
     "ResolveTokens.cpp"
     "TestEquivalenceAnalysis.cpp"
     "TestNamespaceResolution.cpp"
+    "TileToPCF.cpp"
     "Transforms.cpp"
   DEPS
     ::PassesIncGen
