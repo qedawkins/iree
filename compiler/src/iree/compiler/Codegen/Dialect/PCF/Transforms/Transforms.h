@@ -131,6 +131,16 @@ void fuseTilableConsumer(RewriterBase &rewriter, PCF::GenericOp genericOp,
 void fuseTilableConsumer(RewriterBase &rewriter, PCF::LoopOp loopOp,
                          TilingInterface target, ConsumerFusionParams &params);
 
+// Distributed consumer fusion using PCFTilingOpInterface. Same match
+// semantics as matchTilableConsumer but uses getDistributedImplementation
+// and appends readonly sref args for non-fused input operands.
+void fuseDistributedConsumer(RewriterBase &rewriter, PCF::GenericOp genericOp,
+                              PCFTilingOpInterface target,
+                              ConsumerFusionParams &params);
+void fuseDistributedConsumer(RewriterBase &rewriter, PCF::LoopOp loopOp,
+                              PCFTilingOpInterface target,
+                              ConsumerFusionParams &params);
+
 struct ProducerFusionParams {
   // Which result index of the scoped op has a fusable producer init.
   unsigned resultIndex;
