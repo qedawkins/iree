@@ -34,6 +34,7 @@ iree_cc_library(
     "ConvertSRefToMemRef.cpp"
     "DistributeAndLower.cpp"
     "DistributedFuseConsumers.cpp"
+    "DistributedFuseProducers.cpp"
     "DistributionInterface.cpp"
     "EquivalenceAnalysis.cpp"
     "FuseConsumers.cpp"
