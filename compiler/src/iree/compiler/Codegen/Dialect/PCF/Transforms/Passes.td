@@ -271,4 +271,57 @@ def TestConvertForallToGenericNestPass :
   ];
 }
 
+def TestTileToPCFPass : Pass<"iree-pcf-test-tile-to-pcf", ""> {
+  let summary = "Test pass for tileToPCFLoop transform.";
+  let description = [{
+    Test pass that tiles all PCFTilingOpInterface ops into pcf.loop ops.
+    Uses pcf.sequential scope and tile sizes from the option.
+  }];
+  let options = [
+    ListOption<"tileSizes", "tile-sizes", "int64_t",
+               "Tile sizes for each dimension (0 = don't tile).">
+  ];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::linalg::LinalgDialect",
+    "::mlir::iree_compiler::IREE::LinalgExt::IREELinalgExtDialect",
+    "::mlir::tensor::TensorDialect"
+  ];
+}
+
+def TestDistributedFuseConsumersPass : Pass<"iree-pcf-test-distributed-fuse-consumers", ""> {
+  let summary = "Test pass for distributed consumer fusion.";
+  let description = [{
+    Test pass that fuses consumers into pcf.generic/loop ops using
+    PCFTilingOpInterface and readonly sref args.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::linalg::LinalgDialect",
+    "::mlir::iree_compiler::IREE::LinalgExt::IREELinalgExtDialect",
+    "::mlir::tensor::TensorDialect"
+  ];
+}
+
+def TestDistributedFuseProducersPass : Pass<"iree-pcf-test-distributed-fuse-producers", ""> {
+  let summary = "Test pass for distributed producer fusion.";
+  let description = [{
+    Test pass that fuses DPS producers into pcf.generic/loop ops using
+    PCFTilingOpInterface and readonly sref args.
+  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::vector::VectorDialect",
+    "::mlir::linalg::LinalgDialect",
+    "::mlir::iree_compiler::IREE::LinalgExt::IREELinalgExtDialect",
+    "::mlir::tensor::TensorDialect"
+  ];
+}
+
 #endif // IREE_CODEGEN_DIALECT_PCF_TRANSFORMS_PASSES
