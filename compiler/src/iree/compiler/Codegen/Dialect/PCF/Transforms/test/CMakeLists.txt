@@ -19,6 +19,8 @@ iree_lit_test_suite(
     "convert_sref_to_memref.mlir"
     "distribute_and_lower.mlir"
     "distribute_vector.mlir"
+    "distributed_fuse_consumers.mlir"
+    "distributed_fuse_producers.mlir"
     "equivalence_analysis.mlir"
     "fuse_collapse_shape.mlir"
     "fuse_consumers.mlir"
@@ -28,6 +30,7 @@ iree_lit_test_suite(
     "namespace_resolution.mlir"
     "namespace_resolution_failures.mlir"
     "resolve_tokens.mlir"
+    "tile_to_pcf.mlir"
   TOOLS
     FileCheck
     iree-opt

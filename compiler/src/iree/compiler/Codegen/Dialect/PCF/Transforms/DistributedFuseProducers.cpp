@@ -304,6 +304,11 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
       // Not tileable; will pass through original value.
       continue;
     }
+    // Only shaped (tensor) operands become sref args. Scalar operands
+    // (e.g. the fill value in linalg.fill) are passed through directly.
+    if (!isa<ShapedType>(producerOp->getOperand(i).getType())) {
+      continue;
+    }
     operandToNewReadonlyIdx[i] =
         static_cast<int64_t>(newReadonlyInits.size());
     newReadonlyInits.push_back(producerOp->getOperand(i));

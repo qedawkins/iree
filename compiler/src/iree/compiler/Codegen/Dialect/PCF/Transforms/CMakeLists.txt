@@ -43,8 +43,11 @@ iree_cc_library(
     "LowerStructuralPCF.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"
+    "TestDistributedFuseConsumers.cpp"
+    "TestDistributedFuseProducers.cpp"
     "TestEquivalenceAnalysis.cpp"
     "TestNamespaceResolution.cpp"
+    "TestTileToPCF.cpp"
     "TileToPCF.cpp"
     "Transforms.cpp"
   DEPS
@@ -73,7 +76,10 @@ iree_cc_library(
     MLIRTransforms
     MLIRVectorDialect
     iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
+    MLIRLinalgDialect
     iree::compiler::Codegen::Dialect::PCF::IR
+    iree::compiler::Codegen::Dialect::PCF::TilingImplementations
+    iree::compiler::Dialect::LinalgExt::IR
     iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect
     iree::compiler::Dialect::Util::Analysis
     iree::compiler::Dialect::Util::Analysis::DFX

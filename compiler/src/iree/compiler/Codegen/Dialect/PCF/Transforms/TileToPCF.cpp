@@ -126,6 +126,11 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
       // Non-tileable operand: not an sref arg.
       continue;
     }
+    // Only shaped (tensor) operands can become sref args. Scalar operands
+    // (e.g. the fill value in linalg.fill) are passed through directly.
+    if (!isa<ShapedType>(op->getOperand(i).getType())) {
+      continue;
+    }
     if (dpsInitIndices.contains(idx)) {
       // DPS init -> readwrite sref.
       operandToReadwriteSrefIdx[i] =
@@ -203,13 +208,19 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
         continue;
       }
 
+      // Scalar tileable operands (e.g. fill value) are passed through
+      // directly; they don't have sref args.
+      if (operandToReadonlySrefIdx[i] < 0 &&
+          operandToReadwriteSrefIdx[i] < 0) {
+        operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
+        continue;
+      }
+
       // Determine which sref arg this operand maps to.
       Value sref;
       if (operandToReadonlySrefIdx[i] >= 0) {
         sref = readonlyRefs[operandToReadonlySrefIdx[i]];
       } else {
-        assert(operandToReadwriteSrefIdx[i] >= 0 &&
-               "tileable operand must be either readonly or readwrite");
         sref = readwriteRefs[operandToReadwriteSrefIdx[i]];
       }
 
@@ -312,6 +323,9 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
       WriteSliceOp::create(rewriter, loc, tiledValue, resultInfo[i].destSref,
                            writeOffsets, writeSizes, writeStrides);
     }
+
+    // Step 10b: Create the pcf.return terminator.
+    ReturnOp::create(rewriter, loc);
   }
 
   // Step 11: Replace original op results with the PCF op results.
