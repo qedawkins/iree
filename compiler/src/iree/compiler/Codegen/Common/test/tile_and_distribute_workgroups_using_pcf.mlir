@@ -351,16 +351,6 @@ func.func @multi_result(%arg0: tensor<64x128xf32>, %arg1: tensor<128x256xf32>, %
 
 // -----
 
-// FIXME: multi_use_producer_no_yield_replacement crashes with assertion failure
-// in MutableOperandRange when consumer fusion tries to add readonly/readwrite args.
-// #map = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
-// #map1 = affine_map<(d0, d1, d2) -> (d0, d1)>
-// func.func @multi_use_producer_no_yield_replacement(%7: tensor<12x197x197xf32>) -> tensor<12x197x197xf32> {
-//   ...
-// }
-
-// -----
-
 // Fusion of the following graph, root marked with [brackets].
 //   A
 //  / \
@@ -589,25 +579,6 @@ func.func @pad_fusion(%0 : tensor<?x?xf32>, %1 : tensor<?x?xf32>, %2 : tensor<?x
 
 // -----
 
-// FIXME: horizontal_fusion_consumer_fusion1 crashes with assertion failure
-// in MutableOperandRange when consumer fusion tries to add readonly/readwrite args.
-// func.func @horizontal_fusion_consumer_fusion1(%arg0 : tensor<2x4096x640xf16>,
-//     %arg1 : tensor<10x64x640xf16>, %arg2 : tensor<10x64x640xf16>, %arg3 : tensor<10x64x640xf16>)
-//     -> (tensor<2x10x4096x64xf16>, tensor<2x10x4096x64xf16>, tensor<2x10x4096x64xf16>) {
-//   ...
-// }
-
-// -----
-
-// FIXME: horizontal_fusion_consumer_fusion2 crashes with assertion failure
-// in MutableOperandRange when consumer fusion tries to add readonly/readwrite args.
-// func.func @horizontal_fusion_consumer_fusion2(%arg0 : tensor<2x4096x640xi8>,
-//     %arg1 : tensor<2x640x640xi8>, %arg2 : tensor<2x640x640xi8>) -> tensor<2x4096x640xf16> {
-//   ...
-// }
-
-// -----
-
 #map = affine_map<(d0, d1) -> (d0, d1)>
 #map1 = affine_map<(d0, d1) -> (d0)>
 #map2 = affine_map<(d0, d1) -> (d1)>
@@ -651,16 +622,6 @@ func.func @only_producer_fusion_multiple_result(%arg0: tensor<77x4096xf16>, %arg
 //       CHECK:     pcf.write_slice
 //       CHECK:     pcf.return
 //       CHECK:   return %[[PRODUCER]], %[[RESULT]]
-
-// -----
-
-// FIXME: multi_slice_fusion_broadcast crashes with assertion failure
-// in MutableOperandRange when consumer fusion tries to add readonly/readwrite args.
-// func.func @multi_slice_fusion_broadcast(%arg0: index, %arg1: tensor<3x?x32xi64>,
-//      %arg2: tensor<256x32xf32>, %arg3: tensor<32xf32>)
-//      -> (tensor<3x?x32x32xf32>, tensor<3x?x32x32xf32>) {
-//   ...
-// }
 
 // -----
 
