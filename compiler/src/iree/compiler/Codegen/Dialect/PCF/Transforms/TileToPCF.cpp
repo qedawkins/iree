@@ -31,15 +31,6 @@ static bool isTileSizeZero(OpFoldResult tileSize) {
   return false;
 }
 
-/// Computes the static size from an OpFoldResult for building result types.
-/// Returns ShapedType::kDynamic for dynamic values.
-static int64_t getStaticSize(OpFoldResult size) {
-  if (auto attr = dyn_cast<Attribute>(size)) {
-    return cast<IntegerAttr>(attr).getInt();
-  }
-  return ShapedType::kDynamic;
-}
-
 /// Core implementation of tileToPCFLoop. Templated to support both LoopOp
 /// and GenericOp, though only LoopOp is currently implemented.
 template <typename OpTy>
@@ -216,53 +207,15 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
         continue;
       }
 
-      // Determine which sref arg this operand maps to.
+      // Pass the sref block arg directly. The distributed implementation
+      // will read the appropriate tile based on the indexing map.
       Value sref;
       if (operandToReadonlySrefIdx[i] >= 0) {
         sref = readonlyRefs[operandToReadonlySrefIdx[i]];
       } else {
         sref = readwriteRefs[operandToReadwriteSrefIdx[i]];
       }
-
-      // Create ReadSliceOp to read a tile from the sref.
-      auto srefType = cast<ShapedRefType>(sref.getType());
-      int64_t srefRank = srefType.getRank();
-
-      // Compute the tile offsets/sizes for this operand. For now, we use
-      // the iteration domain offsets/sizes directly. This works for ops
-      // where the operand shape matches the iteration domain (like linalg
-      // ops with identity indexing maps). The getDistributedImplementation
-      // method is responsible for computing operand-specific tile positions
-      // from the iteration domain tile.
-      SmallVector<OpFoldResult> readOffsets(offsets.begin(), offsets.end());
-      SmallVector<OpFoldResult> readSizes(sizes.begin(), sizes.end());
-
-      // Build result type for the read.
-      SmallVector<int64_t> staticSizes;
-      staticSizes.reserve(srefRank);
-      for (int64_t dim = 0; dim < srefRank; ++dim) {
-        if (dim < numDims) {
-          staticSizes.push_back(getStaticSize(sizes[dim]));
-        } else {
-          staticSizes.push_back(srefType.getDimSize(dim));
-        }
-      }
-      RankedTensorType resultType =
-          RankedTensorType::get(staticSizes, srefType.getElementType());
-      SmallVector<OpFoldResult> strides(srefRank, rewriter.getIndexAttr(1));
-
-      // Pad offsets/sizes to match sref rank if needed.
-      while (static_cast<int64_t>(readOffsets.size()) < srefRank) {
-        readOffsets.push_back(rewriter.getIndexAttr(0));
-      }
-      while (static_cast<int64_t>(readSizes.size()) < srefRank) {
-        readSizes.push_back(
-            rewriter.getIndexAttr(srefType.getDimSize(readSizes.size())));
-      }
-
-      Value tile = ReadSliceOp::create(rewriter, loc, resultType, sref,
-                                       readOffsets, readSizes, strides);
-      operandInfo.push_back({tile, /*isTile=*/true});
+      operandInfo.push_back({sref, /*isTile=*/false});
     }
 
     // Step 8: Build DistributedResultInfo per result.
@@ -329,7 +282,11 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
   }
 
   // Step 11: Replace original op results with the PCF op results.
-  rewriter.replaceOp(op, loopOp.getResults());
+  if (op->getNumResults() == 0) {
+    rewriter.eraseOp(op);
+  } else {
+    rewriter.replaceOp(op, loopOp.getResults());
+  }
 
   if constexpr (std::is_same_v<OpTy, LoopOp>) {
     return loopOp;

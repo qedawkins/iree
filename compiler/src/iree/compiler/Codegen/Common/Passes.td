@@ -1121,6 +1121,25 @@ def TileAndDistributeToWorkgroupsUsingForallOpPass :
   ];
 }
 
+def TileAndDistributeToWorkgroupsUsingPCFPass :
+    InterfacePass<"iree-codegen-tile-and-distribute-to-workgroups-using-pcf",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Tile and distribute operation to workgroups using PCF.";
+  let description = [{
+    Tiles the root compute op into a pcf.loop using the workgroup scope and
+    tile sizes from the lowering config, then greedily fuses producers and
+    consumers into the loop using PCFTilingOpInterface.
+  }];
+  let dependentDialects = [
+    "affine::AffineDialect",
+    "IREE::Codegen::IREECodegenDialect",
+    "IREE::LinalgExt::IREELinalgExtDialect",
+    "IREE::PCF::PCFDialect",
+    "linalg::LinalgDialect",
+    "tensor::TensorDialect",
+  ];
+}
+
 def TileLargeTensorsPass :
     InterfacePass<"iree-codegen-tile-large-tensors", "mlir::FunctionOpInterface"> {
   let summary = "Greedily tiles all linalg ops that are beyond a certain size";

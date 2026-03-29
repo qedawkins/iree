@@ -17,6 +17,7 @@ iree_lit_test_suite(
     "control_flow_ops.mlir"
     "folders.mlir"
     "invalid.mlir"
+    "readonly_refs.mlir"
     "shared_executor.mlir"
     "to_sref.mlir"
     "types.mlir"

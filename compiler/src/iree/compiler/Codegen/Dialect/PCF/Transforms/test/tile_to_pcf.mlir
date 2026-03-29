@@ -15,7 +15,7 @@ func.func @tile_fill(%dest: tensor<16x32xf32>) -> tensor<16x32xf32> {
 //       CHECK:  %[[LOOP:.+]] = pcf.loop scope(#pcf.sequential)
 //  CHECK-SAME:    count(
 //       CHECK:    execute(%[[REF:.+]] = %[[DEST]])[%[[ID0:[A-Za-z0-9_]+]]: index, %[[ID1:[A-Za-z0-9_]+]]: index]
-//       CHECK:         : (!pcf.sref<16x32xf32, #pcf.sequential>)
+//       CHECK:         : (!pcf.sref<16x32xf32, sync(#pcf.sequential)>)
 //       CHECK:        -> (tensor<16x32xf32>) {
 //       CHECK:      %[[TILE:.+]] = pcf.read_slice %[[REF]]
 //       CHECK:      %[[FILLED:.+]] = linalg.fill ins(%[[CST]] : f32) outs(%[[TILE]]
@@ -39,7 +39,7 @@ func.func @tile_copy(%src: tensor<16x32xf32>, %dest: tensor<16x32xf32>) -> tenso
 //       CHECK:  %[[LOOP:.+]] = pcf.loop scope(#pcf.sequential)
 //  CHECK-SAME:    count(
 //       CHECK:    execute(%[[IN_REF:.+]] <- %[[SRC]], %[[OUT_REF:.+]] = %[[DEST]])[%[[ID0:[A-Za-z0-9_]+]]: index, %[[ID1:[A-Za-z0-9_]+]]: index]
-//       CHECK:         : (!pcf.sref<16x32xf32, #pcf.sequential>, !pcf.sref<16x32xf32, #pcf.sequential>)
+//       CHECK:         : (!pcf.sref<16x32xf32, #pcf.sequential>, !pcf.sref<16x32xf32, sync(#pcf.sequential)>)
 //       CHECK:        -> (tensor<16x32xf32>) {
 //       CHECK:      %[[IN_TILE:.+]] = pcf.read_slice %[[IN_REF]]
 //       CHECK:      %[[OUT_TILE:.+]] = pcf.read_slice %[[OUT_REF]]
@@ -72,7 +72,7 @@ func.func @tile_generic(%lhs: tensor<16x32xf32>, %dest: tensor<16x32xf32>) -> te
 //       CHECK:  %[[LOOP:.+]] = pcf.loop scope(#pcf.sequential)
 //  CHECK-SAME:    count(
 //       CHECK:    execute(%[[IN_REF:.+]] <- %[[LHS]], %[[OUT_REF:.+]] = %[[DEST]])[%[[ID0:[A-Za-z0-9_]+]]: index, %[[ID1:[A-Za-z0-9_]+]]: index]
-//       CHECK:         : (!pcf.sref<16x32xf32, #pcf.sequential>, !pcf.sref<16x32xf32, #pcf.sequential>)
+//       CHECK:         : (!pcf.sref<16x32xf32, #pcf.sequential>, !pcf.sref<16x32xf32, sync(#pcf.sequential)>)
 //       CHECK:        -> (tensor<16x32xf32>) {
 //       CHECK:      %[[LHS_TILE:.+]] = pcf.read_slice %[[IN_REF]]
 //       CHECK:      %[[DEST_TILE:.+]] = pcf.read_slice %[[OUT_REF]]
