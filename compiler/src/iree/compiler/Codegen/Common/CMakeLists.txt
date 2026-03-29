@@ -160,6 +160,7 @@ iree_cc_library(
     "TestPartitionableLoopsInterface.cpp"
     "TileAndFuseUtils.cpp"
     "TileDispatchUsingForall.cpp"
+    "TileDispatchUsingPCF.cpp"
     "TileDispatchUsingInterface.cpp"
     "TileInferenceUtils.cpp"
     "TileLargeTensors.cpp"
@@ -243,6 +244,7 @@ iree_cc_library(
     iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
     iree::compiler::Codegen::Dialect::GPU::TargetUtils::KnownTargets
     iree::compiler::Codegen::Dialect::PCF::IR
+    iree::compiler::Codegen::Dialect::PCF::TilingImplementations
     iree::compiler::Codegen::Dialect::PCF::Transforms
     iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect
     iree::compiler::Codegen::Dialect::VectorExt::Transforms::VectorExtTransforms

@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
 #define DEBUG_TYPE "iree-pcf-distributed-fuse-consumers"
@@ -82,27 +83,23 @@ LoopOp addReadonlyAndReadwriteArgs<LoopOp>(
   int64_t numOriginalResults = loopOp->getNumResults();
   int64_t numOriginalReadonlyRefs = loopOp.getNumReadonlyRefs();
 
-  // Use the full builder (resultTypes, scope, count, inits, dynamicSizes,
-  // isTied, syncOnReturn) but it doesn't support readonly inits.
-  // We need to build it manually.
+  // Create the new loop BEFORE the old loop using the full builder with
+  // readonly inits.
+  OpBuilder::InsertionGuard createGuard(rewriter);
+  rewriter.setInsertionPoint(loopOp);
   LoopOp newLoopOp = LoopOp::create(
       rewriter, loc, combinedResultTypes, loopOp.getScope(), loopOp.getCount(),
-      combinedInits, combinedDynamicSizes, combinedIsTied,
-      loopOp.getSyncOnReturn());
+      combinedReadonlyInits, combinedInits, combinedDynamicSizes,
+      combinedIsTied, loopOp.getSyncOnReturn());
 
-  // The full builder doesn't add readonly args. We need to add them manually.
-  // First move the body over, then fix up block args.
+  // Move the old body to the new loop.
   newLoopOp.getRegion().takeBody(loopOp.getRegion());
 
-  // The old body has block args laid out as:
+  // The old body has block args:
   //   [old_readonly_refs... | old_readwrite_refs... | id_args...]
-  // The new body needs:
-  //   [old_readonly_refs... new_readonly_refs... | old_readwrite_refs...
-  //    new_readwrite_refs... | id_args...]
-  //
-  // The full builder already added readwrite sref args for combinedInits
-  // and id args at the end. But we took the old body, so we need to insert
-  // the new args manually.
+  // The new builder created:
+  //   [combined_readonly_refs... | combined_readwrite_refs... | id_args...]
+  // After takeBody, we have the old layout. Insert new args.
 
   Block *body = newLoopOp.getBody();
 
@@ -119,11 +116,7 @@ LoopOp addReadonlyAndReadwriteArgs<LoopOp>(
     ++readonlyInsertIdx;
   }
 
-  // Insert new readwrite sref args after old readwrite refs (and after the
-  // newly inserted readonly refs).
-  // Old layout after readonly insertion:
-  //   [old_ro... new_ro... | old_rw... | id_args...]
-  // New readwrite args go before id_args.
+  // Insert new readwrite sref args before id args.
   int64_t numIdArgs = loopOp.getCount().size();
   int64_t readwriteInsertIdx =
       body->getNumArguments() - numIdArgs;
@@ -139,24 +132,6 @@ LoopOp addReadonlyAndReadwriteArgs<LoopOp>(
     newReadwriteRefs.push_back(arg);
     ++readwriteInsertIdx;
   }
-
-  // Update the num_readonly_refs property to include the new readonly args.
-  newLoopOp.setNumReadonlyRefs(numOriginalReadonlyRefs +
-                               newReadonlyInits.size());
-
-  // Update the operand segment sizes to include readonly inits.
-  // The full builder set readonlyInits segment to 0; fix it.
-  auto &props = newLoopOp.getProperties();
-  props.setOperandSegmentSizes(
-      {static_cast<int32_t>(loopOp.getCount().size()),
-       static_cast<int32_t>(combinedReadonlyInits.size()),
-       static_cast<int32_t>(combinedInits.size()),
-       static_cast<int32_t>(combinedDynamicSizes.size())});
-
-  // Add the readonly init operands. The full builder didn't include them.
-  // We need to rebuild the operand list. Since we can't easily insert operands,
-  // we'll set them via the mutable accessor.
-  newLoopOp.getReadonlyInitsMutable().assign(combinedReadonlyInits);
 
   // Replace old loop's results with corresponding new loop results.
   rewriter.replaceOp(loopOp,
@@ -193,7 +168,9 @@ GenericOp addReadonlyAndReadwriteArgs<GenericOp>(
   int64_t numOriginalResults = genericOp->getNumResults();
   int64_t numOriginalReadonlyRefs = genericOp.getNumReadonlyRefs();
 
-  // Create new GenericOp using the full builder.
+  // Create the new GenericOp BEFORE the old one (not inside its body).
+  OpBuilder::InsertionGuard createGuard(rewriter);
+  rewriter.setInsertionPoint(genericOp);
   GenericOp newGenericOp = GenericOp::create(
       rewriter, loc, combinedResultTypes, genericOp.getScope(), combinedInits,
       combinedDynamicSizes, combinedIsTied, genericOp.getNumIterators(),
@@ -306,14 +283,28 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
   DenseSet<unsigned> fusedOperandSet(params.operands.begin(),
                                      params.operands.end());
 
-  // Collect readonly inits for non-fused tileable operands.
+  // Collect readonly inits for non-fused tileable INPUT operands.
+  // DPS inits are handled separately as readwrite args (they produce results).
   SmallVector<Value> newReadonlyInits;
   // Map from consumer operand index to index in newReadonlyInits (-1 if not).
   SmallVector<int64_t> operandToNewReadonlyIdx(targetOp->getNumOperands(), -1);
+
+  // Build a set of DPS init operand indices for quick lookup.
+  DenseSet<unsigned> dpsInitIndices;
+  if (auto dpsOp = dyn_cast<DestinationStyleOpInterface>(*targetOp)) {
+    for (OpOperand &init : dpsOp.getDpsInitsMutable()) {
+      dpsInitIndices.insert(init.getOperandNumber());
+    }
+  }
+
   for (int64_t i = 0, e = targetOp->getNumOperands(); i < e; ++i) {
     unsigned idx = static_cast<unsigned>(i);
     if (fusedOperandSet.contains(idx)) {
       // Fused along — will use write_slice source.
+      continue;
+    }
+    if (dpsInitIndices.contains(idx)) {
+      // DPS init — will be handled as readwrite arg (not readonly).
       continue;
     }
     if (!tileableSet.contains(idx)) {
@@ -441,57 +432,27 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
     }
 
     if (operandToNewReadonlyIdx[i] >= 0) {
-      // Non-fused tileable operand: create pcf.read_slice from the new
-      // readonly sref arg.
+      // Non-fused tileable input operand: pass the readonly sref directly.
+      // The getDistributedImplementation method will read the correct tile
+      // based on the indexing map.
       BlockArgument sref = newReadonlyBlockArgs[operandToNewReadonlyIdx[i]];
-      auto srefType = cast<ShapedRefType>(sref.getType());
+      operandInfo.push_back({sref, /*isTile=*/false});
+      continue;
+    }
 
-      // Get result tile position for this operand's tile.
-      // We use the cloned op to compute operand tile from iteration domain.
-      SmallVector<OpFoldResult> operandOffsets, operandSizes;
-      [[maybe_unused]] LogicalResult tileRes =
-          clonedOp.getResultTilePosition(rewriter, idx, iterDomainOffsets,
-                                         iterDomainSizes, operandOffsets,
-                                         operandSizes);
-      // If getResultTilePosition fails, fall back to iteration domain
-      // offsets/sizes directly.
-      if (failed(tileRes)) {
-        operandOffsets = SmallVector<OpFoldResult>(iterDomainOffsets);
-        operandSizes = SmallVector<OpFoldResult>(iterDomainSizes);
-      }
-
-      // Build the read slice type.
-      int64_t srefRank = srefType.getRank();
-      SmallVector<int64_t> staticSizes;
-      staticSizes.reserve(srefRank);
-      for (int64_t dim = 0, de = std::min(srefRank,
-               static_cast<int64_t>(operandSizes.size())); dim < de; ++dim) {
-        if (auto attr = dyn_cast<Attribute>(operandSizes[dim])) {
-          staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
-        } else {
-          staticSizes.push_back(ShapedType::kDynamic);
+    // DPS init operand: pass the corresponding readwrite sref.
+    if (dpsInitIndices.contains(idx)) {
+      // Find which result this DPS init corresponds to.
+      auto dpsOp = cast<DestinationStyleOpInterface>(*targetOp);
+      int64_t readwriteIdx = 0;
+      for (OpOperand &init : dpsOp.getDpsInitsMutable()) {
+        if (init.getOperandNumber() == idx) {
+          break;
         }
+        ++readwriteIdx;
       }
-      // Pad remaining dimensions with original sref sizes.
-      for (int64_t dim = staticSizes.size(); dim < srefRank; ++dim) {
-        staticSizes.push_back(srefType.getDimSize(dim));
-      }
-      RankedTensorType readType =
-          RankedTensorType::get(staticSizes, srefType.getElementType());
-      SmallVector<OpFoldResult> strides(srefRank, rewriter.getIndexAttr(1));
-
-      // Pad offsets/sizes to match sref rank.
-      while (static_cast<int64_t>(operandOffsets.size()) < srefRank) {
-        operandOffsets.push_back(rewriter.getIndexAttr(0));
-      }
-      while (static_cast<int64_t>(operandSizes.size()) < srefRank) {
-        operandSizes.push_back(
-            rewriter.getIndexAttr(srefType.getDimSize(operandSizes.size())));
-      }
-
-      Value tile = ReadSliceOp::create(rewriter, loc, readType, sref,
-                                       operandOffsets, operandSizes, strides);
-      operandInfo.push_back({tile, /*isTile=*/true});
+      BlockArgument sref = newReadwriteBlockArgs[readwriteIdx];
+      operandInfo.push_back({sref, /*isTile=*/false});
       continue;
     }
 
@@ -515,29 +476,26 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
   assert(succeeded(tilingResult) &&
          "unexpected distributed implementation failure");
 
-  // Step 10: Handle returned tiled values. Write non-null results via
-  // pcf.write_slice.
-  unsigned numResults = clonedOp->getNumResults();
-  SmallVector<SmallVector<OpFoldResult>> resultOffsets(numResults);
-  SmallVector<SmallVector<OpFoldResult>> resultSizes(numResults);
-  for (auto [idx, v] : llvm::enumerate(clonedOp->getResults())) {
-    [[maybe_unused]] LogicalResult posRes = clonedOp.getResultTilePosition(
-        rewriter, idx, iterDomainOffsets, iterDomainSizes, resultOffsets[idx],
-        resultSizes[idx]);
-    assert(succeeded(posRes) &&
-           "unexpected failure to get result tile position");
-  }
-
-  OpFoldResult one = rewriter.getIndexAttr(1);
+  // Step 10: Handle returned tiled values. The getDistributedImplementation
+  // should have written results to the dest srefs when destSref was set.
+  // Only write remaining non-null tiled values (shouldn't happen in the
+  // common case where destSref was set for all results).
   for (int64_t i = 0; i < numConsumerResults; ++i) {
     Value tiledValue = tilingResult->tiledValues[i];
     if (!tiledValue) {
       // The implementation already wrote to the sref directly.
       continue;
     }
-    SmallVector<OpFoldResult> strides(resultOffsets[i].size(), one);
+    // Compute result tile position and write.
+    SmallVector<OpFoldResult> resOffsets, resSizes;
+    [[maybe_unused]] LogicalResult posRes = clonedOp.getResultTilePosition(
+        rewriter, i, iterDomainOffsets, iterDomainSizes, resOffsets, resSizes);
+    assert(succeeded(posRes) &&
+           "unexpected failure to get result tile position");
+    SmallVector<OpFoldResult> strides(resOffsets.size(),
+                                     rewriter.getIndexAttr(1));
     WriteSliceOp::create(rewriter, loc, tiledValue, resultInfo[i].destSref,
-                         resultOffsets[i], resultSizes[i], strides);
+                         resOffsets, resSizes, strides);
   }
 
   // Step 11: Clean up unrealized conversion casts.

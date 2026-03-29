@@ -188,10 +188,12 @@ def GenericOp : PCF_Op<"generic", [
     ```
   }];
   let arguments = (ins PCF_ScopeAttrInterface:$scope,
+      Variadic<AnyRankedTensorOrMemRef>:$readonlyInits,
       Variadic<AnyRankedTensorOrMemRef>:$inits, Variadic<Index>:$dynamic_sizes,
       ArrayProp<BoolProp>:$is_tied,
       DefaultValuedProp<BoolProp, "false">:$sync_on_return,
-      IntProp<"int64_t">:$num_index_args, IntProp<"int64_t">:$num_leading_args);
+      IntProp<"int64_t">:$num_index_args, IntProp<"int64_t">:$num_leading_args,
+      IntProp<"int64_t">:$num_readonly_refs);
 
   let results = (outs Variadic<AnyRankedTensorOrMemRef>:$results);
   let regions = (region
@@ -199,21 +201,7 @@ def GenericOp : PCF_Op<"generic", [
     MinSizedRegion<1>:$region
   );
 
-  let assemblyFormat = [{
-    (`sync` $sync_on_return^)?
-    `scope` `(` $scope `)`
-    (`initialize` $initializer^)?
-    custom<ParallelExecutionBody>($inits,
-                                  type($inits),
-                                  $dynamic_sizes,
-                                  type($results),
-                                  $is_tied,
-                                  $region,
-                                  $num_leading_args,
-                                  "true")
-    custom<InferNumIndexArgs>(ref($region), ref($num_leading_args), $num_index_args)
-    prop-dict attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 
   // The default builder does not add the proper body BBargs, roll our own.
@@ -234,18 +222,34 @@ def GenericOp : PCF_Op<"generic", [
           "ValueRange":$inits, "ValueRange":$dynamic_sizes,
           "ArrayRef<bool>":$is_tied, "int64_t":$num_iterators,
           CArg<"bool", "false">:$sync_on_return)>,
+      // Builder with readonly and readwrite inits.
+      OpBuilder<(ins "ScopeAttrInterface":$scope,
+          "ValueRange":$readonlyInits, "ValueRange":$inits,
+          "int64_t":$num_iterators,
+          CArg<"bool", "false">:$sync_on_return)>,
   ];
 
   let extraClassDeclaration = [{
     int64_t getNumIterators() {
       return getNumIndexArgs() / 2;
     }
+
     MutableArrayRef<BlockArgument> getLeadingArgsMutable() {
       return getRegion().getArguments().take_front(getNumLeadingArgs());
     }
     ArrayRef<BlockArgument> getLeadingArgs() {
       return getLeadingArgsMutable();
     }
+
+    /// Returns the readonly sref block arguments.
+    MutableArrayRef<BlockArgument> getReadonlyRefArgsMutable() {
+      int64_t start = getNumLeadingArgs();
+      return getRegion().getArguments().slice(start, getNumReadonlyRefs());
+    }
+    ArrayRef<BlockArgument> getReadonlyRefArgs() {
+      return getReadonlyRefArgsMutable();
+    }
+
     MutableArrayRef<BlockArgument> getIdArgsMutable() {
       return getRegion().getArguments().take_back(getNumIndexArgs()).take_front(getNumIterators());
     }
@@ -264,8 +268,11 @@ def GenericOp : PCF_Op<"generic", [
     ArrayRef<BlockArgument> getIdAndCountArgs() {
       return getIdAndCountArgsMutable();
     }
+
+    /// Returns the readwrite sref block arguments (skipping readonly refs).
     MutableArrayRef<BlockArgument> getRegionRefArgsMutable() {
-      return getRegion().getArguments().drop_front(getNumLeadingArgs()).take_front(getNumResults());
+      int64_t start = getNumLeadingArgs() + getNumReadonlyRefs();
+      return getRegion().getArguments().slice(start, getNumResults());
     }
     ArrayRef<BlockArgument> getRegionRefArgs() {
       return getRegionRefArgsMutable();
@@ -280,7 +287,8 @@ def GenericOp : PCF_Op<"generic", [
     OpResult getTiedResult(OpOperand &operand);
     OpResult getTiedResult(BlockArgument b) {
       assert(isRegionRefArg(b) && "unexpected non region ref arg");
-      return (*this)->getOpResult(b.getArgNumber() - getNumLeadingArgs());
+      int64_t readwriteStart = getNumLeadingArgs() + getNumReadonlyRefs();
+      return (*this)->getOpResult(b.getArgNumber() - readwriteStart);
     }
     OpOperand *getTiedInit(int64_t i);
     ShapedType getResultType(int64_t i) {
@@ -347,25 +355,16 @@ def LoopOp : PCF_Op<"loop", [
     ```
   }];
   let arguments = (ins PCF_ScopeAttrInterface:$scope, Variadic<Index>:$count,
+      Variadic<AnyRankedTensorOrMemRef>:$readonlyInits,
       Variadic<AnyRankedTensorOrMemRef>:$inits, Variadic<Index>:$dynamic_sizes,
       ArrayProp<BoolProp>:$is_tied,
-      DefaultValuedProp<BoolProp, "false">:$sync_on_return);
+      DefaultValuedProp<BoolProp, "false">:$sync_on_return,
+      IntProp<"int64_t">:$num_readonly_refs);
 
   let results = (outs Variadic<AnyRankedTensorOrMemRef>:$results);
   let regions = (region AnyRegion:$region);
 
-  let assemblyFormat = [{
-    (`sync` $sync_on_return^)?
-    `scope` `(` $scope `)`
-    `count` `(` $count `)`
-    custom<ParallelExecutionBody>($inits,
-                                  type($inits),
-                                  $dynamic_sizes,
-                                  type($results),
-                                  $is_tied,
-                                  $region)
-    prop-dict attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 
   // The default builder does not add the proper body BBargs, roll our own.
@@ -381,9 +380,18 @@ def LoopOp : PCF_Op<"loop", [
       OpBuilder<(ins "TypeRange":$result_types, "ScopeAttrInterface":$scope,
           "ValueRange":$count, "ValueRange":$dynamic_sizes,
           CArg<"bool", "false">:$sync_on_return)>,
-      // Builder with everything.
+      // Builder with everything (no readonly).
       OpBuilder<(ins "TypeRange":$result_types, "ScopeAttrInterface":$scope,
           "ValueRange":$count, "ValueRange":$inits, "ValueRange":$dynamic_sizes,
+          "ArrayRef<bool>":$is_tied, CArg<"bool", "false">:$sync_on_return)>,
+      // Builder with readonly and readwrite inits (types inferred).
+      OpBuilder<(ins "ScopeAttrInterface":$scope, "ValueRange":$count,
+          "ValueRange":$readonlyInits, "ValueRange":$inits,
+          CArg<"bool", "false">:$sync_on_return)>,
+      // Builder with everything including readonly.
+      OpBuilder<(ins "TypeRange":$result_types, "ScopeAttrInterface":$scope,
+          "ValueRange":$count, "ValueRange":$readonlyInits,
+          "ValueRange":$inits, "ValueRange":$dynamic_sizes,
           "ArrayRef<bool>":$is_tied, CArg<"bool", "false">:$sync_on_return)>,
   ];
 
@@ -391,14 +399,26 @@ def LoopOp : PCF_Op<"loop", [
     int64_t getNumIdArgs() {
       return getCount().size();
     }
+
+    /// Returns the readonly sref block arguments.
+    MutableArrayRef<BlockArgument> getReadonlyRefArgsMutable() {
+      return getRegion().getArguments().take_front(getNumReadonlyRefs());
+    }
+    ArrayRef<BlockArgument> getReadonlyRefArgs() {
+      return getReadonlyRefArgsMutable();
+    }
+
     MutableArrayRef<BlockArgument> getIdArgsMutable() {
       return getRegion().getArguments().take_back(getNumIdArgs());
     }
     ArrayRef<BlockArgument> getIdArgs() {
       return getIdArgsMutable();
     }
+
+    /// Returns the readwrite sref block arguments (skipping readonly refs).
     MutableArrayRef<BlockArgument> getRegionRefArgsMutable() {
-      return getRegion().getArguments().take_front(getNumResults());
+      int64_t start = getNumReadonlyRefs();
+      return getRegion().getArguments().slice(start, getNumResults());
     }
     ArrayRef<BlockArgument> getRegionRefArgs() {
       return getRegionRefArgsMutable();
@@ -407,7 +427,8 @@ def LoopOp : PCF_Op<"loop", [
     SmallVector<int64_t> getInitTiedResultIndices();
     OpResult getTiedResult(OpOperand &operand);
     OpResult getTiedResult(BlockArgument b) {
-      return (*this)->getOpResult(b.getArgNumber());
+      int64_t readwriteStart = getNumReadonlyRefs();
+      return (*this)->getOpResult(b.getArgNumber() - readwriteStart);
     }
     OpOperand *getTiedInit(int64_t i);
     ShapedType getResultType(int64_t i) {

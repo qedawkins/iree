@@ -68,6 +68,7 @@ static LogicalResult verifyParallelBodyOp(OpTy op, int64_t numLeadingArgs,
   // Verify tied/token array lengths.
   ArrayRef<bool> isTied = op.getIsTied();
   int64_t numResults = op.getNumResults();
+  int64_t numReadonly = op.getNumReadonlyRefs();
   if (isTied.size() != numResults) {
     return op.emitOpError(
                "`is_tied` mask length expected to match number of results ")
@@ -83,9 +84,9 @@ static LogicalResult verifyParallelBodyOp(OpTy op, int64_t numLeadingArgs,
   }
 
   if (op.getRegion().getArguments().size() !=
-      numLeadingArgs + numResults + numIndexBodyArgs) {
+      numLeadingArgs + numReadonly + numResults + numIndexBodyArgs) {
     return op.emitOpError("expected region to have |numLeadingArgs| + "
-                          "|numIndexArgs| + |numResults| "
+                          "|numReadonlyRefs| + |numIndexArgs| + |numResults| "
                           "total arguments");
   }
 
@@ -97,6 +98,19 @@ static LogicalResult verifyParallelBodyOp(OpTy op, int64_t numLeadingArgs,
   }
 
   PCF::ScopeAttrInterface scope = op.getScope();
+
+  // Verify readonly sref args.
+  for (BlockArgument refArg : op.getReadonlyRefArgs()) {
+    auto srefType = dyn_cast<PCF::ShapedRefType>(refArg.getType());
+    if (!srefType || srefType.getScope() != scope) {
+      return op.emitOpError(
+                 "expected readonly region argument to be of type !pcf.sref "
+                 "with scope ")
+             << scope;
+    }
+  }
+
+  // Verify readwrite sref args.
   int64_t currIsTiedIndex = 0;
   int64_t currResultIndex = 0;
   for (auto [resultType, refArg, isTied] : llvm::zip_equal(
@@ -142,12 +156,17 @@ static LogicalResult verifyParallelBodyOp(OpTy op, int64_t numLeadingArgs,
   return success();
 }
 
+/// Parses the execute body for pcf.generic and pcf.loop ops.
+/// Handles both readonly (`<-`) and readwrite (`=`) bindings.
 static ParseResult parseParallelExecutionBody(
-    OpAsmParser &parser, SmallVectorImpl<OpAsmParser::UnresolvedOperand> &inits,
+    OpAsmParser &parser,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &readonlyInits,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &inits,
     SmallVectorImpl<Type> &initTypes,
     SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dynamicSizes,
     SmallVectorImpl<Type> &resultTypes, SmallVectorImpl<bool> &isTied,
-    Region &body, int64_t &numLeadingArgs, bool parseOptionalLeadingArgs) {
+    Region &body, int64_t &numLeadingArgs, int64_t &numReadonlyRefs,
+    bool parseOptionalLeadingArgs) {
   SmallVector<OpAsmParser::Argument> regionLeadingArgs;
   if (parseOptionalLeadingArgs) {
     if (succeeded(parser.parseOptionalArrow())) {
@@ -166,20 +185,32 @@ static ParseResult parseParallelExecutionBody(
     return failure();
   }
 
-  SmallVector<OpAsmParser::Argument> regionRefArgs;
+  SmallVector<OpAsmParser::Argument> readonlyRefArgs;
+  SmallVector<OpAsmParser::Argument> readwriteRefArgs;
   if (succeeded(parser.parseOptionalLParen())) {
     do {
-      // Reserve entries in the lists.
-      regionRefArgs.emplace_back();
+      OpAsmParser::Argument refArg;
       SMLoc argLoc = parser.getCurrentLocation();
-      if (failed(parser.parseArgument(regionRefArgs.back(),
-                                      /*allowType=*/false,
+      if (failed(parser.parseArgument(refArg, /*allowType=*/false,
                                       /*allowAttrs=*/true))) {
         return parser.emitError(argLoc, "failed to parse region ref argument");
       }
 
-      // Parse the tied init if present.
-      if (succeeded(parser.parseOptionalEqual())) {
+      // "<-" is parsed as two tokens: '<' then '-'.
+      if (succeeded(parser.parseOptionalLess())) {
+        if (parser.parseMinus()) {
+          return failure();
+        }
+        readonlyRefArgs.push_back(refArg);
+        readonlyInits.emplace_back();
+        SMLoc initLoc = parser.getCurrentLocation();
+        if (failed(parser.parseOperand(readonlyInits.back()))) {
+          return parser.emitError(initLoc,
+                                  "failed to parse readonly init operand");
+        }
+      } else if (succeeded(parser.parseOptionalEqual())) {
+        // Readwrite tied init.
+        readwriteRefArgs.push_back(refArg);
         inits.emplace_back();
         SMLoc initLoc = parser.getCurrentLocation();
         if (failed(parser.parseOperand(inits.back()))) {
@@ -187,6 +218,8 @@ static ParseResult parseParallelExecutionBody(
         }
         isTied.push_back(true);
       } else {
+        // Readwrite untied.
+        readwriteRefArgs.push_back(refArg);
         isTied.push_back(false);
       }
     } while (succeeded(parser.parseOptionalComma()));
@@ -194,6 +227,8 @@ static ParseResult parseParallelExecutionBody(
       return failure();
     }
   }
+
+  numReadonlyRefs = readonlyRefArgs.size();
 
   SMLoc indexArgsLoc = parser.getCurrentLocation();
   SmallVector<OpAsmParser::Argument> indexArgs;
@@ -204,107 +239,119 @@ static ParseResult parseParallelExecutionBody(
                             "failed to parse index arguments list");
   }
 
+  // Combine all ref args for type parsing.
+  int64_t numRefs = readonlyRefArgs.size() + readwriteRefArgs.size();
+
   // If there is at least one region arg the arg types and op result types need
   // to be parsed.
-  if (!regionRefArgs.empty()) {
+  if (numRefs != 0) {
     if (failed(parser.parseColon())) {
       return failure();
     }
 
-    // Parse "(<type list>)" directly into the type fields of `regionRefArgs`.
-    auto it = regionRefArgs.begin();
+    // Parse "(<type list>)" directly into the type fields of ref args.
+    SmallVector<Type> srefTypes;
     SMLoc refTypesLoc = parser.getCurrentLocation();
     if (failed(parser.parseCommaSeparatedList(
             OpAsmParser::Delimiter::Paren, [&]() -> ParseResult {
-              if (it == regionRefArgs.end()) {
+              Type ty;
+              if (failed(parser.parseType(ty))) {
                 return failure();
               }
-              ParseResult p = parser.parseType(it->type);
-              ++it;
-              return p;
+              srefTypes.push_back(ty);
+              return success();
             }))) {
       return parser.emitError(refTypesLoc,
                               "failed to parse region ref argument types");
     }
-
-    if (failed(parser.parseArrow()) || failed(parser.parseLParen())) {
-      return failure();
+    if (srefTypes.size() != static_cast<size_t>(numRefs)) {
+      return parser.emitError(refTypesLoc,
+                              "sref type count does not match ref arg count");
     }
 
-    int64_t numResults = isTied.size();
-    resultTypes.resize(numResults);
-    for (auto [i, isTied] : llvm::enumerate(isTied)) {
-      SMLoc resultTypeLoc = parser.getCurrentLocation();
-      if (failed(parser.parseType(resultTypes[i]))) {
-        return parser.emitError(resultTypeLoc, "failed to parse result type");
-      }
+    // Assign sref types to readonly ref args.
+    for (auto [i, arg] : llvm::enumerate(readonlyRefArgs)) {
+      arg.type = srefTypes[i];
+    }
+    // Assign sref types to readwrite ref args.
+    for (auto [i, arg] : llvm::enumerate(readwriteRefArgs)) {
+      arg.type = srefTypes[readonlyRefArgs.size() + i];
+    }
 
-      ShapedType shapedType = dyn_cast<ShapedType>(resultTypes[i]);
-      if (!shapedType) {
-        return parser.emitError(resultTypeLoc,
-                                "result type must be a shaped type");
-      }
-
-      if (isTied) {
-        initTypes.push_back(resultTypes[i]);
-      } else if (!shapedType.hasStaticShape()) {
-        if (failed(parser.parseLBrace())) {
-          return failure();
-        }
-        // Only parse dynamic dims for non-tied operands.
-        SmallVector<OpAsmParser::UnresolvedOperand> dims;
-        if (failed(parser.parseOperandList(dims))) {
-          return failure();
-        }
-        size_t numDynamicDims = shapedType.getNumDynamicDims();
-        if (dims.size() != numDynamicDims) {
-          return parser.emitError(resultTypeLoc, "expected ")
-                 << numDynamicDims << " dynamic dimension operands for type "
-                 << shapedType << ", but got " << dims.size();
-        }
-        if (failed(parser.parseRBrace())) {
-          return failure();
-        }
-        dynamicSizes.append(dims);
-      }
-
-      if (i < numResults - 1 && failed(parser.parseComma())) {
+    // Parse optional result types "-> (types)".
+    if (!readwriteRefArgs.empty()) {
+      if (failed(parser.parseArrow()) || failed(parser.parseLParen())) {
         return failure();
       }
-    }
 
-    if (failed(parser.parseRParen())) {
-      return failure();
+      int64_t numResults = isTied.size();
+      resultTypes.resize(numResults);
+      for (auto [i, isTied] : llvm::enumerate(isTied)) {
+        SMLoc resultTypeLoc = parser.getCurrentLocation();
+        if (failed(parser.parseType(resultTypes[i]))) {
+          return parser.emitError(resultTypeLoc, "failed to parse result type");
+        }
+
+        ShapedType shapedType = dyn_cast<ShapedType>(resultTypes[i]);
+        if (!shapedType) {
+          return parser.emitError(resultTypeLoc,
+                                  "result type must be a shaped type");
+        }
+
+        if (isTied) {
+          initTypes.push_back(resultTypes[i]);
+        } else if (!shapedType.hasStaticShape()) {
+          if (failed(parser.parseLBrace())) {
+            return failure();
+          }
+          // Only parse dynamic dims for non-tied operands.
+          SmallVector<OpAsmParser::UnresolvedOperand> dims;
+          if (failed(parser.parseOperandList(dims))) {
+            return failure();
+          }
+          size_t numDynamicDims = shapedType.getNumDynamicDims();
+          if (dims.size() != numDynamicDims) {
+            return parser.emitError(resultTypeLoc, "expected ")
+                   << numDynamicDims << " dynamic dimension operands for type "
+                   << shapedType << ", but got " << dims.size();
+          }
+          if (failed(parser.parseRBrace())) {
+            return failure();
+          }
+          dynamicSizes.append(dims);
+        }
+
+        if (i < numResults - 1 && failed(parser.parseComma())) {
+          return failure();
+        }
+      }
+
+      if (failed(parser.parseRParen())) {
+        return failure();
+      }
     }
   }
 
   // The stored argument order is:
-  // (initialized vals) (result tied refs) (num threads).
+  // (leading args) (readonly refs) (readwrite refs) (index args).
   SmallVector<OpAsmParser::Argument> args;
   args.append(regionLeadingArgs);
-  args.append(regionRefArgs);
+  args.append(readonlyRefArgs);
+  args.append(readwriteRefArgs);
   args.append(indexArgs);
   return parser.parseRegion(body, args, /*enableNameShadowing=*/false);
 }
 
-static ParseResult parseParallelExecutionBody(
-    OpAsmParser &parser, SmallVectorImpl<OpAsmParser::UnresolvedOperand> &inits,
-    SmallVectorImpl<Type> &initTypes,
-    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dynamicSizes,
-    SmallVectorImpl<Type> &resultTypes, SmallVectorImpl<bool> &isTied,
-    Region &body) {
-  int64_t numLeadingArgs = 0;
-  return parseParallelExecutionBody(parser, inits, initTypes, dynamicSizes,
-                                    resultTypes, isTied, body, numLeadingArgs,
-                                    false);
-}
-
+/// Prints the execute body for pcf.generic and pcf.loop ops.
+/// Handles both readonly (`<-`) and readwrite (`=`) bindings.
 static void printParallelExecutionBody(
-    OpAsmPrinter &p, Operation *op, OperandRange inits, TypeRange initTypes,
-    OperandRange dynamicSizes, TypeRange resultTypes, ArrayRef<bool> isTied,
-    Region &body, int64_t numLeadingArgs, bool printOptionalLeadingArgs) {
+    OpAsmPrinter &p, Operation *op, OperandRange readonlyInits,
+    OperandRange inits, TypeRange initTypes, OperandRange dynamicSizes,
+    TypeRange resultTypes, ArrayRef<bool> isTied, Region &body,
+    int64_t numLeadingArgs, int64_t numReadonlyRefs,
+    bool printOptionalLeadingArgs) {
   if (printOptionalLeadingArgs && numLeadingArgs > 0) {
-    p << "-> (";
+    p << " -> (";
     MutableArrayRef<BlockArgument> leadingArgRange =
         body.getArguments().take_front(numLeadingArgs);
     llvm::interleaveComma(leadingArgRange, p, [&](BlockArgument arg) {
@@ -317,24 +364,36 @@ static void printParallelExecutionBody(
   p << "  execute";
 
   int64_t numResults = resultTypes.size();
-  int64_t numIndexArgs = body.getNumArguments() - numResults - numLeadingArgs;
+  int64_t numIndexArgs =
+      body.getNumArguments() - numResults - numReadonlyRefs - numLeadingArgs;
   MutableArrayRef<BlockArgument> threadCountArgRange =
       body.getArguments().take_back(numIndexArgs);
-  MutableArrayRef<BlockArgument> refArgRange =
-      body.getArguments().drop_back(numIndexArgs).take_back(numResults);
+  MutableArrayRef<BlockArgument> readonlyRefArgRange =
+      body.getArguments().slice(numLeadingArgs, numReadonlyRefs);
+  MutableArrayRef<BlockArgument> readwriteRefArgRange =
+      body.getArguments().slice(numLeadingArgs + numReadonlyRefs, numResults);
 
-  if (numResults != 0) {
+  int64_t numRefs = numReadonlyRefs + numResults;
+  if (numRefs != 0) {
     p << "(";
-    int64_t currInitIndex = 0;
-    for (int64_t i = 0, e = numResults; i < e; ++i) {
-      p << refArgRange[i];
-      if (isTied[i]) {
-        p << " = ";
-        p << inits[currInitIndex];
-        ++currInitIndex;
-      }
-      if (i < numResults - 1) {
+    int64_t currReadonlyInit = 0;
+    int64_t currReadwriteInit = 0;
+    for (int64_t i = 0, e = numRefs; i < e; ++i) {
+      if (i > 0) {
         p << ", ";
+      }
+      if (i < numReadonlyRefs) {
+        p << readonlyRefArgRange[i] << " <- ";
+        p << readonlyInits[currReadonlyInit];
+        ++currReadonlyInit;
+      } else {
+        int64_t rwIdx = i - numReadonlyRefs;
+        p << readwriteRefArgRange[rwIdx];
+        if (isTied[rwIdx]) {
+          p << " = ";
+          p << inits[currReadwriteInit];
+          ++currReadwriteInit;
+        }
       }
     }
     p << ")";
@@ -345,76 +404,58 @@ static void printParallelExecutionBody(
   p << "]";
 
   // Now print the function type.
-  if (numResults != 0) {
+  if (numRefs != 0) {
     p.printNewline();
     // Whitespace to line up parentheses.
     //   |--execute(
     //   |--_____: (
     p << "       : (";
-    llvm::interleaveComma(refArgRange, p,
+    SmallVector<BlockArgument> allRefArgs;
+    allRefArgs.append(readonlyRefArgRange.begin(), readonlyRefArgRange.end());
+    allRefArgs.append(readwriteRefArgRange.begin(), readwriteRefArgRange.end());
+    llvm::interleaveComma(allRefArgs, p,
                           [&](BlockArgument arg) { p << arg.getType(); });
     p << ")";
-    p.printNewline();
-    //   |--execute(
-    //   |--____-> (
-    p << "      -> (";
-    OperandRange currSizes = dynamicSizes;
-    for (int64_t i = 0, e = numResults; i < e; ++i) {
-      ShapedType resultType = cast<ShapedType>(resultTypes[i]);
-      bool isResultTied = isTied[i];
-      p << resultType;
-      if (!isResultTied && !resultType.hasStaticShape()) {
-        int64_t numDynamicDims = resultType.getNumDynamicDims();
-        p << "{";
-        llvm::interleaveComma(currSizes.take_front(numDynamicDims), p,
-                              [&](Value dim) { p << dim; });
-        currSizes = currSizes.drop_front(numDynamicDims);
-        p << "}";
+
+    if (numResults > 0) {
+      p.printNewline();
+      //   |--execute(
+      //   |--____-> (
+      p << "      -> (";
+      OperandRange currSizes = dynamicSizes;
+      for (int64_t i = 0, e = numResults; i < e; ++i) {
+        ShapedType resultType = cast<ShapedType>(resultTypes[i]);
+        bool isResultTied = isTied[i];
+        p << resultType;
+        if (!isResultTied && !resultType.hasStaticShape()) {
+          int64_t numDynamicDims = resultType.getNumDynamicDims();
+          p << "{";
+          llvm::interleaveComma(currSizes.take_front(numDynamicDims), p,
+                                [&](Value dim) { p << dim; });
+          currSizes = currSizes.drop_front(numDynamicDims);
+          p << "}";
+        }
+        if (i < numResults - 1) {
+          p << ", ";
+        }
       }
-      if (i < numResults - 1) {
-        p << ", ";
-      }
+      p << ") ";
+    } else {
+      // Readonly refs only, no results.
+      p << " ";
     }
-    p << ") ";
   } else {
-    // Print a space before the region brace if there are no loop results.
+    // Print a space before the region brace if there are no refs at all.
     p << " ";
   }
   p.printRegion(body, /*printEntryBlockArgs=*/false,
                 /*printBlockTerminators=*/true);
 }
 
-static void printParallelExecutionBody(OpAsmPrinter &p, Operation *op,
-                                       OperandRange inits, TypeRange initTypes,
-                                       OperandRange dynamicSizes,
-                                       TypeRange resultTypes,
-                                       ArrayRef<bool> isTied, Region &body) {
-  return printParallelExecutionBody(p, op, inits, initTypes, dynamicSizes,
-                                    resultTypes, isTied, body, 0, false);
-}
-
 //===----------------------------------------------------------------------===//
 // GenericOp
 //===----------------------------------------------------------------------===//
 
-static ParseResult parseInferNumIndexArgs(OpAsmParser &parser, Region &body,
-                                          int64_t &numLeadingArgs,
-                                          int64_t &numIndexArgs) {
-  numIndexArgs = 0;
-  for (BlockArgument bbArg :
-       llvm::reverse(body.getArguments().drop_front(numLeadingArgs))) {
-    if (!bbArg.getType().isIndex()) {
-      return success();
-    }
-    ++numIndexArgs;
-  }
-  return success();
-}
-
-static void printInferNumIndexArgs(OpAsmPrinter &, Operation *, Region &,
-                                   int64_t &, int64_t) {
-  // Nothing to do. The number of count args gets parsed solely from the region.
-}
 
 void GenericOp::getAsmBlockArgumentNames(Region &region,
                                          OpAsmSetValueNameFn setNameFn) {
@@ -429,9 +470,141 @@ void GenericOp::getAsmBlockArgumentNames(Region &region,
   for (Value v : getCountArgs()) {
     setNameFn(v, "count");
   }
+  for (Value v : getReadonlyRefArgs()) {
+    setNameFn(v, "ref");
+  }
   for (Value v : getRegionRefArgs()) {
     setNameFn(v, "ref");
   }
+}
+
+ParseResult GenericOp::parse(OpAsmParser &parser, OperationState &result) {
+  // Parse optional "sync true".
+  bool syncOnReturn = false;
+  if (succeeded(parser.parseOptionalKeyword("sync"))) {
+    if (parser.parseKeyword("true")) {
+      return failure();
+    }
+    syncOnReturn = true;
+  }
+
+  // Parse "scope" "(" #attr ")".
+  ScopeAttrInterface scope;
+  if (parser.parseKeyword("scope") || parser.parseLParen() ||
+      parser.parseAttribute(scope) || parser.parseRParen()) {
+    return failure();
+  }
+  result.addAttribute(GenericOp::getScopeAttrName(result.name), scope);
+
+  // Parse optional initializer region + leading args binding.
+  Region *initializer = result.addRegion();
+  if (succeeded(parser.parseOptionalKeyword("initialize"))) {
+    if (parser.parseRegion(*initializer)) {
+      return failure();
+    }
+  }
+
+  // Parse the execute body.
+  Region *body = result.addRegion();
+  SmallVector<OpAsmParser::UnresolvedOperand> readonlyInits;
+  SmallVector<OpAsmParser::UnresolvedOperand> inits;
+  SmallVector<Type> initTypes;
+  SmallVector<OpAsmParser::UnresolvedOperand> dynamicSizes;
+  SmallVector<Type> resultTypes;
+  SmallVector<bool> isTied;
+  int64_t numLeadingArgs = 0;
+  int64_t numReadonlyRefs = 0;
+  if (failed(parseParallelExecutionBody(parser, readonlyInits, inits, initTypes,
+                                        dynamicSizes, resultTypes, isTied,
+                                        *body, numLeadingArgs, numReadonlyRefs,
+                                        /*parseOptionalLeadingArgs=*/true))) {
+    return failure();
+  }
+
+  // Infer number of index args from the trailing index-typed block args.
+  int64_t numIndexArgs = 0;
+  for (BlockArgument bbArg : llvm::reverse(
+           body->getArguments().drop_front(numLeadingArgs))) {
+    if (!bbArg.getType().isIndex()) {
+      break;
+    }
+    ++numIndexArgs;
+  }
+
+  // Parse optional prop-dict and attr-dict.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  // Resolve readonly init operands. Types inferred from sref types.
+  SmallVector<Type> readonlyInitTypes;
+  ArrayRef<BlockArgument> readonlyArgs =
+      body->getArguments().slice(numLeadingArgs, numReadonlyRefs);
+  for (int64_t i = 0, e = numReadonlyRefs; i < e; ++i) {
+    ShapedRefType srefType = cast<ShapedRefType>(readonlyArgs[i].getType());
+    readonlyInitTypes.push_back(
+        RankedTensorType::get(srefType.getShape(), srefType.getElementType()));
+  }
+  if (parser.resolveOperands(readonlyInits, readonlyInitTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  // Resolve readwrite init operands.
+  if (parser.resolveOperands(inits, initTypes, parser.getCurrentLocation(),
+                             result.operands)) {
+    return failure();
+  }
+
+  // Resolve dynamic size operands.
+  SmallVector<Type> indexTypes(dynamicSizes.size(),
+                               parser.getBuilder().getIndexType());
+  if (parser.resolveOperands(dynamicSizes, indexTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  result.addTypes(resultTypes);
+
+  // Set properties.
+  Properties &props = result.getOrAddProperties<Properties>();
+  props.setOperandSegmentSizes(
+      {static_cast<int32_t>(readonlyInits.size()),
+       static_cast<int32_t>(inits.size()),
+       static_cast<int32_t>(dynamicSizes.size())});
+  props.setIsTied(isTied);
+  props.setSyncOnReturn(syncOnReturn);
+  props.setNumIndexArgs(numIndexArgs);
+  props.setNumLeadingArgs(numLeadingArgs);
+  props.setNumReadonlyRefs(numReadonlyRefs);
+
+  return success();
+}
+
+void GenericOp::print(OpAsmPrinter &p) {
+  if (getSyncOnReturn()) {
+    p << " sync true";
+  }
+  p << " scope(";
+  p.printAttribute(getScope());
+  p << ")";
+
+  // Print optional initializer region.
+  if (!getInitializer().empty()) {
+    p << " initialize ";
+    p.printRegion(getInitializer(), /*printEntryBlockArgs=*/false,
+                  /*printBlockTerminators=*/true);
+  }
+
+  printParallelExecutionBody(p, getOperation(), getReadonlyInits(), getInits(),
+                             getInits().getTypes(), getDynamicSizes(),
+                             getResultTypes(), getIsTied(), getRegion(),
+                             getNumLeadingArgs(), getNumReadonlyRefs(),
+                             /*printOptionalLeadingArgs=*/true);
+
+  SmallVector<StringRef> elidedAttrs = {getScopeAttrName().getValue(),
+                                        getOperandSegmentSizesAttrName()};
+  p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
 }
 
 LogicalResult GenericOp::verify() {
@@ -480,17 +653,19 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
                       bool syncOnReturn) {
 
   result.addAttribute(GenericOp::getScopeAttrName(result.name), scope);
+  // No readonly inits for this builder.
   result.addOperands(inits);
   result.addOperands(dynamicSizes);
   result.addTypes(resultTypes);
 
   Properties &inherentAttrs = result.getOrAddProperties<Properties>();
   inherentAttrs.setOperandSegmentSizes(
-      {static_cast<int32_t>(inits.size()),
+      {/*readonlyInits=*/0, static_cast<int32_t>(inits.size()),
        static_cast<int32_t>(dynamicSizes.size())});
   inherentAttrs.setIsTied(isTied);
   inherentAttrs.setSyncOnReturn(syncOnReturn);
   inherentAttrs.setNumIndexArgs(2 * numIterators);
+  inherentAttrs.setNumReadonlyRefs(0);
 
   // Add the initializer region.
   result.addRegion();
@@ -503,9 +678,9 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
 
   // Add block arguments.
 
-  // sref args.
+  // Readwrite sref args.
   for (Type resultType : resultTypes) {
-    auto shapedType = cast<ShapedType>(resultType);
+    ShapedType shapedType = cast<ShapedType>(resultType);
     entryBlock.addArgument(
         PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
                                 shapedType.getElementType(), scope),
@@ -519,11 +694,70 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
   }
 }
 
+void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
+                      ScopeAttrInterface scope, ValueRange readonlyInits,
+                      ValueRange inits, int64_t numIterators,
+                      bool syncOnReturn) {
+  SmallVector<bool> isTied(inits.size(), true);
+  SmallVector<Type> resultTypes =
+      llvm::map_to_vector(inits, [](Value v) -> Type { return v.getType(); });
+
+  result.addAttribute(GenericOp::getScopeAttrName(result.name), scope);
+  result.addOperands(readonlyInits);
+  result.addOperands(inits);
+  result.addTypes(resultTypes);
+
+  Properties &inherentAttrs = result.getOrAddProperties<Properties>();
+  inherentAttrs.setOperandSegmentSizes(
+      {static_cast<int32_t>(readonlyInits.size()),
+       static_cast<int32_t>(inits.size()),
+       /*dynamicSizes=*/0});
+  inherentAttrs.setIsTied(isTied);
+  inherentAttrs.setSyncOnReturn(syncOnReturn);
+  inherentAttrs.setNumIndexArgs(2 * numIterators);
+  inherentAttrs.setNumReadonlyRefs(readonlyInits.size());
+
+  // Add the initializer region.
+  result.addRegion();
+
+  // Add the main region.
+  Region *region = result.addRegion();
+  OpBuilder::InsertionGuard g(b);
+  b.createBlock(region);
+  Block &entryBlock = region->front();
+
+  // Readonly sref args — no sync scope needed since they are never written.
+  for (Value init : readonlyInits) {
+    ShapedType shapedType = cast<ShapedType>(init.getType());
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope),
+        result.location);
+  }
+
+  // Readwrite sref args (with SyncOnReturn semantics).
+  Attribute syncScope = PCF::SyncOnReturnAttr::get(b.getContext());
+  for (Type resultType : resultTypes) {
+    ShapedType shapedType = cast<ShapedType>(resultType);
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope,
+                                syncScope),
+        result.location);
+  }
+
+  // Thread count/id args.
+  Type indexType = b.getIndexType();
+  for (int64_t i = 0; i < 2 * numIterators; ++i) {
+    entryBlock.addArgument(indexType, result.location);
+  }
+}
+
 bool GenericOp::isRegionRefArg(BlockArgument b) {
   assert(b.getOwner() == &getRegion().front() &&
          "unexpected non-entry block arg");
-  int64_t rangeBegin = getNumLeadingArgs();
-  int64_t rangeEnd = getNumLeadingArgs() + getNumResults();
+  int64_t rangeBegin = getNumLeadingArgs() + getNumReadonlyRefs();
+  int64_t rangeEnd = rangeBegin + getNumResults();
   return b.getArgNumber() >= rangeBegin && b.getArgNumber() < rangeEnd;
 }
 
@@ -595,9 +829,132 @@ void LoopOp::getAsmBlockArgumentNames(Region &region,
   for (Value v : getIdArgs()) {
     setNameFn(v, "id");
   }
+  for (Value v : getReadonlyRefArgs()) {
+    setNameFn(v, "ref");
+  }
   for (Value v : getRegionRefArgs()) {
     setNameFn(v, "ref");
   }
+}
+
+ParseResult LoopOp::parse(OpAsmParser &parser, OperationState &result) {
+  // Parse optional "sync true".
+  bool syncOnReturn = false;
+  if (succeeded(parser.parseOptionalKeyword("sync"))) {
+    if (parser.parseKeyword("true")) {
+      return failure();
+    }
+    syncOnReturn = true;
+  }
+
+  // Parse "scope" "(" #attr ")".
+  ScopeAttrInterface scope;
+  if (parser.parseKeyword("scope") || parser.parseLParen() ||
+      parser.parseAttribute(scope) || parser.parseRParen()) {
+    return failure();
+  }
+  result.addAttribute(LoopOp::getScopeAttrName(result.name), scope);
+
+  // Parse "count" "(" operands ")".
+  SmallVector<OpAsmParser::UnresolvedOperand> countOperands;
+  if (parser.parseKeyword("count") || parser.parseLParen() ||
+      parser.parseOperandList(countOperands) || parser.parseRParen()) {
+    return failure();
+  }
+
+  // Resolve count operands as index types.
+  SmallVector<Type> countTypes(countOperands.size(),
+                                parser.getBuilder().getIndexType());
+  if (parser.resolveOperands(countOperands, countTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  // Parse the execute body.
+  Region *body = result.addRegion();
+  SmallVector<OpAsmParser::UnresolvedOperand> readonlyInits;
+  SmallVector<OpAsmParser::UnresolvedOperand> inits;
+  SmallVector<Type> initTypes;
+  SmallVector<OpAsmParser::UnresolvedOperand> dynamicSizes;
+  SmallVector<Type> resultTypes;
+  SmallVector<bool> isTied;
+  int64_t numLeadingArgs = 0;
+  int64_t numReadonlyRefs = 0;
+  if (failed(parseParallelExecutionBody(parser, readonlyInits, inits, initTypes,
+                                        dynamicSizes, resultTypes, isTied,
+                                        *body, numLeadingArgs, numReadonlyRefs,
+                                        /*parseOptionalLeadingArgs=*/false))) {
+    return failure();
+  }
+
+  // Parse optional prop-dict and attr-dict.
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+
+  // Resolve readonly init operands. Types inferred from sref types.
+  SmallVector<Type> readonlyInitTypes;
+  ArrayRef<BlockArgument> readonlyArgs =
+      body->getArguments().take_front(numReadonlyRefs);
+  for (int64_t i = 0, e = numReadonlyRefs; i < e; ++i) {
+    ShapedRefType srefType = cast<ShapedRefType>(readonlyArgs[i].getType());
+    readonlyInitTypes.push_back(
+        RankedTensorType::get(srefType.getShape(), srefType.getElementType()));
+  }
+  if (parser.resolveOperands(readonlyInits, readonlyInitTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  // Resolve readwrite init operands.
+  if (parser.resolveOperands(inits, initTypes, parser.getCurrentLocation(),
+                             result.operands)) {
+    return failure();
+  }
+
+  // Resolve dynamic size operands.
+  SmallVector<Type> indexTypes(dynamicSizes.size(),
+                               parser.getBuilder().getIndexType());
+  if (parser.resolveOperands(dynamicSizes, indexTypes,
+                             parser.getCurrentLocation(), result.operands)) {
+    return failure();
+  }
+
+  result.addTypes(resultTypes);
+
+  // Set properties.
+  Properties &props = result.getOrAddProperties<Properties>();
+  props.setOperandSegmentSizes(
+      {static_cast<int32_t>(countOperands.size()),
+       static_cast<int32_t>(readonlyInits.size()),
+       static_cast<int32_t>(inits.size()),
+       static_cast<int32_t>(dynamicSizes.size())});
+  props.setIsTied(isTied);
+  props.setSyncOnReturn(syncOnReturn);
+  props.setNumReadonlyRefs(numReadonlyRefs);
+
+  return success();
+}
+
+void LoopOp::print(OpAsmPrinter &p) {
+  if (getSyncOnReturn()) {
+    p << " sync true";
+  }
+  p << " scope(";
+  p.printAttribute(getScope());
+  p << ") count(";
+  llvm::interleaveComma(getCount(), p, [&](Value v) { p << v; });
+  p << ")";
+
+  printParallelExecutionBody(p, getOperation(), getReadonlyInits(), getInits(),
+                             getInits().getTypes(), getDynamicSizes(),
+                             getResultTypes(), getIsTied(), getRegion(),
+                             /*numLeadingArgs=*/0, getNumReadonlyRefs(),
+                             /*printOptionalLeadingArgs=*/false);
+
+  SmallVector<StringRef> elidedAttrs = {getScopeAttrName().getValue(),
+                                        getOperandSegmentSizesAttrName()};
+  p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
 }
 
 LogicalResult LoopOp::verify() {
@@ -644,16 +1001,19 @@ void LoopOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
 
   result.addAttribute(LoopOp::getScopeAttrName(result.name), scope);
   result.addOperands(count);
+  // No readonly inits for this builder.
   result.addOperands(inits);
   result.addOperands(dynamicSizes);
   result.addTypes(resultTypes);
 
   Properties &inherentAttrs = result.getOrAddProperties<Properties>();
   inherentAttrs.setOperandSegmentSizes(
-      {static_cast<int32_t>(count.size()), static_cast<int32_t>(inits.size()),
+      {static_cast<int32_t>(count.size()),
+       /*readonlyInits=*/0, static_cast<int32_t>(inits.size()),
        static_cast<int32_t>(dynamicSizes.size())});
   inherentAttrs.setIsTied(isTied);
   inherentAttrs.setSyncOnReturn(syncOnReturn);
+  inherentAttrs.setNumReadonlyRefs(0);
 
   Region *region = result.addRegion();
   OpBuilder::InsertionGuard g(b);
@@ -662,12 +1022,124 @@ void LoopOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
 
   // Add block arguments.
 
-  // sref args.
+  // Readwrite sref args.
   for (Type resultType : resultTypes) {
-    auto shapedType = cast<ShapedType>(resultType);
+    ShapedType shapedType = cast<ShapedType>(resultType);
     entryBlock.addArgument(
         PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
                                 shapedType.getElementType(), scope),
+        result.location);
+  }
+
+  // Thread count args.
+  Type indexType = b.getIndexType();
+  int64_t numCountArgs = count.empty() ? 1 : count.size();
+  for (int64_t i = 0; i < numCountArgs; ++i) {
+    entryBlock.addArgument(indexType, result.location);
+  }
+}
+
+void LoopOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
+                   ScopeAttrInterface scope, ValueRange count,
+                   ValueRange readonlyInits, ValueRange inits,
+                   bool syncOnReturn) {
+  SmallVector<bool> isTied(inits.size(), true);
+  SmallVector<Type> resultTypes =
+      llvm::map_to_vector(inits, [](Value v) -> Type { return v.getType(); });
+
+  result.addAttribute(LoopOp::getScopeAttrName(result.name), scope);
+  result.addOperands(count);
+  result.addOperands(readonlyInits);
+  result.addOperands(inits);
+  result.addTypes(resultTypes);
+
+  Properties &inherentAttrs = result.getOrAddProperties<Properties>();
+  inherentAttrs.setOperandSegmentSizes(
+      {static_cast<int32_t>(count.size()),
+       static_cast<int32_t>(readonlyInits.size()),
+       static_cast<int32_t>(inits.size()),
+       /*dynamicSizes=*/0});
+  inherentAttrs.setIsTied(isTied);
+  inherentAttrs.setSyncOnReturn(syncOnReturn);
+  inherentAttrs.setNumReadonlyRefs(readonlyInits.size());
+
+  Region *region = result.addRegion();
+  OpBuilder::InsertionGuard g(b);
+  b.createBlock(region);
+  Block &entryBlock = region->front();
+
+  // Readonly sref args — no sync scope needed since they are never written.
+  for (Value init : readonlyInits) {
+    ShapedType shapedType = cast<ShapedType>(init.getType());
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope),
+        result.location);
+  }
+
+  // Readwrite sref args (with SyncOnReturn semantics).
+  Attribute syncScope = PCF::SyncOnReturnAttr::get(b.getContext());
+  for (Type resultType : resultTypes) {
+    ShapedType shapedType = cast<ShapedType>(resultType);
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope,
+                                syncScope),
+        result.location);
+  }
+
+  // Thread count args.
+  Type indexType = b.getIndexType();
+  int64_t numCountArgs = count.empty() ? 1 : count.size();
+  for (int64_t i = 0; i < numCountArgs; ++i) {
+    entryBlock.addArgument(indexType, result.location);
+  }
+}
+
+void LoopOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
+                   TypeRange resultTypes, ScopeAttrInterface scope,
+                   ValueRange count, ValueRange readonlyInits, ValueRange inits,
+                   ValueRange dynamicSizes, ArrayRef<bool> isTied,
+                   bool syncOnReturn) {
+  result.addAttribute(LoopOp::getScopeAttrName(result.name), scope);
+  result.addOperands(count);
+  result.addOperands(readonlyInits);
+  result.addOperands(inits);
+  result.addOperands(dynamicSizes);
+  result.addTypes(resultTypes);
+
+  Properties &inherentAttrs = result.getOrAddProperties<Properties>();
+  inherentAttrs.setOperandSegmentSizes(
+      {static_cast<int32_t>(count.size()),
+       static_cast<int32_t>(readonlyInits.size()),
+       static_cast<int32_t>(inits.size()),
+       static_cast<int32_t>(dynamicSizes.size())});
+  inherentAttrs.setIsTied(isTied);
+  inherentAttrs.setSyncOnReturn(syncOnReturn);
+  inherentAttrs.setNumReadonlyRefs(readonlyInits.size());
+
+  Region *region = result.addRegion();
+  OpBuilder::InsertionGuard g(b);
+  b.createBlock(region);
+  Block &entryBlock = region->front();
+
+  // Readonly sref args — no sync scope needed since they are never written.
+  for (Value init : readonlyInits) {
+    ShapedType shapedType = cast<ShapedType>(init.getType());
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope),
+        result.location);
+  }
+
+  // Readwrite sref args (with SyncOnReturn semantics).
+  Attribute syncScope = PCF::SyncOnReturnAttr::get(b.getContext());
+  for (Type resultType : resultTypes) {
+    ShapedType shapedType = cast<ShapedType>(resultType);
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope,
+                                syncScope),
         result.location);
   }
 
@@ -2192,8 +2664,10 @@ OpFoldResult ReadSliceOp::fold(FoldAdaptor adaptor) {
   SmallVector<OpFoldResult> mixedStrides = getMixedStrides();
 
   // Try to fold dynamic offsets/strides to static.
-  if (failed(foldDynamicIndexList(mixedOffsets, /*onlyNonNegative=*/true)) &&
-      failed(foldDynamicIndexList(mixedStrides))) {
+  bool foldedOffsets =
+      succeeded(foldDynamicIndexList(mixedOffsets, /*onlyNonNegative=*/true));
+  bool foldedStrides = succeeded(foldDynamicIndexList(mixedStrides));
+  if (!foldedOffsets && !foldedStrides) {
     return {};
   }
 
@@ -2205,12 +2679,27 @@ OpFoldResult ReadSliceOp::fold(FoldAdaptor adaptor) {
   dispatchIndexOpFoldResults(mixedOffsets, dynamicOffsets, staticOffsets);
   dispatchIndexOpFoldResults(mixedStrides, dynamicStrides, staticStrides);
 
-  // Update the op's attributes in-place.
-  setStaticOffsetsAttr(builder.getDenseI64ArrayAttr(staticOffsets));
-  setStaticStridesAttr(builder.getDenseI64ArrayAttr(staticStrides));
-  getOffsetsMutable().assign(dynamicOffsets);
-  getStridesMutable().assign(dynamicStrides);
+  // Only update if something actually changed to avoid infinite notification
+  // loops in the greedy pattern driver.
+  bool changed = false;
+  if (foldedOffsets) {
+    SmallVector<int64_t> oldOffsets(getStaticOffsets());
+    if (staticOffsets != oldOffsets) {
+      setStaticOffsetsAttr(builder.getDenseI64ArrayAttr(staticOffsets));
+      getOffsetsMutable().assign(dynamicOffsets);
+      changed = true;
+    }
+  }
+  if (foldedStrides) {
+    SmallVector<int64_t> oldStrides(getStaticStrides());
+    if (staticStrides != oldStrides) {
+      setStaticStridesAttr(builder.getDenseI64ArrayAttr(staticStrides));
+      getStridesMutable().assign(dynamicStrides);
+      changed = true;
+    }
+  }
 
+  (void)changed;
   return {};
 }
 

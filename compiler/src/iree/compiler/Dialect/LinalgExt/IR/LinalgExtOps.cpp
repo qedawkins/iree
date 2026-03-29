@@ -395,6 +395,15 @@ LogicalResult ScatterOp::verify() {
   ShapedType updateType = getUpdateType();
   ScatterOp op = *this;
 
+  // When original is an sref, the op writes directly to it and must have no
+  // tensor results.
+  if (!isa<RankedTensorType, MemRefType>(getOriginal().getType())) {
+    if (getNumResults() != 0) {
+      return emitOpError(
+          "expected no results when original is not a tensor or memref");
+    }
+  }
+
   if (failed(verifyGatherScatter(op, getUpdateSliceRank(), originalType,
                                  updateType, "original", "update"))) {
     return failure();
@@ -813,6 +822,14 @@ MapStoreOp MapStoreOp::createIdentityMapStore(OpBuilder &builder, Location loc,
 }
 
 LogicalResult MapStoreOp::verify() {
+  // When output is an sref, the op writes directly to it and must have no
+  // tensor results.
+  if (!isa<RankedTensorType, MemRefType>(getOutput().getType())) {
+    if (getNumResults() != 0) {
+      return emitOpError(
+          "expected no results when output is not a tensor or memref");
+    }
+  }
   if (getInputType().getElementType() != getOutputType().getElementType()) {
     return emitOpError("expected input and output element types to match");
   }

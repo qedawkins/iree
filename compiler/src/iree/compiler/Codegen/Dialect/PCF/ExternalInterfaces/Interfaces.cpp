@@ -7,13 +7,15 @@
 #include "iree/compiler/Codegen/Dialect/PCF/ExternalInterfaces/Interfaces.h"
 
 #include "iree/compiler/Codegen/Dialect/PCF/ExternalInterfaces/BufferizationExternalModels.h"
-#include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
 
 namespace mlir::iree_compiler {
 
 void registerPCFExternalInterfaces(DialectRegistry &registry) {
   IREE::PCF::registerBufferizationExternalModels(registry);
-  IREE::PCF::registerAllDistributedTilingModels(registry);
+  // NOTE: PCFTilingOpInterface external models (TilingImplementations) are NOT
+  // registered here because they extend TilingInterface, which may not be
+  // attached to ops yet at dialect-load time. Instead, passes that use
+  // PCFTilingOpInterface call registerAllDistributedTilingModels() explicitly.
 }
 
 } // namespace mlir::iree_compiler

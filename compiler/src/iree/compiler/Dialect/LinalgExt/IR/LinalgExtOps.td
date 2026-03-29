@@ -100,7 +100,7 @@ def IREELinalgExt_ScatterOp : IREELinalgExt_Op<"scatter",
   let arguments = (ins
       AnyRankedTensorOrMemRef:$updates,
       AnyRankedTensorOrMemRef:$indices,
-      AnyRankedTensorOrMemRef:$original,
+      AnyNonVectorShaped:$original,
       DenseI64ArrayAttr:$dimension_map,
       DefaultValuedAttr<BoolAttr, "true">:$unique_indices
   );
@@ -374,7 +374,7 @@ def IREELinalgExt_MapStoreOp : IREELinalgExt_Op<"map_store",
   }];
   let arguments = (ins
       AnyShaped:$input,
-      AnyRankedTensorOrMemRef:$output
+      AnyNonVectorShaped:$output
   );
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let regions = (region AnyRegion:$transformation_region);
