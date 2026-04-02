@@ -138,8 +138,11 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     }
 
     rewriter.setInsertionPoint(op);
-    // Ignore per-op failure — a failed tiling leaves the op untiled.
-    (void)IREE::PCF::applyMultiLevelTiling(rewriter, pcfTilingOp, params);
+    FailureOr<IREE::PCF::GenericOp> result =
+        IREE::PCF::applyMultiLevelTiling(rewriter, pcfTilingOp, params);
+    if (failed(result)) {
+      op->emitWarning("multi-level tiling failed; leaving op untiled");
+    }
   }
 }
 

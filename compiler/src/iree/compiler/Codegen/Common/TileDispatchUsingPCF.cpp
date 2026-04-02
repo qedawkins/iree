@@ -225,7 +225,9 @@ void TileAndDistributeToWorkgroupsUsingPCFPass::runOnOperation() {
     for (IREE::PCF::LoopOp loopOp : loops) {
       IREE::PCF::ConsumerFusionParams params;
       IREE::PCF::PCFTilingOpInterface fusionTarget;
-      for (Operation *user : loopOp->getUsers()) {
+      // Copy users to avoid iterator invalidation during fusion.
+      SmallVector<Operation *> users(loopOp->getUsers());
+      for (Operation *user : users) {
         fusionTarget = dyn_cast<IREE::PCF::PCFTilingOpInterface>(user);
         if (!fusionTarget) {
           continue;
