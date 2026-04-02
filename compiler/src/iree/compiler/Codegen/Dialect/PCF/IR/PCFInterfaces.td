@@ -360,6 +360,56 @@ def PCF_TilingOpInterface : OpInterface<"PCFTilingOpInterface",
       /*methodBody=*/"",
       /*defaultImplementation=*/""
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the types of loop-carried values for reduction tiling.
+        The returned types are used as iter_arg types for the scf.for
+        reduction loop.
+      }],
+      /*retTy=*/"SmallVector<Type>",
+      /*methodName=*/"getReductionIterArgTypes",
+      /*args=*/(ins
+        "OpBuilder &":$b,
+        "const ::mlir::iree_compiler::IREE::PCF::MultiLevelTilingParams &":$params),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/""
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Emits the init load for reduction at the current insertion point.
+        Returns initial values for scf.for iter_args.
+        `resultSrefs` are the readwrite sref block args corresponding to
+        the op's results.
+      }],
+      /*retTy=*/"SmallVector<Value>",
+      /*methodName=*/"emitReductionInit",
+      /*args=*/(ins
+        "OpBuilder &":$b,
+        "ValueRange":$resultSrefs,
+        "ArrayRef<OpFoldResult>":$offsets,
+        "ArrayRef<OpFoldResult>":$sizes,
+        "const ::mlir::iree_compiler::IREE::PCF::MultiLevelTilingParams &":$params),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/""
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Emits the writeback of reduction results at the current insertion
+        point. `reductionResults` are the final values from the scf.for
+        loop. `resultSrefs` are the readwrite sref block args.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"emitReductionWriteback",
+      /*args=*/(ins
+        "OpBuilder &":$b,
+        "ValueRange":$reductionResults,
+        "ValueRange":$resultSrefs,
+        "ArrayRef<OpFoldResult>":$offsets,
+        "ArrayRef<OpFoldResult>":$sizes,
+        "const ::mlir::iree_compiler::IREE::PCF::MultiLevelTilingParams &":$params),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/""
+    >,
   ];
 
   let extraClassDeclaration = [{

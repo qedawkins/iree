@@ -214,6 +214,101 @@ struct LinalgOpDistributedTilingModel
 
     return TilingResult{tiledOps, tiledValues, /*generatedSlices=*/{}};
   }
+
+  SmallVector<Type> getReductionIterArgTypes(
+      Operation *op, OpBuilder &b,
+      const MultiLevelTilingParams &params) const {
+    LinalgOp linalgOp = cast<LinalgOp>(op);
+    SmallVector<Type> types;
+    // For each DPS init, compute the tiled type from the lane tile sizes.
+    // The iter arg type is a tensor with the lane tile shape.
+    for (OpOperand &init : linalgOp.getDpsInitsMutable()) {
+      ShapedType initType = cast<ShapedType>(init.get().getType());
+      AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&init);
+
+      // Compute the tiled shape from lane tile sizes.
+      SmallVector<int64_t> tiledShape;
+      for (AffineExpr expr : indexingMap.getResults()) {
+        auto dimExpr = dyn_cast<AffineDimExpr>(expr);
+        if (!dimExpr) {
+          // Non-trivial indexing — use dynamic.
+          tiledShape.push_back(ShapedType::kDynamic);
+          continue;
+        }
+        unsigned pos = dimExpr.getPosition();
+        // Use lane tile size for this dimension.
+        if (pos < params.lane.tileSizes.size()) {
+          if (auto attr = dyn_cast<Attribute>(params.lane.tileSizes[pos])) {
+            int64_t tileSize = cast<IntegerAttr>(attr).getInt();
+            if (tileSize != 0) {
+              tiledShape.push_back(tileSize);
+              continue;
+            }
+          }
+        }
+        // Untiled or dynamic — use original dim.
+        tiledShape.push_back(initType.getDimSize(
+            tiledShape.size()));
+      }
+      types.push_back(
+          RankedTensorType::get(tiledShape, initType.getElementType()));
+    }
+    return types;
+  }
+
+  SmallVector<Value> emitReductionInit(
+      Operation *op, OpBuilder &b, ValueRange resultSrefs,
+      ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
+      const MultiLevelTilingParams &params) const {
+    Location loc = op->getLoc();
+    LinalgOp linalgOp = cast<LinalgOp>(op);
+    SmallVector<Value> inits;
+    for (auto [i, init] :
+         llvm::enumerate(linalgOp.getDpsInitsMutable())) {
+      Value sref = resultSrefs[i];
+      // Compute tile position from the output indexing map.
+      AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&init);
+      SmallVector<OpFoldResult> tileOffsets;
+      SmallVector<OpFoldResult> tileSizes;
+      for (AffineExpr expr : indexingMap.getResults()) {
+        auto dimExpr = cast<AffineDimExpr>(expr);
+        unsigned pos = dimExpr.getPosition();
+        tileOffsets.push_back(offsets[pos]);
+        tileSizes.push_back(sizes[pos]);
+      }
+      Value tile = readTileFromSref(b, loc, sref, tileOffsets, tileSizes);
+      inits.push_back(tile);
+    }
+    return inits;
+  }
+
+  void emitReductionWriteback(
+      Operation *op, OpBuilder &b, ValueRange reductionResults,
+      ValueRange resultSrefs, ArrayRef<OpFoldResult> offsets,
+      ArrayRef<OpFoldResult> sizes,
+      const MultiLevelTilingParams &params) const {
+    Location loc = op->getLoc();
+    LinalgOp linalgOp = cast<LinalgOp>(op);
+    for (auto [i, init] :
+         llvm::enumerate(linalgOp.getDpsInitsMutable())) {
+      Value result = reductionResults[i];
+      Value sref = resultSrefs[i];
+      // Compute tile position from the output indexing map.
+      AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&init);
+      SmallVector<OpFoldResult> tileOffsets;
+      SmallVector<OpFoldResult> tileSizes;
+      for (AffineExpr expr : indexingMap.getResults()) {
+        auto dimExpr = cast<AffineDimExpr>(expr);
+        unsigned pos = dimExpr.getPosition();
+        tileOffsets.push_back(offsets[pos]);
+        tileSizes.push_back(sizes[pos]);
+      }
+      int64_t resultRank = cast<ShapedType>(result.getType()).getRank();
+      SmallVector<OpFoldResult> strides(resultRank, b.getIndexAttr(1));
+      WriteSliceOp::create(b, loc, result, sref,
+                           tileOffsets, tileSizes, strides);
+    }
+  }
 };
 
 } // namespace

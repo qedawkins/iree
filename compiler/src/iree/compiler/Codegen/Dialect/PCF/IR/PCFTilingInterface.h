@@ -26,6 +26,27 @@ struct DistributedResultInfo {
   Value destSref;
 };
 
+/// Parameters for a single tiling level (subgroup or lane).
+struct TilingLevelParams {
+  /// The scope for this tiling level (must implement ScopeAttrInterface).
+  Attribute scope;
+  /// Tile sizes for each iteration domain dimension. Zero means don't tile.
+  SmallVector<OpFoldResult> tileSizes;
+};
+
+/// Parameters for multi-level distributed tiling (subgroup + lane +
+/// reduction).
+struct MultiLevelTilingParams {
+  /// Subgroup-level tiling parameters.
+  TilingLevelParams subgroup;
+  /// Lane-level tiling parameters.
+  TilingLevelParams lane;
+  /// Tile sizes for reduction dimensions.
+  SmallVector<OpFoldResult> reductionTileSizes;
+  /// Indices of operands to promote.
+  SmallVector<unsigned> operandsToPromote;
+};
+
 } // namespace mlir::iree_compiler::IREE::PCF
 
 #endif // IREE_COMPILER_CODEGEN_DIALECT_PCF_IR_PCFTILINGINTERFACE_H_
