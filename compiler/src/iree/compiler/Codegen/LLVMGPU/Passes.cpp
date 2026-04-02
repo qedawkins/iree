@@ -849,9 +849,6 @@ static LogicalResult gpuVectorCopyFn(OpBuilder &builder, Location loc,
 }
 
 void addGPUVectorDistributePreBufferizePasses(OpPassManager &funcPassManager) {
-  // Rematerialize parallel ops for elementwise fusion.
-  funcPassManager.addPass(createRematerializeParallelOpsPass());
-
   funcPassManager.addPass(
       IREE::LinalgExt::createConvertAttentionToOnlineAttentionPass());
 
