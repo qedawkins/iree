@@ -8,6 +8,8 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTilingInterface.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -278,8 +280,46 @@ FailureOr<GenericOp> applyMultiLevelTiling(
               int64_t roIdx = operandToReadonlyIdx[i];
               if (roIdx >= 0) {
                 Value sref = sgReadonlyRefs[roIdx];
-                // TODO: Handle promotion via iree_gpu.promote_operand.
-                operandInfo.push_back({sref, /*isTile=*/false});
+
+                // Check if this operand should be promoted.
+                if (llvm::is_contained(params.operandsToPromote, idx)) {
+                  // Create promote_operand op. Build symbol names for each
+                  // dimension of the sref.
+                  ShapedRefType srefType =
+                      cast<ShapedRefType>(sref.getType());
+                  int64_t rank = srefType.getRank();
+                  SmallVector<Attribute> symbolNames;
+                  for (int64_t d = 0; d < rank; ++d) {
+                    std::string name =
+                        "operand_" + std::to_string(i) + "_dim_" +
+                        std::to_string(d);
+                    symbolNames.push_back(
+                        rewriter.getStringAttr(name));
+                  }
+                  ArrayAttr symbols =
+                      rewriter.getArrayAttr(symbolNames);
+
+                  // The promoted sref has the same shape but the subgroup
+                  // scope (inner scope for shared memory).
+                  ShapedRefType promotedType = ShapedRefType::get(
+                      rewriter.getContext(), srefType.getShape(),
+                      srefType.getElementType(),
+                      cast<ScopeAttrInterface>(params.subgroup.scope));
+
+                  // Use a default promotion attribute.
+                  IREE::GPU::PromotionAttr promotion =
+                      cast<IREE::GPU::PromotionAttr>(
+                          IREE::GPU::DerivedThreadConfigAttr::get(
+                              rewriter.getContext()));
+
+                  Value promoted =
+                      IREE::GPU::PromoteOperandOp::create(
+                          rewriter, loc, promotedType, promotion,
+                          sref, symbols);
+                  operandInfo.push_back({promoted, /*isTile=*/false});
+                } else {
+                  operandInfo.push_back({sref, /*isTile=*/false});
+                }
               } else {
                 operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
               }
