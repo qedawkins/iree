@@ -13,6 +13,9 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Interfaces/TilingInterface.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "iree-pcf-linalg-distributed-tiling"
 
 namespace mlir::iree_compiler::IREE::PCF {
 namespace {
@@ -137,6 +140,10 @@ struct LinalgOpDistributedTilingModel
           tilePos = computeOperandTilePosition(b, loc, linalgOp, opOperand,
                                                offsets, sizes);
       if (!tilePos) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "operand " << i
+                   << " has non-simple indexing map; cannot compute tile "
+                      "position\n");
         return failure();
       }
       auto &[tileOffsets, tileSizes] = *tilePos;
@@ -228,7 +235,7 @@ struct LinalgOpDistributedTilingModel
 
       // Compute the tiled shape from lane tile sizes.
       SmallVector<int64_t> tiledShape;
-      for (AffineExpr expr : indexingMap.getResults()) {
+      for (auto [d, expr] : llvm::enumerate(indexingMap.getResults())) {
         AffineDimExpr dimExpr = dyn_cast<AffineDimExpr>(expr);
         if (!dimExpr) {
           // Non-trivial indexing — use dynamic.
@@ -248,7 +255,7 @@ struct LinalgOpDistributedTilingModel
           }
         }
         // Untiled or dynamic — use original dim.
-        tiledShape.push_back(initType.getDimSize(tiledShape.size()));
+        tiledShape.push_back(initType.getDimSize(d));
       }
       types.push_back(
           RankedTensorType::get(tiledShape, initType.getElementType()));
