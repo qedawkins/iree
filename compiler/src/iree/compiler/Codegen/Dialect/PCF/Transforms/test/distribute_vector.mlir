@@ -16,13 +16,13 @@
 >
 
 // Test: Vector ops inside run_cluster get distributed via VectorDistribute.
-// With trivial distribution (1 subgroup, 1 thread), the to_simt/to_simd
-// pairs fold to identity, so the constant stays in SIMD shape. The
-// structural lowering (tile_group -> scf.index_switch) still applies.
+// The constant is distributed to vector<1x1x1x1x16x16xf32> and
+// to_simd converts back at the boundary.
 //
 // CHECK-LABEL: util.func private @vector_distribute_in_cluster
-// CHECK: arith.constant dense<0.000000e+00> : vector<16x16xf32>
+// CHECK: arith.constant dense<0.000000e+00> : vector<1x1x1x1x16x16xf32>
 // CHECK: scf.index_switch
+// CHECK: iree_vector_ext.to_simd {{.*}} : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
 // CHECK-NOT: tile_group
 util.func private @vector_distribute_in_cluster(
     %tg: !pcf.threadgroup<#pcf.test_scope>, %k: index) {
@@ -55,12 +55,12 @@ util.func private @vector_distribute_in_cluster(
 >
 
 // Test: Two run_cluster ops targeting different clusters, each with vector
-// ops and layout anchors. Both get lowered independently. With trivial
-// distribution, constants stay in SIMD shape. Structural lowering still
-// converts tile_group to scf.index_switch.
+// ops and layout anchors. Both get distributed independently.
 //
 // CHECK-LABEL: util.func private @two_clusters_distributed
+// CHECK-DAG: arith.constant dense<1.000000e+00> : vector<1x1x1x1x16x16xf32>
 // CHECK: scf.index_switch
+// CHECK: iree_vector_ext.to_simd {{.*}} : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
 // CHECK-NOT: tile_group
 util.func private @two_clusters_distributed(
     %tg: !pcf.threadgroup<#pcf.test_scope>, %k: index) {
