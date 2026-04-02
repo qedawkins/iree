@@ -51,6 +51,7 @@ iree_cc_library(
     "ConvertForallToGenericNestGPU.cpp"
     "DistributeInnerTiledToLanes.cpp"
     "ExpandUndistributedInnerTiles.cpp"
+    "LowerPromoteOperand.cpp"
     "LowerIREEGPUOps.cpp"
     "Passes.cpp"
     "Transforms.cpp"
