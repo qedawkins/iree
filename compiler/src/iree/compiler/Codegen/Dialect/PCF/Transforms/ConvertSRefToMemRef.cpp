@@ -414,8 +414,7 @@ ChangeStatus StridedLayoutValueElement::updateBlockArgument(
         llvm::TypeSwitch<Operation *, bool>(bbArg.getOwner()->getParentOp())
             .Case([&](PCF::GenericOp genericOp) {
               if (genericOp.isRegionRefArg(bbArg)) {
-                Type tiedResultType =
-                    genericOp.getTiedResult(bbArg).getType();
+                Type tiedResultType = genericOp.getTiedResult(bbArg).getType();
                 if (auto resultType = dyn_cast<MemRefType>(tiedResultType)) {
                   if (!isDefaultOrStrided(resultType.getLayout())) {
                     genericOp->emitOpError(
@@ -466,8 +465,8 @@ ChangeStatus StridedLayoutValueElement::updateBlockArgument(
               } else if (auto tensorType =
                              dyn_cast<RankedTensorType>(tiedResultType)) {
                 // Pre-bufferization: derive default memref from tensor.
-                newState.setAssumed(MemRefType::get(tensorType.getShape(),
-                                                    tensorType.getElementType()));
+                newState.setAssumed(MemRefType::get(
+                    tensorType.getShape(), tensorType.getElementType()));
                 newState.indicateOptimisticFixpoint();
               } else {
                 newState.invalidate();
@@ -727,8 +726,8 @@ struct ConvertGenericOp final : OpConversionPattern<PCF::GenericOp> {
                   ConversionPatternRewriter &rewriter) const override {
     if (llvm::any_of(genericOp.getResultTypes(),
                      llvm::IsaPred<PCF::ShapedRefType>)) {
-      return rewriter.notifyMatchFailure(
-          genericOp, "unexpected sref result type");
+      return rewriter.notifyMatchFailure(genericOp,
+                                         "unexpected sref result type");
     }
 
     Location loc = genericOp.getLoc();
@@ -841,8 +840,7 @@ struct ConvertLoopOp final : OpConversionPattern<PCF::LoopOp> {
       auto memrefType = cast<MemRefType>(resultType);
       int64_t numDynamicDims = memrefType.getNumDynamicDims();
       replacements.push_back(memref::AllocOp::create(
-          rewriter, loc, memrefType,
-          dynamicSizes.take_front(numDynamicDims),
+          rewriter, loc, memrefType, dynamicSizes.take_front(numDynamicDims),
           /*symbolOperands=*/ValueRange(), alignment));
       dynamicSizes = dynamicSizes.drop_front(numDynamicDims);
     }
@@ -1112,14 +1110,13 @@ struct ConvertSubviewOp final : OpConversionPattern<PCF::SubviewOp> {
       return rewriter.notifyMatchFailure(op, "failed to convert result type");
     }
     rewriter.replaceOpWithNewOp<memref::SubViewOp>(
-        op, *convertedType, adaptor.getSource(),
-        op.getMixedOffsets(), op.getMixedSizes(), op.getMixedStrides());
+        op, *convertedType, adaptor.getSource(), op.getMixedOffsets(),
+        op.getMixedSizes(), op.getMixedStrides());
     return success();
   }
 };
 
-struct ConvertExpandShapeOp final
-    : OpConversionPattern<PCF::ExpandShapeOp> {
+struct ConvertExpandShapeOp final : OpConversionPattern<PCF::ExpandShapeOp> {
   using Base::Base;
 
   LogicalResult
@@ -1147,8 +1144,7 @@ struct ConvertExpandShapeOp final
       outputShape.push_back(rewriter.getIndexAttr(dim));
     }
     rewriter.replaceOpWithNewOp<memref::ExpandShapeOp>(
-        op, *convertedType, adaptor.getSrc(),
-        reassociation, outputShape);
+        op, *convertedType, adaptor.getSrc(), reassociation, outputShape);
     return success();
   }
 };
@@ -1432,9 +1428,8 @@ void ConvertSRefToMemRefPass::runOnOperation() {
   patterns.add<ConvertGenericOp, ConvertLoopOp, ConvertWriteSliceOp,
                ConvertReadSliceOp, ConvertGetMemrefOp, ConvertAllocOp,
                ConvertToSrefOp, ConvertSubviewOp, ConvertExpandShapeOp,
-               ConvertOptimizationBarrier,
-               ConvertVectorExtTransferReadOp, ConvertVectorExtTransferWriteOp>(
-      typeConverter, context);
+               ConvertOptimizationBarrier, ConvertVectorExtTransferReadOp,
+               ConvertVectorExtTransferWriteOp>(typeConverter, context);
 
   // Function related conversion patterns need the analysis to lookup function
   // type conversions.

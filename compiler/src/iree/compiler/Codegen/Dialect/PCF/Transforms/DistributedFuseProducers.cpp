@@ -34,13 +34,14 @@ namespace {
 /// old op's results with the new op's original results.
 template <typename OpTy>
 static OpTy addReadonlyArgs(RewriterBase &rewriter, OpTy op,
-                             ValueRange newReadonlyInits,
-                             SmallVectorImpl<BlockArgument> &newReadonlyRefs);
+                            ValueRange newReadonlyInits,
+                            SmallVectorImpl<BlockArgument> &newReadonlyRefs);
 
 template <>
-LoopOp addReadonlyArgs<LoopOp>(RewriterBase &rewriter, LoopOp loopOp,
-                                ValueRange newReadonlyInits,
-                                SmallVectorImpl<BlockArgument> &newReadonlyRefs) {
+LoopOp
+addReadonlyArgs<LoopOp>(RewriterBase &rewriter, LoopOp loopOp,
+                        ValueRange newReadonlyInits,
+                        SmallVectorImpl<BlockArgument> &newReadonlyRefs) {
   Location loc = loopOp.getLoc();
   MLIRContext *context = rewriter.getContext();
 
@@ -58,10 +59,10 @@ LoopOp addReadonlyArgs<LoopOp>(RewriterBase &rewriter, LoopOp loopOp,
   int64_t numOriginalReadonlyRefs = loopOp.getNumReadonlyRefs();
 
   // Create new LoopOp with combined inits.
-  LoopOp newLoopOp = LoopOp::create(
-      rewriter, loc, combinedResultTypes, loopOp.getScope(), loopOp.getCount(),
-      combinedInits, combinedDynamicSizes, combinedIsTied,
-      loopOp.getSyncOnReturn());
+  LoopOp newLoopOp =
+      LoopOp::create(rewriter, loc, combinedResultTypes, loopOp.getScope(),
+                     loopOp.getCount(), combinedInits, combinedDynamicSizes,
+                     combinedIsTied, loopOp.getSyncOnReturn());
 
   // Move the body over.
   newLoopOp.getRegion().takeBody(loopOp.getRegion());
@@ -72,11 +73,10 @@ LoopOp addReadonlyArgs<LoopOp>(RewriterBase &rewriter, LoopOp loopOp,
   int64_t readonlyInsertIdx = numOriginalReadonlyRefs;
   for (Value init : newReadonlyInits) {
     ShapedType shapedType = cast<ShapedType>(init.getType());
-    ShapedRefType srefType = ShapedRefType::get(
-        context, shapedType.getShape(), shapedType.getElementType(),
-        loopOp.getScope());
-    BlockArgument arg =
-        body->insertArgument(readonlyInsertIdx, srefType, loc);
+    ShapedRefType srefType =
+        ShapedRefType::get(context, shapedType.getShape(),
+                           shapedType.getElementType(), loopOp.getScope());
+    BlockArgument arg = body->insertArgument(readonlyInsertIdx, srefType, loc);
     newReadonlyRefs.push_back(arg);
     ++readonlyInsertIdx;
   }
@@ -101,9 +101,10 @@ LoopOp addReadonlyArgs<LoopOp>(RewriterBase &rewriter, LoopOp loopOp,
 }
 
 template <>
-GenericOp addReadonlyArgs<GenericOp>(
-    RewriterBase &rewriter, GenericOp genericOp, ValueRange newReadonlyInits,
-    SmallVectorImpl<BlockArgument> &newReadonlyRefs) {
+GenericOp
+addReadonlyArgs<GenericOp>(RewriterBase &rewriter, GenericOp genericOp,
+                           ValueRange newReadonlyInits,
+                           SmallVectorImpl<BlockArgument> &newReadonlyRefs) {
   Location loc = genericOp.getLoc();
   MLIRContext *context = rewriter.getContext();
 
@@ -136,11 +137,10 @@ GenericOp addReadonlyArgs<GenericOp>(
       genericOp.getNumLeadingArgs() + numOriginalReadonlyRefs;
   for (Value init : newReadonlyInits) {
     ShapedType shapedType = cast<ShapedType>(init.getType());
-    ShapedRefType srefType = ShapedRefType::get(
-        context, shapedType.getShape(), shapedType.getElementType(),
-        genericOp.getScope());
-    BlockArgument arg =
-        body->insertArgument(readonlyInsertIdx, srefType, loc);
+    ShapedRefType srefType =
+        ShapedRefType::get(context, shapedType.getShape(),
+                           shapedType.getElementType(), genericOp.getScope());
+    BlockArgument arg = body->insertArgument(readonlyInsertIdx, srefType, loc);
     newReadonlyRefs.push_back(arg);
     ++readonlyInsertIdx;
   }
@@ -205,7 +205,7 @@ lookupConsumerSlices(OpResult result,
 template <typename OpTy>
 static LogicalResult
 matchDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
-                              DistributedProducerFusionParams &params) {
+                             DistributedProducerFusionParams &params) {
   for (int64_t i = 0, e = scopedOp->getNumResults(); i < e; ++i) {
     OpOperand *tiedInit = scopedOp.getTiedInit(i);
     if (!tiedInit) {
@@ -256,7 +256,7 @@ matchDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
     return success();
   }
   return rewriter.notifyMatchFailure(scopedOp,
-                                      "no fusable distributed producer found");
+                                     "no fusable distributed producer found");
 }
 
 //===---------------------------------------------------------------------===//
@@ -266,7 +266,7 @@ matchDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
 template <typename OpTy>
 static void
 fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
-                             const DistributedProducerFusionParams &params) {
+                            const DistributedProducerFusionParams &params) {
   auto producer = cast<PCFTilingOpInterface>(params.producer);
   Operation *producerOp = params.producer;
 
@@ -293,7 +293,7 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
   // Collect readonly inits for non-DPS-init tileable operands.
   SmallVector<Value> newReadonlyInits;
   SmallVector<int64_t> operandToNewReadonlyIdx(producerOp->getNumOperands(),
-                                                -1);
+                                               -1);
   for (int64_t i = 0, e = producerOp->getNumOperands(); i < e; ++i) {
     unsigned idx = static_cast<unsigned>(i);
     if (dpsInitIndices.contains(idx)) {
@@ -309,8 +309,7 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
     if (!isa<ShapedType>(producerOp->getOperand(i).getType())) {
       continue;
     }
-    operandToNewReadonlyIdx[i] =
-        static_cast<int64_t>(newReadonlyInits.size());
+    operandToNewReadonlyIdx[i] = static_cast<int64_t>(newReadonlyInits.size());
     newReadonlyInits.push_back(producerOp->getOperand(i));
   }
 
@@ -320,7 +319,7 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
   OpTy newScopedOp = scopedOp;
   if (!newReadonlyInits.empty()) {
     newScopedOp = addReadonlyArgs(rewriter, scopedOp, newReadonlyInits,
-                                   newReadonlyBlockArgs);
+                                  newReadonlyBlockArgs);
   }
 
   // Step 4: At each read_slice site, generate the distributed producer.
@@ -341,8 +340,7 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
       if (dpsInitIndices.contains(idx)) {
         // DPS init operand: read from the existing readwrite sref using the
         // read_slice's offsets/sizes.
-        Value sref =
-            newScopedOp.getRegionRefArgs()[params.resultIndex];
+        Value sref = newScopedOp.getRegionRefArgs()[params.resultIndex];
         auto srefType = cast<ShapedRefType>(sref.getType());
         int64_t srefRank = srefType.getRank();
 
@@ -350,7 +348,8 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
         SmallVector<int64_t> staticSizes;
         staticSizes.reserve(srefRank);
         for (int64_t dim = 0, de = std::min(srefRank,
-                 static_cast<int64_t>(sizes.size())); dim < de; ++dim) {
+                                            static_cast<int64_t>(sizes.size()));
+             dim < de; ++dim) {
           if (auto attr = dyn_cast<Attribute>(sizes[dim])) {
             staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
           } else {
@@ -396,8 +395,9 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
         // Build read type.
         SmallVector<int64_t> staticSizes;
         staticSizes.reserve(srefRank);
-        for (int64_t dim = 0, de = std::min(srefRank,
-                 static_cast<int64_t>(readSizes.size())); dim < de; ++dim) {
+        for (int64_t dim = 0, de = std::min(srefRank, static_cast<int64_t>(
+                                                          readSizes.size()));
+             dim < de; ++dim) {
           if (auto attr = dyn_cast<Attribute>(readSizes[dim])) {
             staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
           } else {
@@ -435,9 +435,8 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
     resultInfo.push_back({/*destSref=*/Value()});
 
     // Call getDistributedImplementation.
-    FailureOr<TilingResult> tiledResult =
-        producer.getDistributedImplementation(rewriter, offsets, sizes,
-                                              operandInfo, resultInfo);
+    FailureOr<TilingResult> tiledResult = producer.getDistributedImplementation(
+        rewriter, offsets, sizes, operandInfo, resultInfo);
     assert(succeeded(tiledResult) &&
            "unexpected distributed implementation failure");
 
@@ -470,25 +469,25 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
 // Public API Specializations
 //===---------------------------------------------------------------------===//
 
-LogicalResult matchDistributedProducer(RewriterBase &rewriter,
-                                        PCF::GenericOp genericOp,
-                                        DistributedProducerFusionParams &params) {
+LogicalResult
+matchDistributedProducer(RewriterBase &rewriter, PCF::GenericOp genericOp,
+                         DistributedProducerFusionParams &params) {
   return matchDistributedProducerImpl(rewriter, genericOp, params);
 }
 
-LogicalResult matchDistributedProducer(RewriterBase &rewriter,
-                                        PCF::LoopOp loopOp,
-                                        DistributedProducerFusionParams &params) {
+LogicalResult
+matchDistributedProducer(RewriterBase &rewriter, PCF::LoopOp loopOp,
+                         DistributedProducerFusionParams &params) {
   return matchDistributedProducerImpl(rewriter, loopOp, params);
 }
 
 void fuseDistributedProducer(RewriterBase &rewriter, PCF::GenericOp genericOp,
-                              const DistributedProducerFusionParams &params) {
+                             const DistributedProducerFusionParams &params) {
   fuseDistributedProducerImpl(rewriter, genericOp, params);
 }
 
 void fuseDistributedProducer(RewriterBase &rewriter, PCF::LoopOp loopOp,
-                              const DistributedProducerFusionParams &params) {
+                             const DistributedProducerFusionParams &params) {
   fuseDistributedProducerImpl(rewriter, loopOp, params);
 }
 

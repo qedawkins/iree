@@ -332,11 +332,10 @@ void ResolveTokensPass::runOnOperation() {
         return success();
       });
 
-  patterns
-      .add<ConvertGenericOp, ConvertLoopOp, ConvertAllocOp, ConvertWriteSliceOp,
-           ConvertOptimizationBarrier, ConvertBranchOp,
-           ConvertVectorExtTransferReadOp, ConvertVectorExtTransferWriteOp>(
-          typeConverter, context);
+  patterns.add<ConvertGenericOp, ConvertLoopOp, ConvertAllocOp,
+               ConvertWriteSliceOp, ConvertOptimizationBarrier, ConvertBranchOp,
+               ConvertVectorExtTransferReadOp, ConvertVectorExtTransferWriteOp>(
+      typeConverter, context);
 
   // Verify that all operand, result, and region argument types have been
   // converted.

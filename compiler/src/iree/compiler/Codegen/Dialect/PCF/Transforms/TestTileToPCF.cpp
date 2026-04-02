@@ -5,10 +5,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
-#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
-#include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
+#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -28,8 +28,8 @@ struct TestTileToPCFPass final
     attachAllDistributedTilingModels(&getContext());
     Operation *rootOp = getOperation();
     IRRewriter rewriter(&getContext());
-    SmallVector<OpFoldResult> tileSizeOFRs = llvm::map_to_vector(
-        tileSizes, [&](int64_t s) -> OpFoldResult {
+    SmallVector<OpFoldResult> tileSizeOFRs =
+        llvm::map_to_vector(tileSizes, [&](int64_t s) -> OpFoldResult {
           return rewriter.getIndexAttr(s);
         });
     ScopeAttrInterface scope = PCF::SequentialAttr::get(&getContext());

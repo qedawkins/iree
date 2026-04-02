@@ -6,13 +6,13 @@
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTilingInterface.h"
+#include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
-#include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
 namespace mlir::iree_compiler::IREE::PCF {
@@ -31,24 +31,22 @@ struct TestMultiLevelTilingPass final
     IRRewriter rewriter(&getContext());
 
     // Build tile size OFRs from options.
-    SmallVector<OpFoldResult> sgTiles = llvm::map_to_vector(
-        subgroupTileSizes, [&](int64_t s) -> OpFoldResult {
+    SmallVector<OpFoldResult> sgTiles =
+        llvm::map_to_vector(subgroupTileSizes, [&](int64_t s) -> OpFoldResult {
           return rewriter.getIndexAttr(s);
         });
-    SmallVector<OpFoldResult> laneTiles = llvm::map_to_vector(
-        laneTileSizes, [&](int64_t s) -> OpFoldResult {
+    SmallVector<OpFoldResult> laneTiles =
+        llvm::map_to_vector(laneTileSizes, [&](int64_t s) -> OpFoldResult {
           return rewriter.getIndexAttr(s);
         });
-    SmallVector<OpFoldResult> redTiles = llvm::map_to_vector(
-        reductionTileSizes, [&](int64_t s) -> OpFoldResult {
+    SmallVector<OpFoldResult> redTiles =
+        llvm::map_to_vector(reductionTileSizes, [&](int64_t s) -> OpFoldResult {
           return rewriter.getIndexAttr(s);
         });
 
     // Use sequential scopes for testing.
-    ScopeAttrInterface sgScope =
-        PCF::SequentialAttr::get(&getContext());
-    ScopeAttrInterface laneScope =
-        PCF::SequentialAttr::get(&getContext());
+    ScopeAttrInterface sgScope = PCF::SequentialAttr::get(&getContext());
+    ScopeAttrInterface laneScope = PCF::SequentialAttr::get(&getContext());
 
     MultiLevelTilingParams params;
     params.subgroup.scope = sgScope;

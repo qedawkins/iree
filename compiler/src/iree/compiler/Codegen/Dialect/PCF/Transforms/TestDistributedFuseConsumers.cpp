@@ -5,11 +5,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
-#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTilingInterface.h"
+#include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
-#include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
+#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Interfaces/TilingInterface.h"
@@ -51,8 +51,7 @@ struct DistributedFuseIntoGenericOp final
   }
 };
 
-struct DistributedFuseIntoLoopOp final
-    : OpRewritePattern<IREE::PCF::LoopOp> {
+struct DistributedFuseIntoLoopOp final : OpRewritePattern<IREE::PCF::LoopOp> {
   using Base::Base;
   LogicalResult matchAndRewrite(IREE::PCF::LoopOp loopOp,
                                 PatternRewriter &rewriter) const override {
@@ -91,8 +90,7 @@ struct TestDistributedFuseConsumersPass final
     patterns.add<DistributedFuseIntoGenericOp, DistributedFuseIntoLoopOp>(
         &getContext());
     populatePCFDropUnusedResultPatterns(patterns);
-    if (failed(
-            applyPatternsGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
     }
   }

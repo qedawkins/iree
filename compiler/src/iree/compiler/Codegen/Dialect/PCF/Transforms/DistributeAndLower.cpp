@@ -475,8 +475,7 @@ distributeSharedExecutor(SharedExecutorOp sharedExec,
   // Get thread IDs and counts from the scope.
   int64_t numIds = scope.getNativeNumProcessorIds();
   SmallVector<Value> threadIDs = scope.getWorkerIDs(builder, loc, numIds);
-  SmallVector<Value> threadCounts =
-      scope.getWorkerCounts(builder, loc, numIds);
+  SmallVector<Value> threadCounts = scope.getWorkerCounts(builder, loc, numIds);
 
   // The shared_executor body is the region to distribute.
   SmallVector<Region *> regions;
@@ -484,16 +483,14 @@ distributeSharedExecutor(SharedExecutorOp sharedExec,
 
   // Collect ops to skip: any run_thread ops already inside.
   DenseSet<Operation *> opsToSkip;
-  sharedExec.getRegion().walk([&](RunThreadOp rt) {
-    opsToSkip.insert(rt);
-  });
+  sharedExec.getRegion().walk([&](RunThreadOp rt) { opsToSkip.insert(rt); });
 
   // Create an empty equivalence info (no cluster equivalences for
   // direct shared_executor distribution).
   ClusterEquivalenceInfo emptyEquivInfo;
 
-  if (failed(distInterface.distributeRegions(
-          regions, threadIDs, threadCounts, emptyEquivInfo, opsToSkip))) {
+  if (failed(distInterface.distributeRegions(regions, threadIDs, threadCounts,
+                                             emptyEquivInfo, opsToSkip))) {
     return sharedExec.emitOpError("distribution failed for shared_executor");
   }
 
@@ -934,9 +931,8 @@ distributeAndLowerSharedExecutors(Operation *rootOp,
   // a pcf.generic, which are child shared_executors created during this
   // phase for telescoping distribution).
   SmallVector<SharedExecutorOp> sharedExecs;
-  rootOp->walk([&](SharedExecutorOp sharedExec) {
-    sharedExecs.push_back(sharedExec);
-  });
+  rootOp->walk(
+      [&](SharedExecutorOp sharedExec) { sharedExecs.push_back(sharedExec); });
 
   for (SharedExecutorOp sharedExec : sharedExecs) {
     // Auto-detect child scope from telescope ops in the body.

@@ -65,7 +65,7 @@ convertForallToGenericNest(RewriterBase &rewriter, scf::ForallOp forallOp,
 /// Returns the outermost pcf.generic on success.
 FailureOr<PCF::GenericOp>
 applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
-                       const MultiLevelTilingParams &params);
+                      const MultiLevelTilingParams &params);
 
 /// Tiles a PCFTilingOpInterface op into a pcf.loop with the given scope and
 /// tile sizes. Tile size semantics match scf::tileUsingSCF: zero means don't
@@ -74,16 +74,16 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
 /// readwrite sref args tied to results. Inside the body,
 /// getDistributedImplementation is called with the tile offsets/sizes.
 FailureOr<PCF::LoopOp> tileToPCFLoop(RewriterBase &rewriter,
-                                      PCFTilingOpInterface target,
-                                      ScopeAttrInterface scope,
-                                      ArrayRef<OpFoldResult> tileSizes);
+                                     PCFTilingOpInterface target,
+                                     ScopeAttrInterface scope,
+                                     ArrayRef<OpFoldResult> tileSizes);
 
 /// Same as tileToPCFLoop but creates a pcf.generic with nested scf.forall
 /// for spillover iterations.
 FailureOr<PCF::GenericOp> tileToPCFGeneric(RewriterBase &rewriter,
-                                            PCFTilingOpInterface target,
-                                            ScopeAttrInterface scope,
-                                            ArrayRef<OpFoldResult> tileSizes);
+                                           PCFTilingOpInterface target,
+                                           ScopeAttrInterface scope,
+                                           ArrayRef<OpFoldResult> tileSizes);
 
 struct ConsumerFusionParams {
   // List of operands in the consumer that are fused along.
@@ -145,11 +145,11 @@ void fuseTilableConsumer(RewriterBase &rewriter, PCF::LoopOp loopOp,
 // semantics as matchTilableConsumer but uses getDistributedImplementation
 // and appends readonly sref args for non-fused input operands.
 void fuseDistributedConsumer(RewriterBase &rewriter, PCF::GenericOp genericOp,
-                              PCFTilingOpInterface target,
-                              ConsumerFusionParams &params);
+                             PCFTilingOpInterface target,
+                             ConsumerFusionParams &params);
 void fuseDistributedConsumer(RewriterBase &rewriter, PCF::LoopOp loopOp,
-                              PCFTilingOpInterface target,
-                              ConsumerFusionParams &params);
+                             PCFTilingOpInterface target,
+                             ConsumerFusionParams &params);
 
 struct ProducerFusionParams {
   // Which result index of the scoped op has a fusable producer init.
@@ -200,18 +200,16 @@ struct DistributedProducerFusionParams {
 };
 
 LogicalResult matchDistributedProducer(RewriterBase &rewriter,
-                                        PCF::GenericOp genericOp,
-                                        DistributedProducerFusionParams &params);
+                                       PCF::GenericOp genericOp,
+                                       DistributedProducerFusionParams &params);
 LogicalResult matchDistributedProducer(RewriterBase &rewriter,
-                                        PCF::LoopOp loopOp,
-                                        DistributedProducerFusionParams &params);
+                                       PCF::LoopOp loopOp,
+                                       DistributedProducerFusionParams &params);
 
-void fuseDistributedProducer(RewriterBase &rewriter,
-                              PCF::GenericOp genericOp,
-                              const DistributedProducerFusionParams &params);
-void fuseDistributedProducer(RewriterBase &rewriter,
-                              PCF::LoopOp loopOp,
-                              const DistributedProducerFusionParams &params);
+void fuseDistributedProducer(RewriterBase &rewriter, PCF::GenericOp genericOp,
+                             const DistributedProducerFusionParams &params);
+void fuseDistributedProducer(RewriterBase &rewriter, PCF::LoopOp loopOp,
+                             const DistributedProducerFusionParams &params);
 
 // Pattern set for dropping unused results from scoped ops. Due to memory
 // effects this requires cascading operation erasure and is unsuitable for

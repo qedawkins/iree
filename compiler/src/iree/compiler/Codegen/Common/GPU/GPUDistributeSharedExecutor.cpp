@@ -8,10 +8,10 @@
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "iree-gpu-distribute-shared-executor"
 
@@ -41,8 +41,8 @@ struct GPUDistributeSharedExecutorPass final
     // Create the distribution interface if sizes are available.
     std::unique_ptr<IREE::PCF::DistributionInterface> distInterface;
     if (workgroupSize && subgroupSize) {
-      distInterface = std::make_unique<VectorDistributionImpl>(
-          *subgroupSize, *workgroupSize);
+      distInterface = std::make_unique<VectorDistributionImpl>(*subgroupSize,
+                                                               *workgroupSize);
     }
 
     if (failed(IREE::PCF::distributeAndLowerSharedExecutors(

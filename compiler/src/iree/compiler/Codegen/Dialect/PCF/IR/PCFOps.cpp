@@ -456,7 +456,6 @@ static void printParallelExecutionBody(
 // GenericOp
 //===----------------------------------------------------------------------===//
 
-
 void GenericOp::getAsmBlockArgumentNames(Region &region,
                                          OpAsmSetValueNameFn setNameFn) {
   if (&region == &getInitializer()) {
@@ -523,8 +522,8 @@ ParseResult GenericOp::parse(OpAsmParser &parser, OperationState &result) {
 
   // Infer number of index args from the trailing index-typed block args.
   int64_t numIndexArgs = 0;
-  for (BlockArgument bbArg : llvm::reverse(
-           body->getArguments().drop_front(numLeadingArgs))) {
+  for (BlockArgument bbArg :
+       llvm::reverse(body->getArguments().drop_front(numLeadingArgs))) {
     if (!bbArg.getType().isIndex()) {
       break;
     }
@@ -568,10 +567,9 @@ ParseResult GenericOp::parse(OpAsmParser &parser, OperationState &result) {
 
   // Set properties.
   Properties &props = result.getOrAddProperties<Properties>();
-  props.setOperandSegmentSizes(
-      {static_cast<int32_t>(readonlyInits.size()),
-       static_cast<int32_t>(inits.size()),
-       static_cast<int32_t>(dynamicSizes.size())});
+  props.setOperandSegmentSizes({static_cast<int32_t>(readonlyInits.size()),
+                                static_cast<int32_t>(inits.size()),
+                                static_cast<int32_t>(dynamicSizes.size())});
   props.setIsTied(isTied);
   props.setSyncOnReturn(syncOnReturn);
   props.setNumIndexArgs(numIndexArgs);
@@ -741,8 +739,7 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
     ShapedType shapedType = cast<ShapedType>(resultType);
     entryBlock.addArgument(
         PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
-                                shapedType.getElementType(), scope,
-                                syncScope),
+                                shapedType.getElementType(), scope, syncScope),
         result.location);
   }
 
@@ -864,7 +861,7 @@ ParseResult LoopOp::parse(OpAsmParser &parser, OperationState &result) {
 
   // Resolve count operands as index types.
   SmallVector<Type> countTypes(countOperands.size(),
-                                parser.getBuilder().getIndexType());
+                               parser.getBuilder().getIndexType());
   if (parser.resolveOperands(countOperands, countTypes,
                              parser.getCurrentLocation(), result.operands)) {
     return failure();
@@ -924,11 +921,10 @@ ParseResult LoopOp::parse(OpAsmParser &parser, OperationState &result) {
 
   // Set properties.
   Properties &props = result.getOrAddProperties<Properties>();
-  props.setOperandSegmentSizes(
-      {static_cast<int32_t>(countOperands.size()),
-       static_cast<int32_t>(readonlyInits.size()),
-       static_cast<int32_t>(inits.size()),
-       static_cast<int32_t>(dynamicSizes.size())});
+  props.setOperandSegmentSizes({static_cast<int32_t>(countOperands.size()),
+                                static_cast<int32_t>(readonlyInits.size()),
+                                static_cast<int32_t>(inits.size()),
+                                static_cast<int32_t>(dynamicSizes.size())});
   props.setIsTied(isTied);
   props.setSyncOnReturn(syncOnReturn);
   props.setNumReadonlyRefs(numReadonlyRefs);
@@ -1083,8 +1079,7 @@ void LoopOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
     ShapedType shapedType = cast<ShapedType>(resultType);
     entryBlock.addArgument(
         PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
-                                shapedType.getElementType(), scope,
-                                syncScope),
+                                shapedType.getElementType(), scope, syncScope),
         result.location);
   }
 
@@ -1138,8 +1133,7 @@ void LoopOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
     ShapedType shapedType = cast<ShapedType>(resultType);
     entryBlock.addArgument(
         PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
-                                shapedType.getElementType(), scope,
-                                syncScope),
+                                shapedType.getElementType(), scope, syncScope),
         result.location);
   }
 
@@ -1678,8 +1672,7 @@ std::optional<StringAttr> GenericOp::getNamespaceName() {
 
 Region &GenericOp::getSymbolRegion() { return getInitializer(); }
 
-SmallVector<std::pair<Attribute, OpFoldResult>>
-GenericOp::getDefinedSymbols() {
+SmallVector<std::pair<Attribute, OpFoldResult>> GenericOp::getDefinedSymbols() {
   SmallVector<std::pair<Attribute, OpFoldResult>> symbols;
   if (getInitializer().empty()) {
     return symbols;
@@ -1939,8 +1932,8 @@ LogicalResult TileGroupOp::verify() {
   }
 
   // Determine source rank.
-  int64_t sourceRank =
-      tgType ? tgType.getScope().getNativeNumProcessorIds() : clusterType.getRank();
+  int64_t sourceRank = tgType ? tgType.getScope().getNativeNumProcessorIds()
+                              : clusterType.getRank();
 
   // Number of split dimension lists must match source rank.
   ArrayRef<int64_t> numSplits = getNumSplitsPerDim();
