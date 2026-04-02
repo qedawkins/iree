@@ -20,9 +20,16 @@ void registerAllDistributedTilingModels(DialectRegistry &registry) {
 }
 
 void attachAllDistributedTilingModels(MLIRContext *ctx) {
-  attachLinalgDistributedTilingModels(ctx);
-  attachLinalgExtDistributedTilingModels(ctx);
-  attachTensorDistributedTilingModels(ctx);
+  // Only attach to dialects that are loaded.
+  if (ctx->getLoadedDialect("linalg")) {
+    attachLinalgDistributedTilingModels(ctx);
+  }
+  if (ctx->getLoadedDialect("iree_linalg_ext")) {
+    attachLinalgExtDistributedTilingModels(ctx);
+  }
+  if (ctx->getLoadedDialect("tensor")) {
+    attachTensorDistributedTilingModels(ctx);
+  }
 }
 
 } // namespace mlir::iree_compiler::IREE::PCF

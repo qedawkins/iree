@@ -45,6 +45,7 @@ iree_cc_library(
     "Passes.cpp"
     "ResolveTokens.cpp"
     "TestDistributedFuseConsumers.cpp"
+    "TestMultiLevelTiling.cpp"
     "TestDistributedFuseProducers.cpp"
     "TestEquivalenceAnalysis.cpp"
     "TestNamespaceResolution.cpp"
