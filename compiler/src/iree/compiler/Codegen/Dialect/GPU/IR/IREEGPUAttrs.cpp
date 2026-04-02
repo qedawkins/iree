@@ -2743,6 +2743,17 @@ bool UseGlobalLoadDMAAttr::hasTilingLevel(unsigned level) const {
   return level == llvm::to_underlying(GPU::TilingLevel::Thread);
 }
 
+void UseGlobalLoadDMAAttr::emitDistributedCopy(
+    OpBuilder &builder, Location loc, Value sourceSref, Value destSref,
+    ArrayRef<OpFoldResult> tileSizes, Value laneId, Value laneCount) const {
+  // TODO: Use DMA-specific ops (coalesced_gather_dma equivalent for srefs)
+  // instead of generic read_slice/write_slice. For now, do the standard
+  // distributed copy — the DMA lowering will be handled by a later pass
+  // that recognizes the promotion pattern.
+  defaultDistributedCopyImpl(builder, loc, sourceSref, destSref, tileSizes,
+                              laneId, laneCount);
+}
+
 //===----------------------------------------------------------------------===//
 // PromoteWithCacheSwizzleAttr
 //===----------------------------------------------------------------------===//
@@ -2752,6 +2763,23 @@ Value PromoteWithCacheSwizzleAttr::promoteOperand(
   return cacheSwizzlePromotionImpl(builder, operand, getCopyConfig());
 }
 
+void PromoteWithCacheSwizzleAttr::emitDistributedCopy(
+    OpBuilder &builder, Location loc, Value sourceSref, Value destSref,
+    ArrayRef<OpFoldResult> tileSizes, Value laneId, Value laneCount) const {
+  // Apply buffer_resource_cast on the source sref for cache swizzle.
+  // The cast annotates the source for cache-line-aligned access.
+  // The stride is computed from the tile leading dimension.
+  Value stride;
+  if (!tileSizes.empty()) {
+    stride = getValueOrCreateConstantIndexOp(builder, loc, tileSizes[0]);
+  }
+  Value castSource = BufferResourceCastOp::create(
+      builder, loc, sourceSref.getType(), sourceSref, stride);
+  // Do the distributed copy from the cast source.
+  defaultDistributedCopyImpl(builder, loc, castSource, destSref, tileSizes,
+                              laneId, laneCount);
+}
+
 //===----------------------------------------------------------------------===//
 // SwizzleOperandAttr
 //===----------------------------------------------------------------------===//
@@ -2759,6 +2787,17 @@ Value PromoteWithCacheSwizzleAttr::promoteOperand(
 Value SwizzleOperandAttr::promoteOperand(mlir::OpBuilder &builder,
                                          mlir::OpOperand &operand) const {
   return swizzlePromotionImpl(builder, operand, getCopyConfig(), getSwizzle());
+}
+
+void SwizzleOperandAttr::emitDistributedCopy(
+    OpBuilder &builder, Location loc, Value sourceSref, Value destSref,
+    ArrayRef<OpFoldResult> tileSizes, Value laneId, Value laneCount) const {
+  // Apply swizzle_hint on the dest sref to minimize bank conflicts.
+  Value swizzledDest = Codegen::SwizzleHintOp::create(
+      builder, loc, destSref.getType(), destSref, getSwizzle());
+  // Do the distributed copy into the swizzled destination.
+  defaultDistributedCopyImpl(builder, loc, sourceSref, swizzledDest, tileSizes,
+                              laneId, laneCount);
 }
 
 //===----------------------------------------------------------------------===//

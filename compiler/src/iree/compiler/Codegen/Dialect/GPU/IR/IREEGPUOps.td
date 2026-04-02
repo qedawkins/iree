@@ -213,9 +213,9 @@ def IREEGPU_BufferResourceCastOp : Op<IREEGPU_Dialect, "buffer_resource_cast", [
     // TODO: Add other parameters for casting as needed.
   }];
 
-  let arguments = (ins  AnyRankedTensor:$input,
+  let arguments = (ins  AnyNonVectorShaped:$input,
                         Optional<Index>:$cache_swizzle_stride);
-  let results   = (outs AnyRankedTensor:$result);
+  let results   = (outs AnyNonVectorShaped:$result);
 
   let assemblyFormat = [{
     $input oilist (`cacheSwizzleStride` `(` $cache_swizzle_stride `)` )
