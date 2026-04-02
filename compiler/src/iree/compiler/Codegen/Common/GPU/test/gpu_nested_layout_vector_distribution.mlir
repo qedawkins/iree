@@ -352,9 +352,10 @@ builtin.module attributes { transform.with_named_sequence } {
   }
 }
 
+// For 0-d vectors, to_simt/to_simd are identity and get folded.
 // CHECK: %[[RD:.+]] = vector.transfer_read %{{.*}}[%c0]
 // CHECK-SAME: memref<128xf16>, vector<f16>
-// CHECK: iree_vector_ext.to_simd %[[RD]]
+// CHECK: return %[[RD]] : vector<f16>
 
 // -----
 
@@ -1237,14 +1238,14 @@ builtin.module attributes { transform.with_named_sequence } {
   }
 }
 
+// For 0-d vectors, to_simt is identity and gets folded.
 // CHECK-LABEL: func @zero_d_vector_extract
 // CHECK-SAME:      %[[VEC:.+]]: vector<64xf32>, %[[ACC:.+]]: vector<f32>
-// CHECK-DAG:  %[[SIMT_ACC:.+]] = iree_vector_ext.to_simt %[[ACC]] : vector<f32> -> vector<f32>
-// CHECK-DAG:  %[[SCALAR:.+]] = vector.extract %[[SIMT_ACC]][] : f32 from vector<f32>
+// CHECK-DAG:  %[[SCALAR:.+]] = vector.extract %[[ACC]][] : f32 from vector<f32>
 // CHECK-DAG:  %[[SIMT:.+]] = iree_vector_ext.to_simt %[[VEC]] : vector<64xf32> -> vector<1x1x2xf32>
 // CHECK:      %[[LOCAL:.+]] = vector.multi_reduction <add>, %[[SIMT]], %{{.*}}
 // CHECK:      gpu.subgroup_reduce add %[[LOCAL]]
-// Accumulator addition
+// Accumulator addition.
 // CHECK:      %[[BROADCASTED:.+]] = vector.broadcast %[[SCALAR]] : f32 to vector<1xf32>
 // CHECK:      arith.addf %{{.*}}, %[[BROADCASTED]]
 
