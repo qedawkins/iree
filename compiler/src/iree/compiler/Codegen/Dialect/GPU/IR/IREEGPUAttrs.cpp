@@ -14,6 +14,8 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUEnums.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "iree/compiler/Dialect/LinalgExt/Utils/MatchUtils.h"
 #include "iree/compiler/Utils/EncodingUtils.h"
 #include "iree/compiler/Utils/Indexing.h"
@@ -2746,12 +2748,67 @@ bool UseGlobalLoadDMAAttr::hasTilingLevel(unsigned level) const {
 void UseGlobalLoadDMAAttr::emitDistributedCopy(
     OpBuilder &builder, Location loc, Value sourceSref, Value destSref,
     ArrayRef<OpFoldResult> tileSizes, Value laneId, Value laneCount) const {
-  // TODO: Use DMA-specific ops (coalesced_gather_dma equivalent for srefs)
-  // instead of generic read_slice/write_slice. For now, do the standard
-  // distributed copy — the DMA lowering will be handled by a later pass
-  // that recognizes the promotion pattern.
-  defaultDistributedCopyImpl(builder, loc, sourceSref, destSref, tileSizes,
-                              laneId, laneCount);
+  // Emit the distributed copy and annotate it with the DMA config so
+  // a later pass can convert to hardware DMA ops. The annotation goes
+  // on the read_slice op.
+  //
+  // TODO: Once a PCF-native DMA op exists, emit that directly instead
+  // of annotated read_slice/write_slice.
+  int64_t rank = tileSizes.size();
+  if (rank == 0) {
+    return;
+  }
+
+  auto srefType =
+      cast<iree_compiler::IREE::PCF::ShapedRefType>(sourceSref.getType());
+
+  // Same row-distribution as default.
+  AffineExpr s0, s1;
+  bindSymbols(builder.getContext(), s0, s1);
+  AffineMap ceilDivMap =
+      AffineMap::get(0, 2, s0.ceilDiv(s1), builder.getContext());
+  AffineMap mulMap =
+      AffineMap::get(0, 2, s0 * s1, builder.getContext());
+  AffineExpr s2;
+  bindSymbols(builder.getContext(), s0, s1, s2);
+  AffineMap minMap =
+      AffineMap::get(0, 3, {s0, s1 - s2}, builder.getContext());
+
+  OpFoldResult leadDim = tileSizes[0];
+  OpFoldResult chunk = affine::makeComposedFoldedAffineApply(
+      builder, loc, ceilDivMap, {leadDim, OpFoldResult(laneCount)});
+  OpFoldResult start = affine::makeComposedFoldedAffineApply(
+      builder, loc, mulMap, {OpFoldResult(laneId), chunk});
+  OpFoldResult size = affine::makeComposedFoldedAffineMin(
+      builder, loc, minMap, {chunk, leadDim, start});
+
+  SmallVector<OpFoldResult> offsets(rank, builder.getIndexAttr(0));
+  offsets[0] = start;
+  SmallVector<OpFoldResult> sizes;
+  sizes.push_back(size);
+  for (int64_t i = 1; i < rank; ++i) {
+    sizes.push_back(tileSizes[i]);
+  }
+  SmallVector<OpFoldResult> strides(rank, builder.getIndexAttr(1));
+
+  SmallVector<int64_t> staticSizes;
+  for (OpFoldResult s : sizes) {
+    if (auto attr = dyn_cast<Attribute>(s)) {
+      staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
+    } else {
+      staticSizes.push_back(ShapedType::kDynamic);
+    }
+  }
+  RankedTensorType tileType =
+      RankedTensorType::get(staticSizes, srefType.getElementType());
+
+  auto readOp = iree_compiler::IREE::PCF::ReadSliceOp::create(
+      builder, loc, tileType, sourceSref, offsets, sizes, strides);
+  // Annotate with DMA config for later lowering.
+  readOp->setAttr("iree_gpu.dma_config",
+                   UseGlobalLoadDMAAttr::get(builder.getContext()));
+  iree_compiler::IREE::PCF::WriteSliceOp::create(
+      builder, loc, readOp, destSref, offsets, sizes, strides);
 }
 
 //===----------------------------------------------------------------------===//
