@@ -39,8 +39,7 @@ void addGPUSimpleDistributePassPipeline(OpPassManager &funcPassManager);
 /// thread/subgroup distribution, vectorization, and fuse-and-hoist.
 /// Does NOT include workgroup distribution or bufferization.
 void addGPUTileAndFusePreDistributionPasses(
-    OpPassManager &funcPassManager,
-    const GPUPipelineOptions &pipelineOptions);
+    OpPassManager &funcPassManager, const GPUPipelineOptions &pipelineOptions);
 
 /// Lowering config driven pipeline that uses greedy tile + fuse to distribute
 /// to threads.

@@ -61,12 +61,52 @@ func.func @matmul_dynamic(%lhs: tensor<?x?xf16>, %rhs: tensor<?x?xf16>,
   return %result : tensor<?x?xf32>
 }
 
+// Verify dynamic shapes produce the full nesting structure with correct
+// scf.for bounds and write_slice.
 // CHECK-LABEL: func @matmul_dynamic
+//  CHECK-SAME:   %[[LHS:[A-Za-z0-9_]+]]: tensor<?x?xf16>
+//  CHECK-SAME:   %[[RHS:[A-Za-z0-9_]+]]: tensor<?x?xf16>
+//  CHECK-SAME:   %[[INIT:[A-Za-z0-9_]+]]: tensor<?x?xf32>
+//       CHECK:   %[[R:.+]] = pcf.generic scope(#pcf.sequential)
+//       CHECK:     execute(%{{.+}} <- %[[LHS]], %{{.+}} <- %[[RHS]], %{{.+}} = %[[INIT]])
+//       CHECK:       pcf.generic scope(#pcf.sequential)
+//       CHECK:         execute
+//       CHECK:           %[[INIT_TILE:.+]] = pcf.read_slice
+//       CHECK:           scf.for {{.*}} iter_args({{.*}} = %[[INIT_TILE]])
+//       CHECK:             pcf.read_slice
+//       CHECK:             pcf.read_slice
+//       CHECK:             linalg.matmul
+//       CHECK:             scf.yield
+//       CHECK:           pcf.write_slice
+//       CHECK:           pcf.return
+//       CHECK:       pcf.return
+//       CHECK:   return %[[R]]
+
+// -----
+
+// Non-divisible dimensions: 63x63 output with 32x32 subgroup tiles.
+// Boundary handling should use affine.min for tile size clamping.
+
+func.func @matmul_nondivisible(%lhs: tensor<63x127xf16>,
+                                %rhs: tensor<127x63xf16>,
+                                %init: tensor<63x63xf32>) -> tensor<63x63xf32> {
+  %result = linalg.matmul ins(%lhs, %rhs : tensor<63x127xf16>, tensor<127x63xf16>)
+                          outs(%init : tensor<63x63xf32>) -> tensor<63x63xf32>
+  return %result : tensor<63x63xf32>
+}
+
+// CHECK-LABEL: func @matmul_nondivisible
 //       CHECK:   pcf.generic scope(#pcf.sequential)
-//       CHECK:     pcf.generic scope(#pcf.sequential)
-//       CHECK:       pcf.read_slice
-//       CHECK:       scf.for
-//       CHECK:         pcf.read_slice
-//       CHECK:         pcf.read_slice
-//       CHECK:         linalg.matmul
-//       CHECK:       pcf.write_slice
+//       CHECK:     execute
+//       CHECK:       affine.min
+//       CHECK:       pcf.generic scope(#pcf.sequential)
+//       CHECK:         execute
+//       CHECK:           affine.min
+//       CHECK:           pcf.read_slice
+//       CHECK:           scf.for
+//       CHECK:             pcf.read_slice
+//       CHECK:             pcf.read_slice
+//       CHECK:             linalg.matmul
+//       CHECK:           pcf.write_slice
+//       CHECK:           pcf.return
+//       CHECK:       pcf.return

@@ -452,11 +452,14 @@ void LayoutAnalysis::fixupOp(Operation *op) {
     }
     LDBG() << "Backward fixup broadcast: " << broadcast << "\n";
     LDBG() << "  result layout: " << layout << "\n";
-    LDBG() << "  source has layout: " << hasResolvedLayout(broadcast.getSource()) << "\n";
+    LDBG() << "  source has layout: "
+           << hasResolvedLayout(broadcast.getSource()) << "\n";
     if (hasResolvedLayout(broadcast.getSource())) {
-      LDBG() << "  source layout: " << getResolvedLayout(broadcast.getSource()) << "\n";
+      LDBG() << "  source layout: " << getResolvedLayout(broadcast.getSource())
+             << "\n";
     }
-    LDBG() << "  broadcastedUnitDims empty: " << broadcast.computeBroadcastedUnitDims().empty() << "\n";
+    LDBG() << "  broadcastedUnitDims empty: "
+           << broadcast.computeBroadcastedUnitDims().empty() << "\n";
     // Skip layout propagation for broadcasts with stretched unit dims.
     // This occurs when the vectorizer produces direct broadcasts (e.g.,
     // vector<1x1xf32> → vector<1x1x256xf32>) instead of broadcast+transpose.
@@ -469,8 +472,8 @@ void LayoutAnalysis::fixupOp(Operation *op) {
         broadcast.getResultVectorType().getRank() -
         cast<VectorType>(broadcast.getSourceType()).getRank();
     SmallVector<bool> reductionMask(layout.getRank(), false);
-    std::fill(reductionMask.begin(),
-              reductionMask.begin() + numBroadcastedDims, true);
+    std::fill(reductionMask.begin(), reductionMask.begin() + numBroadcastedDims,
+              true);
     setLayoutOrClone(&broadcast.getSourceMutable(),
                      layout.project(reductionMask));
     return;

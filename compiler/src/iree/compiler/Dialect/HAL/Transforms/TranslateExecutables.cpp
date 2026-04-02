@@ -83,15 +83,15 @@ struct TranslateTargetExecutableVariantsPass
     Attribute optionsAttr = variantOp.getOptionsAttr();
     Attribute cacheKey = targetAttr;
     if (optionsAttr) {
-      cacheKey = ArrayAttr::get(variantOp.getContext(),
-                                {targetAttr, optionsAttr});
+      cacheKey =
+          ArrayAttr::get(variantOp.getContext(), {targetAttr, optionsAttr});
     }
     OpPassManager passManager(variantOp.getOperationName());
     if (pipelineCache) {
       passManager = pipelineCache->getOrCreate(
           cacheKey, variantOp.getOperationName(), [&](OpPassManager &pm) {
-            targetBackend->buildTranslationPassPipeline(targetAttr,
-                                                        optionsAttr, pm);
+            targetBackend->buildTranslationPassPipeline(targetAttr, optionsAttr,
+                                                        pm);
           });
     } else {
       // Fallback for standalone pass usage (e.g., iree-opt).

@@ -19,6 +19,16 @@ iree_compiler_register_plugin(
 
 iree_cc_library(
   NAME
+    ROCDLPipelineOptions
+  HDRS
+    "ROCDLPipelineOptions.h"
+  DEPS
+    LLVMSupport
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
     ROCM
   HDRS
     "ROCMTargetUtils.h"
@@ -26,6 +36,7 @@ iree_cc_library(
     "ROCMTarget.cpp"
     "ROCMTargetUtils.cpp"
   DEPS
+    ::ROCDLPipelineOptions
     LLVMAMDGPUCodeGen
     LLVMAnalysis
     LLVMBitWriter

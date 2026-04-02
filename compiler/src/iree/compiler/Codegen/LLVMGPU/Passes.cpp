@@ -425,8 +425,7 @@ LogicalResult isAtBoundary(Operation *op) {
 }
 
 void addGPUTileAndFusePreDistributionPasses(
-    OpPassManager &funcPassManager,
-    const GPUPipelineOptions &pipelineOptions) {
+    OpPassManager &funcPassManager, const GPUPipelineOptions &pipelineOptions) {
   // Step 0. Apply any user annotated lowering strategies.
   funcPassManager.addPass(createLowerTensorUKernelsPass());
   funcPassManager.addPass(createLoweringConfigInterpreterPass());
@@ -849,8 +848,7 @@ static LogicalResult gpuVectorCopyFn(OpBuilder &builder, Location loc,
   return success();
 }
 
-void addGPUVectorDistributePreBufferizePasses(
-    OpPassManager &funcPassManager) {
+void addGPUVectorDistributePreBufferizePasses(OpPassManager &funcPassManager) {
   // Rematerialize parallel ops for elementwise fusion.
   funcPassManager.addPass(createRematerializeParallelOpsPass());
 

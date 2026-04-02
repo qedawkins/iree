@@ -1,4 +1,5 @@
 // RUN: iree-opt %s --pass-pipeline="builtin.module(iree-pcf-test-tile-to-pcf{tile-sizes=4,8})" --split-input-file | FileCheck %s
+// RUN: iree-opt %s --pass-pipeline="builtin.module(iree-pcf-test-tile-to-pcf{tile-sizes=4,8,0})" --split-input-file | FileCheck %s --check-prefix=CHECK3D
 
 // Basic: tile a linalg.fill into a pcf.loop. The scalar input is passed through
 // directly (not an sref arg), while the DPS init becomes a readwrite sref.
@@ -82,3 +83,59 @@ func.func @tile_generic(%lhs: tensor<16x32xf32>, %dest: tensor<16x32xf32>) -> te
 //       CHECK:      pcf.write_slice
 //       CHECK:      pcf.return
 //       CHECK:  return %[[LOOP]]
+
+// -----
+
+// Dynamic shapes: tile a linalg.generic with dynamic tensor dimensions.
+// The sref types should have dynamic dims and the loop should handle them.
+func.func @tile_dynamic(%lhs: tensor<?x?xf32>, %dest: tensor<?x?xf32>) -> tensor<?x?xf32> {
+  %0 = linalg.generic {
+    indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                     affine_map<(d0, d1) -> (d0, d1)>],
+    iterator_types = ["parallel", "parallel"]
+  } ins(%lhs : tensor<?x?xf32>) outs(%dest : tensor<?x?xf32>) {
+  ^bb0(%in: f32, %out: f32):
+    %1 = arith.addf %in, %out : f32
+    linalg.yield %1 : f32
+  } -> tensor<?x?xf32>
+  return %0 : tensor<?x?xf32>
+}
+
+// CHECK-LABEL: @tile_dynamic
+//  CHECK-SAME:   %[[LHS:[A-Za-z0-9_]+]]: tensor<?x?xf32>
+//  CHECK-SAME:   %[[DEST:[A-Za-z0-9_]+]]: tensor<?x?xf32>
+//       CHECK:  %[[LOOP:.+]] = pcf.loop scope(#pcf.sequential)
+//       CHECK:    execute(%{{.+}} <- %[[LHS]], %{{.+}} = %[[DEST]])
+//       CHECK:         : (!pcf.sref<?x?xf32, #pcf.sequential>, !pcf.sref<?x?xf32, sync(#pcf.sequential)>)
+//       CHECK:        -> (tensor<?x?xf32>) {
+//       CHECK:      pcf.read_slice
+//       CHECK:      pcf.read_slice
+//       CHECK:      linalg.generic
+//       CHECK:      pcf.write_slice
+//       CHECK:      pcf.return
+//       CHECK:  return %[[LOOP]]
+
+// -----
+
+// Reduction dimension: tile a matmul with 3 tile sizes (M=4, N=8, K=0).
+// K is untiled (zero tile size) so the tiled matmul has full K extent.
+// Uses CHECK3D prefix (second RUN line with tile-sizes=4,8,0).
+func.func @tile_matmul(%lhs: tensor<16x32xf32>, %rhs: tensor<32x16xf32>,
+                        %dest: tensor<16x16xf32>) -> tensor<16x16xf32> {
+  %0 = linalg.matmul ins(%lhs, %rhs : tensor<16x32xf32>, tensor<32x16xf32>)
+                      outs(%dest : tensor<16x16xf32>) -> tensor<16x16xf32>
+  return %0 : tensor<16x16xf32>
+}
+
+// CHECK3D-LABEL: @tile_matmul
+// CHECK3D-SAME:   %[[LHS:[A-Za-z0-9_]+]]: tensor<16x32xf32>
+// CHECK3D-SAME:   %[[RHS:[A-Za-z0-9_]+]]: tensor<32x16xf32>
+// CHECK3D-SAME:   %[[DEST:[A-Za-z0-9_]+]]: tensor<16x16xf32>
+//      CHECK3D:  pcf.loop scope(#pcf.sequential)
+//      CHECK3D:    execute(%{{.+}} <- %[[LHS]], %{{.+}} <- %[[RHS]], %{{.+}} = %[[DEST]])
+//      CHECK3D:      pcf.read_slice
+//      CHECK3D:      pcf.read_slice
+//      CHECK3D:      pcf.read_slice
+//      CHECK3D:      linalg.matmul
+//      CHECK3D:      pcf.write_slice
+//      CHECK3D:      pcf.return

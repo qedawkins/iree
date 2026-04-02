@@ -1072,8 +1072,8 @@ LogicalResult TransferReadOp::verify() {
   Type sourceElemType = sourceType.getElementType();
   if (getPadding().getType() != sourceElemType) {
     return emitOpError("padding type ")
-           << getPadding().getType()
-           << " does not match source element type " << sourceElemType;
+           << getPadding().getType() << " does not match source element type "
+           << sourceElemType;
   }
 
   // Check vector element type matches source element type.
