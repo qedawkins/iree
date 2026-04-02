@@ -25,6 +25,7 @@ iree_lit_test_suite(
             "iree_gpu_attrs.mlir",
             "iree_gpu_inner_tiled_ops.mlir",
             "iree_gpu_ops.mlir",
+            "promote_operand.mlir",
             "target_attrs.mlir",
         ],
         include = ["*.mlir"],
