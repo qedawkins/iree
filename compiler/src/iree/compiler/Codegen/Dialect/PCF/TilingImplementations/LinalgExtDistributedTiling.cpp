@@ -14,22 +14,19 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
-using namespace mlir;
-using namespace mlir::iree_compiler;
-using namespace mlir::iree_compiler::IREE::PCF;
-
+namespace mlir::iree_compiler::IREE::PCF {
 namespace {
 
 /// Helper to read a tile from an sref or extract from a tensor.
 static Value readTile(OpBuilder &b, Location loc, Value value,
                       ArrayRef<OpFoldResult> tileOffsets,
                       ArrayRef<OpFoldResult> tileSizes) {
-  if (auto srefType = dyn_cast<ShapedRefType>(value.getType())) {
+  if (ShapedRefType srefType = dyn_cast<ShapedRefType>(value.getType())) {
     int64_t rank = srefType.getRank();
     SmallVector<int64_t> staticSizes;
     staticSizes.reserve(rank);
     for (OpFoldResult size : tileSizes) {
-      if (auto attr = dyn_cast<Attribute>(size)) {
+      if (Attribute attr = dyn_cast<Attribute>(size)) {
         staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
       } else {
         staticSizes.push_back(ShapedType::kDynamic);
@@ -82,7 +79,8 @@ struct ScatterOpDistributedTilingModel
       while (static_cast<int64_t>(updateOffsets.size()) < updateRank) {
         int64_t dim = updateOffsets.size();
         updateOffsets.push_back(b.getIndexAttr(0));
-        updateSizes.push_back(IREE::LinalgExt::getDim(b, loc, updates, dim));
+        updateSizes.push_back(
+            IREE::LinalgExt::getDim(b, loc, updates, dim));
       }
       updates = readTile(b, loc, updates, updateOffsets, updateSizes);
     }
@@ -236,8 +234,6 @@ struct MapStoreOpDistributedTilingModel
 };
 
 } // namespace
-
-namespace mlir::iree_compiler::IREE::PCF {
 
 void attachLinalgExtDistributedTilingModels(MLIRContext *ctx) {
   IREE::LinalgExt::ScatterOp::attachInterface<ScatterOpDistributedTilingModel>(

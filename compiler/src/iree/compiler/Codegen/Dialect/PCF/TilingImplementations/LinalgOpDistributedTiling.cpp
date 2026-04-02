@@ -14,10 +14,7 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
-using namespace mlir;
-using namespace mlir::iree_compiler::IREE::PCF;
-using namespace mlir::linalg;
-
+namespace mlir::iree_compiler::IREE::PCF {
 namespace {
 
 /// Computes the offsets and sizes for a single operand tile given the
@@ -26,8 +23,9 @@ namespace {
 /// zero tile size).
 static std::optional<
     std::pair<SmallVector<OpFoldResult>, SmallVector<OpFoldResult>>>
-computeOperandTilePosition(OpBuilder &b, Location loc, LinalgOp linalgOp,
-                           OpOperand &opOperand, ArrayRef<OpFoldResult> offsets,
+computeOperandTilePosition(OpBuilder &b, Location loc,
+                           linalg::LinalgOp linalgOp, OpOperand &opOperand,
+                           ArrayRef<OpFoldResult> offsets,
                            ArrayRef<OpFoldResult> sizes) {
   AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&opOperand);
   int64_t rank = indexingMap.getNumResults();
@@ -38,7 +36,7 @@ computeOperandTilePosition(OpBuilder &b, Location loc, LinalgOp linalgOp,
 
   for (AffineExpr expr : indexingMap.getResults()) {
     // Only handle simple dim expressions for now.
-    auto dimExpr = dyn_cast<AffineDimExpr>(expr);
+    AffineDimExpr dimExpr = dyn_cast<AffineDimExpr>(expr);
     if (!dimExpr) {
       return std::nullopt;
     }
@@ -61,7 +59,7 @@ static Value readTileFromSref(OpBuilder &b, Location loc, Value sref,
   SmallVector<int64_t> staticSizes;
   staticSizes.reserve(rank);
   for (OpFoldResult size : tileSizes) {
-    if (auto attr = dyn_cast<Attribute>(size)) {
+    if (Attribute attr = dyn_cast<Attribute>(size)) {
       staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
     } else {
       staticSizes.push_back(ShapedType::kDynamic);
@@ -106,7 +104,7 @@ struct LinalgOpDistributedTilingModel
       ArrayRef<DistributedOperandInfo> operandInfo,
       ArrayRef<DistributedResultInfo> resultInfo) const {
     Location loc = op->getLoc();
-    LinalgOp linalgOp = cast<LinalgOp>(op);
+    linalg::LinalgOp linalgOp = cast<linalg::LinalgOp>(op);
 
     // Build the tiled operand list. For each operand:
     // - If operandInfo says it's already a tile (isTile=true) and the value
@@ -166,7 +164,7 @@ struct LinalgOpDistributedTilingModel
 
     // Compute result types from the tiled DPS init operands.
     SmallVector<Type> resultTensorTypes =
-        getTensorOutputTypes(linalgOp, tiledOperands);
+        linalg::getTensorOutputTypes(linalgOp, tiledOperands);
 
     // Clone the linalg op with tiled operands.
     // Use a plain OpBuilder for cloning to avoid greedy rewriter
@@ -176,7 +174,7 @@ struct LinalgOpDistributedTilingModel
                                    b.getInsertionPoint());
     Operation *tiledOp =
         clone(plainBuilder, linalgOp, resultTensorTypes, tiledOperands);
-    offsetIndices(b, cast<LinalgOp>(tiledOp), offsets);
+    linalg::offsetIndices(b, cast<linalg::LinalgOp>(tiledOp), offsets);
 
     // Handle results. For each result, either write to dest sref or return
     // the tile value.
@@ -191,7 +189,11 @@ struct LinalgOpDistributedTilingModel
         SmallVector<OpFoldResult> resultOffsets;
         SmallVector<OpFoldResult> resultSizes;
         for (AffineExpr expr : indexingMap.getResults()) {
-          auto dimExpr = cast<AffineDimExpr>(expr);
+          AffineDimExpr dimExpr = dyn_cast<AffineDimExpr>(expr);
+          if (!dimExpr) {
+            // Non-permutation map — cannot compute result tile position.
+            return failure();
+          }
           unsigned pos = dimExpr.getPosition();
           resultOffsets.push_back(offsets[pos]);
           resultSizes.push_back(sizes[pos]);
@@ -216,7 +218,7 @@ struct LinalgOpDistributedTilingModel
   SmallVector<Type>
   getReductionIterArgTypes(Operation *op, OpBuilder &b,
                            const MultiLevelTilingParams &params) const {
-    LinalgOp linalgOp = cast<LinalgOp>(op);
+    linalg::LinalgOp linalgOp = cast<linalg::LinalgOp>(op);
     SmallVector<Type> types;
     // For each DPS init, compute the tiled type from the lane tile sizes.
     // The iter arg type is a tensor with the lane tile shape.
@@ -227,7 +229,7 @@ struct LinalgOpDistributedTilingModel
       // Compute the tiled shape from lane tile sizes.
       SmallVector<int64_t> tiledShape;
       for (AffineExpr expr : indexingMap.getResults()) {
-        auto dimExpr = dyn_cast<AffineDimExpr>(expr);
+        AffineDimExpr dimExpr = dyn_cast<AffineDimExpr>(expr);
         if (!dimExpr) {
           // Non-trivial indexing — use dynamic.
           tiledShape.push_back(ShapedType::kDynamic);
@@ -236,7 +238,8 @@ struct LinalgOpDistributedTilingModel
         unsigned pos = dimExpr.getPosition();
         // Use lane tile size for this dimension.
         if (pos < params.lane.tileSizes.size()) {
-          if (auto attr = dyn_cast<Attribute>(params.lane.tileSizes[pos])) {
+          if (Attribute attr =
+                  dyn_cast<Attribute>(params.lane.tileSizes[pos])) {
             int64_t tileSize = cast<IntegerAttr>(attr).getInt();
             if (tileSize != 0) {
               tiledShape.push_back(tileSize);
@@ -259,7 +262,7 @@ struct LinalgOpDistributedTilingModel
                     ArrayRef<OpFoldResult> sizes,
                     const MultiLevelTilingParams &params) const {
     Location loc = op->getLoc();
-    LinalgOp linalgOp = cast<LinalgOp>(op);
+    linalg::LinalgOp linalgOp = cast<linalg::LinalgOp>(op);
     SmallVector<Value> inits;
     for (auto [i, init] : llvm::enumerate(linalgOp.getDpsInitsMutable())) {
       Value sref = resultSrefs[i];
@@ -267,11 +270,32 @@ struct LinalgOpDistributedTilingModel
       AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&init);
       SmallVector<OpFoldResult> tileOffsets;
       SmallVector<OpFoldResult> tileSizes;
+      bool validMap = true;
       for (AffineExpr expr : indexingMap.getResults()) {
-        auto dimExpr = cast<AffineDimExpr>(expr);
+        AffineDimExpr dimExpr = dyn_cast<AffineDimExpr>(expr);
+        if (!dimExpr) {
+          // Non-permutation map — fall back to full sref read.
+          validMap = false;
+          break;
+        }
         unsigned pos = dimExpr.getPosition();
         tileOffsets.push_back(offsets[pos]);
         tileSizes.push_back(sizes[pos]);
+      }
+      if (!validMap) {
+        // Use full sref dimensions as fallback.
+        ShapedRefType srefType = cast<ShapedRefType>(sref.getType());
+        tileOffsets.clear();
+        tileSizes.clear();
+        for (int64_t d = 0, rank = srefType.getRank(); d < rank; ++d) {
+          tileOffsets.push_back(b.getIndexAttr(0));
+          if (srefType.isDynamicDim(d)) {
+            tileSizes.push_back(
+                OpFoldResult(b.getIndexAttr(ShapedType::kDynamic)));
+          } else {
+            tileSizes.push_back(b.getIndexAttr(srefType.getDimSize(d)));
+          }
+        }
       }
       Value tile = readTileFromSref(b, loc, sref, tileOffsets, tileSizes);
       inits.push_back(tile);
@@ -286,7 +310,7 @@ struct LinalgOpDistributedTilingModel
                               ArrayRef<OpFoldResult> sizes,
                               const MultiLevelTilingParams &params) const {
     Location loc = op->getLoc();
-    LinalgOp linalgOp = cast<LinalgOp>(op);
+    linalg::LinalgOp linalgOp = cast<linalg::LinalgOp>(op);
     for (auto [i, init] : llvm::enumerate(linalgOp.getDpsInitsMutable())) {
       Value result = reductionResults[i];
       Value sref = resultSrefs[i];
@@ -294,11 +318,31 @@ struct LinalgOpDistributedTilingModel
       AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&init);
       SmallVector<OpFoldResult> tileOffsets;
       SmallVector<OpFoldResult> tileSizes;
+      bool validMap = true;
       for (AffineExpr expr : indexingMap.getResults()) {
-        auto dimExpr = cast<AffineDimExpr>(expr);
+        AffineDimExpr dimExpr = dyn_cast<AffineDimExpr>(expr);
+        if (!dimExpr) {
+          validMap = false;
+          break;
+        }
         unsigned pos = dimExpr.getPosition();
         tileOffsets.push_back(offsets[pos]);
         tileSizes.push_back(sizes[pos]);
+      }
+      if (!validMap) {
+        // Non-permutation map — write the full tile at offset 0.
+        ShapedRefType srefType = cast<ShapedRefType>(sref.getType());
+        tileOffsets.clear();
+        tileSizes.clear();
+        for (int64_t d = 0, rank = srefType.getRank(); d < rank; ++d) {
+          tileOffsets.push_back(b.getIndexAttr(0));
+          if (srefType.isDynamicDim(d)) {
+            tileSizes.push_back(
+                OpFoldResult(b.getIndexAttr(ShapedType::kDynamic)));
+          } else {
+            tileSizes.push_back(b.getIndexAttr(srefType.getDimSize(d)));
+          }
+        }
       }
       int64_t resultRank = cast<ShapedType>(result.getType()).getRank();
       SmallVector<OpFoldResult> strides(resultRank, b.getIndexAttr(1));
@@ -307,8 +351,6 @@ struct LinalgOpDistributedTilingModel
     }
   }
 };
-
-} // namespace
 
 /// Register for a single linalg op.
 template <typename OpType>
@@ -323,9 +365,9 @@ static void registerAllLinalgOps(MLIRContext *ctx) {
   (registerOneLinalgOp<OpTypes>(ctx), ...);
 }
 
-#define GET_OP_LIST
+} // namespace
 
-namespace mlir::iree_compiler::IREE::PCF {
+#define GET_OP_LIST
 
 void attachLinalgDistributedTilingModels(MLIRContext *ctx) {
   // Register for linalg.generic.

@@ -162,9 +162,9 @@ addReadonlyArgs<GenericOp>(RewriterBase &rewriter, GenericOp genericOp,
   return newGenericOp;
 }
 
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Distributed producer match impl
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 /// For a given result of a scoped op, find all pcf.read_slice ops on the
 /// corresponding sref region argument that read the init value.
@@ -259,9 +259,9 @@ matchDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
                                      "no fusable distributed producer found");
 }
 
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Distributed producer fusion impl
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 template <typename OpTy>
 static void
@@ -465,9 +465,9 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
 
 } // namespace
 
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Public API Specializations
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 LogicalResult
 matchDistributedProducer(RewriterBase &rewriter, PCF::GenericOp genericOp,
