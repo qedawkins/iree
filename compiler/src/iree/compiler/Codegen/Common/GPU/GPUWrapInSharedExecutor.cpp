@@ -71,10 +71,10 @@ static LogicalResult wrapBodyInSharedExecutor(Operation *op, Region &bodyRegion,
   Attribute threadScopeAttr = ThreadScopeAttr::get(rewriter.getContext());
   IREE::PCF::ScopeAttrInterface threadScope =
       cast<IREE::PCF::ScopeAttrInterface>(threadScopeAttr);
-  SharedExecutorOp sharedExec = SharedExecutorOp::create(
-      rewriter, op->getLoc(), threadScope,
-      /*readonlyInits=*/capturedTensors.getArrayRef(),
-      /*readwriteInits=*/ValueRange());
+  SharedExecutorOp sharedExec =
+      SharedExecutorOp::create(rewriter, op->getLoc(), threadScope,
+                               /*readonlyInits=*/capturedTensors.getArrayRef(),
+                               /*readwriteInits=*/ValueRange());
 
   // Move all ops into the shared_executor's execute region.
   Block &execBlock = sharedExec.getRegion().front();
@@ -91,8 +91,7 @@ static LogicalResult wrapBodyInSharedExecutor(Operation *op, Region &bodyRegion,
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(&execBlock);
 
-    for (auto [tensor, srefArg] :
-         llvm::zip_equal(capturedList, readonlyRefs)) {
+    for (auto [tensor, srefArg] : llvm::zip_equal(capturedList, readonlyRefs)) {
       auto tensorType = cast<RankedTensorType>(tensor.getType());
       int64_t rank = tensorType.getRank();
 
@@ -104,8 +103,8 @@ static LogicalResult wrapBodyInSharedExecutor(Operation *op, Region &bodyRegion,
       }
       SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
 
-      Value readSlice = ReadSliceOp::create(
-          rewriter, op->getLoc(), tensorType, srefArg, offsets, sizes, strides);
+      Value readSlice = ReadSliceOp::create(rewriter, op->getLoc(), tensorType,
+                                            srefArg, offsets, sizes, strides);
 
       // Replace all uses of the original tensor within the execute region.
       tensor.replaceUsesWithIf(readSlice, [&](OpOperand &use) {
@@ -152,10 +151,10 @@ struct GPUWrapInSharedExecutorPass final
 
       // Skip if the body already contains a shared_executor.
       Block &body = bodyRegion->front();
-      bool alreadyWrapped = llvm::any_of(body.getOperations(),
-                                         [](Operation &bodyOp) {
-                                           return isa<SharedExecutorOp>(bodyOp);
-                                         });
+      bool alreadyWrapped =
+          llvm::any_of(body.getOperations(), [](Operation &bodyOp) {
+            return isa<SharedExecutorOp>(bodyOp);
+          });
       if (alreadyWrapped) {
         return;
       }
@@ -193,9 +192,8 @@ struct GPUWrapInSharedExecutorPass final
       if (&op == funcTerminator) {
         continue;
       }
-      StringRef dialect = op.getDialect()
-                              ? op.getDialect()->getNamespace()
-                              : "";
+      StringRef dialect =
+          op.getDialect() ? op.getDialect()->getNamespace() : "";
       bool keep = dialect == "hal" || dialect == "amdgpu" ||
                   isa<IREE::Codegen::LoadFromBufferOp>(op) ||
                   isa<IREE::Codegen::WorkgroupCountHintOp>(op) ||
@@ -234,10 +232,10 @@ struct GPUWrapInSharedExecutorPass final
     Attribute threadScopeAttr = ThreadScopeAttr::get(rewriter.getContext());
     IREE::PCF::ScopeAttrInterface threadScope =
         cast<IREE::PCF::ScopeAttrInterface>(threadScopeAttr);
-    SharedExecutorOp sharedExec = SharedExecutorOp::create(
-        rewriter, funcOp.getLoc(), threadScope,
-        /*readonlyInits=*/usedCaptures.getArrayRef(),
-        /*readwriteInits=*/ValueRange());
+    SharedExecutorOp sharedExec =
+        SharedExecutorOp::create(rewriter, funcOp.getLoc(), threadScope,
+                                 /*readonlyInits=*/usedCaptures.getArrayRef(),
+                                 /*readwriteInits=*/ValueRange());
 
     Block &execBlock = sharedExec.getRegion().front();
     for (Operation *op : opsToMove) {
@@ -260,9 +258,9 @@ struct GPUWrapInSharedExecutorPass final
           sizes.push_back(rewriter.getIndexAttr(tensorType.getDimSize(i)));
         }
         SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
-        Value readSlice = ReadSliceOp::create(
-            rewriter, funcOp.getLoc(), tensorType, srefArg, offsets, sizes,
-            strides);
+        Value readSlice =
+            ReadSliceOp::create(rewriter, funcOp.getLoc(), tensorType, srefArg,
+                                offsets, sizes, strides);
         tensor.replaceUsesWithIf(readSlice, [&](OpOperand &use) {
           return sharedExec.getRegion().isAncestor(
               use.getOwner()->getParentRegion());

@@ -31,7 +31,6 @@ static bool isDefinedOutside(Value val, Region &region) {
   return !region.isAncestor(val.getDefiningOp()->getParentRegion());
 }
 
-
 /// Result of tracing a tensor value back to its sref source.
 struct TraceResult {
   /// Chain of view-like ops from root to the transfer_read source.
@@ -74,8 +73,7 @@ static std::optional<TraceResult> traceToSref(Value source) {
 /// argument. The chain is replaced with pcf.subview/pcf.expand_shape ops on
 /// the sref, and the transfer_read becomes an iree_vector_ext.transfer_read.
 static void convertInputReads(SharedExecutorOp sharedExec,
-                              ScopeAttrInterface scope,
-                              IRRewriter &rewriter) {
+                              ScopeAttrInterface scope, IRRewriter &rewriter) {
   Region &region = sharedExec.getRegion();
 
   // Collect reads first to avoid modifying the IR while iterating.
@@ -113,9 +111,8 @@ static void convertInputReads(SharedExecutorOp sharedExec,
             rewriter.getContext(), resultTensorType.getShape(),
             resultTensorType.getElementType(), scope);
         sref = SubviewOp::create(
-            rewriter, loc, resultSrefType, sref,
-            extractSlice.getMixedOffsets(), extractSlice.getMixedSizes(),
-            extractSlice.getMixedStrides());
+            rewriter, loc, resultSrefType, sref, extractSlice.getMixedOffsets(),
+            extractSlice.getMixedSizes(), extractSlice.getMixedStrides());
       } else if (auto expandShape = dyn_cast<tensor::ExpandShapeOp>(op)) {
         auto resultTensorType =
             cast<RankedTensorType>(expandShape.getResult().getType());
@@ -127,9 +124,9 @@ static void convertInputReads(SharedExecutorOp sharedExec,
           outputShape.push_back(
               rewriter.create<arith::ConstantIndexOp>(loc, dim));
         }
-        sref = ExpandShapeOp::create(
-            rewriter, loc, resultSrefType, sref,
-            expandShape.getReassociation(), outputShape);
+        sref =
+            ExpandShapeOp::create(rewriter, loc, resultSrefType, sref,
+                                  expandShape.getReassociation(), outputShape);
       }
     }
 
@@ -141,8 +138,8 @@ static void convertInputReads(SharedExecutorOp sharedExec,
     }
     AffineMap permMap = readOp.getPermutationMap();
     Value newRead = TransferReadOp::create(
-        rewriter, loc, vecType, sref, readOp.getIndices(),
-        readOp.getPadding(), inBounds, permMap, readOp.getMask());
+        rewriter, loc, vecType, sref, readOp.getIndices(), readOp.getPadding(),
+        inBounds, permMap, readOp.getMask());
     rewriter.replaceOp(readOp, newRead);
 
     // Clean up dead tensor ops in the chain.
@@ -187,8 +184,7 @@ static void convertOutputWrites(SharedExecutorOp sharedExec,
     // Compose offsets: transfer_write offsets + write_slice offsets.
     // The transfer_write typically writes to [0, 0, ...] of a temporary
     // tensor, so the composed offset is just the write_slice offset.
-    SmallVector<OpFoldResult> writeSliceOffsets =
-        writeSlice.getMixedOffsets();
+    SmallVector<OpFoldResult> writeSliceOffsets = writeSlice.getMixedOffsets();
     SmallVector<Value> transferWriteIndices(transferWrite.getIndices());
 
     // Compose: add transfer_write indices to write_slice offsets.

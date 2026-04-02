@@ -12,12 +12,12 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVectorExtras.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
-#include "llvm/Support/Debug.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
 #define DEBUG_TYPE "iree-pcf-distributed-fuse-consumers"
@@ -107,28 +107,24 @@ LoopOp addReadonlyAndReadwriteArgs<LoopOp>(
   int64_t readonlyInsertIdx = numOriginalReadonlyRefs;
   for (Value init : newReadonlyInits) {
     ShapedType shapedType = cast<ShapedType>(init.getType());
-    ShapedRefType srefType = ShapedRefType::get(
-        context, shapedType.getShape(), shapedType.getElementType(),
-        loopOp.getScope());
-    BlockArgument arg =
-        body->insertArgument(readonlyInsertIdx, srefType, loc);
+    ShapedRefType srefType =
+        ShapedRefType::get(context, shapedType.getShape(),
+                           shapedType.getElementType(), loopOp.getScope());
+    BlockArgument arg = body->insertArgument(readonlyInsertIdx, srefType, loc);
     newReadonlyRefs.push_back(arg);
     ++readonlyInsertIdx;
   }
 
   // Insert new readwrite sref args before id args.
   int64_t numIdArgs = loopOp.getCount().size();
-  int64_t readwriteInsertIdx =
-      body->getNumArguments() - numIdArgs;
+  int64_t readwriteInsertIdx = body->getNumArguments() - numIdArgs;
   Attribute syncScope = SyncOnReturnAttr::get(context);
   for (Type resultType : newResultTypes) {
     ShapedType shapedType = cast<ShapedType>(resultType);
-    ShapedRefType srefType =
-        ShapedRefType::get(context, shapedType.getShape(),
-                           shapedType.getElementType(), loopOp.getScope(),
-                           syncScope);
-    BlockArgument arg =
-        body->insertArgument(readwriteInsertIdx, srefType, loc);
+    ShapedRefType srefType = ShapedRefType::get(context, shapedType.getShape(),
+                                                shapedType.getElementType(),
+                                                loopOp.getScope(), syncScope);
+    BlockArgument arg = body->insertArgument(readwriteInsertIdx, srefType, loc);
     newReadwriteRefs.push_back(arg);
     ++readwriteInsertIdx;
   }
@@ -186,11 +182,10 @@ GenericOp addReadonlyAndReadwriteArgs<GenericOp>(
       genericOp.getNumLeadingArgs() + numOriginalReadonlyRefs;
   for (Value init : newReadonlyInits) {
     ShapedType shapedType = cast<ShapedType>(init.getType());
-    ShapedRefType srefType = ShapedRefType::get(
-        context, shapedType.getShape(), shapedType.getElementType(),
-        genericOp.getScope());
-    BlockArgument arg =
-        body->insertArgument(readonlyInsertIdx, srefType, loc);
+    ShapedRefType srefType =
+        ShapedRefType::get(context, shapedType.getShape(),
+                           shapedType.getElementType(), genericOp.getScope());
+    BlockArgument arg = body->insertArgument(readonlyInsertIdx, srefType, loc);
     newReadonlyRefs.push_back(arg);
     ++readonlyInsertIdx;
   }
@@ -201,12 +196,10 @@ GenericOp addReadonlyAndReadwriteArgs<GenericOp>(
   Attribute syncScope = SyncOnReturnAttr::get(context);
   for (Type resultType : newResultTypes) {
     ShapedType shapedType = cast<ShapedType>(resultType);
-    ShapedRefType srefType =
-        ShapedRefType::get(context, shapedType.getShape(),
-                           shapedType.getElementType(), genericOp.getScope(),
-                           syncScope);
-    BlockArgument arg =
-        body->insertArgument(readwriteInsertIdx, srefType, loc);
+    ShapedRefType srefType = ShapedRefType::get(
+        context, shapedType.getShape(), shapedType.getElementType(),
+        genericOp.getScope(), syncScope);
+    BlockArgument arg = body->insertArgument(readwriteInsertIdx, srefType, loc);
     newReadwriteRefs.push_back(arg);
     ++readwriteInsertIdx;
   }
@@ -256,9 +249,8 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
        llvm::zip_equal(params.operands, params.slices)) {
     OpOperand &currOperand = clonedOp->getOpOperand(operand);
     Type undistributedType = currOperand.get().getType();
-    UnrealizedConversionCastOp conversion =
-        UnrealizedConversionCastOp::create(rewriter, loc, undistributedType,
-                                           slice.getSource());
+    UnrealizedConversionCastOp conversion = UnrealizedConversionCastOp::create(
+        rewriter, loc, undistributedType, slice.getSource());
     currOperand.assign(conversion.getResult(0));
     unrealizedConversions.push_back(conversion);
   }
@@ -316,8 +308,7 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
     if (!isa<ShapedType>(targetOp->getOperand(i).getType())) {
       continue;
     }
-    operandToNewReadonlyIdx[i] =
-        static_cast<int64_t>(newReadonlyInits.size());
+    operandToNewReadonlyIdx[i] = static_cast<int64_t>(newReadonlyInits.size());
     newReadonlyInits.push_back(targetOp->getOperand(i));
   }
 
@@ -364,8 +355,8 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
       Value operand = targetOp->getOperand(operandIndex);
       originalOperands.push_back(operand);
       targetOp->getOpOperand(operandIndex)
-          .assign(getInitOrCreateEmpty(
-              cast<OpResult>(operand).getResultNumber()));
+          .assign(
+              getInitOrCreateEmpty(cast<OpResult>(operand).getResultNumber()));
     }
 
     SmallVector<SmallVector<OpFoldResult>> outputShapes;
@@ -398,9 +389,8 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
   SmallVector<BlockArgument> newReadwriteBlockArgs;
   OpTy newProducerOp = addReadonlyAndReadwriteArgs(
       rewriter, producerOp, newReadonlyInits,
-      /*newReadwriteInits=*/newTiedArgs.empty()
-          ? ValueRange()
-          : ValueRange(newTiedArgs),
+      /*newReadwriteInits=*/newTiedArgs.empty() ? ValueRange()
+                                                : ValueRange(newTiedArgs),
       newIsTied, newTiedArgs, newDynamicSizes, newResultTypes,
       newReadonlyBlockArgs, newReadwriteBlockArgs);
 
@@ -469,10 +459,8 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
   }
 
   // Step 9: Call getDistributedImplementation.
-  FailureOr<TilingResult> tilingResult =
-      clonedPCF.getDistributedImplementation(rewriter, iterDomainOffsets,
-                                             iterDomainSizes, operandInfo,
-                                             resultInfo);
+  FailureOr<TilingResult> tilingResult = clonedPCF.getDistributedImplementation(
+      rewriter, iterDomainOffsets, iterDomainSizes, operandInfo, resultInfo);
   assert(succeeded(tilingResult) &&
          "unexpected distributed implementation failure");
 
@@ -493,7 +481,7 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
     assert(succeeded(posRes) &&
            "unexpected failure to get result tile position");
     SmallVector<OpFoldResult> strides(resOffsets.size(),
-                                     rewriter.getIndexAttr(1));
+                                      rewriter.getIndexAttr(1));
     WriteSliceOp::create(rewriter, loc, tiledValue, resultInfo[i].destSref,
                          resOffsets, resSizes, strides);
   }
@@ -530,14 +518,14 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
 //===----------------------------------------------------------------------===//
 
 void fuseDistributedConsumer(RewriterBase &rewriter, GenericOp genericOp,
-                              PCFTilingOpInterface target,
-                              ConsumerFusionParams &params) {
+                             PCFTilingOpInterface target,
+                             ConsumerFusionParams &params) {
   fuseDistributedConsumerImpl(rewriter, genericOp, target, params);
 }
 
 void fuseDistributedConsumer(RewriterBase &rewriter, LoopOp loopOp,
-                              PCFTilingOpInterface target,
-                              ConsumerFusionParams &params) {
+                             PCFTilingOpInterface target,
+                             ConsumerFusionParams &params) {
   fuseDistributedConsumerImpl(rewriter, loopOp, target, params);
 }
 

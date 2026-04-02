@@ -232,9 +232,9 @@ Value cacheSwizzlePromotionImpl(OpBuilder &builder, OpOperand &operand,
 /// dimension. For a tile [M, K] with N lanes, each lane copies
 /// ceil(M/N) rows from source to dest.
 static void emitRowDistributedCopy(OpBuilder &builder, Location loc,
-                                    Value sourceSref, Value destSref,
-                                    ArrayRef<OpFoldResult> tileSizes,
-                                    Value laneId, Value laneCount) {
+                                   Value sourceSref, Value destSref,
+                                   ArrayRef<OpFoldResult> tileSizes,
+                                   Value laneId, Value laneCount) {
   int64_t rank = tileSizes.size();
   if (rank == 0) {
     return;
@@ -251,13 +251,11 @@ static void emitRowDistributedCopy(OpBuilder &builder, Location loc,
   bindSymbols(builder.getContext(), s0, s1);
   AffineMap ceilDivMap =
       AffineMap::get(0, 2, s0.ceilDiv(s1), builder.getContext());
-  AffineMap mulMap =
-      AffineMap::get(0, 2, s0 * s1, builder.getContext());
+  AffineMap mulMap = AffineMap::get(0, 2, s0 * s1, builder.getContext());
 
   AffineExpr s2;
   bindSymbols(builder.getContext(), s0, s1, s2);
-  AffineMap minMap =
-      AffineMap::get(0, 3, {s0, s1 - s2}, builder.getContext());
+  AffineMap minMap = AffineMap::get(0, 3, {s0, s1 - s2}, builder.getContext());
 
   OpFoldResult leadDim = tileSizes[0];
   OpFoldResult laneIdOFR = laneId;
@@ -298,15 +296,15 @@ static void emitRowDistributedCopy(OpBuilder &builder, Location loc,
   Value tile = iree_compiler::IREE::PCF::ReadSliceOp::create(
       builder, loc, tileType, sourceSref, offsets, sizes, strides);
   iree_compiler::IREE::PCF::WriteSliceOp::create(builder, loc, tile, destSref,
-                                                   offsets, sizes, strides);
+                                                 offsets, sizes, strides);
 }
 
 void defaultDistributedCopyImpl(OpBuilder &builder, Location loc,
-                                 Value sourceSref, Value destSref,
-                                 ArrayRef<OpFoldResult> tileSizes,
-                                 Value laneId, Value laneCount) {
-  emitRowDistributedCopy(builder, loc, sourceSref, destSref, tileSizes,
-                          laneId, laneCount);
+                                Value sourceSref, Value destSref,
+                                ArrayRef<OpFoldResult> tileSizes, Value laneId,
+                                Value laneCount) {
+  emitRowDistributedCopy(builder, loc, sourceSref, destSref, tileSizes, laneId,
+                         laneCount);
 }
 
 } // namespace mlir::iree_compiler::IREE::GPU

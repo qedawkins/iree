@@ -34,10 +34,9 @@ static bool isTileSizeZero(OpFoldResult tileSize) {
 /// Core implementation of tileToPCFLoop. Templated to support both LoopOp
 /// and GenericOp, though only LoopOp is currently implemented.
 template <typename OpTy>
-static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
-                                     PCFTilingOpInterface target,
-                                     ScopeAttrInterface scope,
-                                     ArrayRef<OpFoldResult> tileSizes) {
+static FailureOr<OpTy>
+tileToPCFImpl(RewriterBase &rewriter, PCFTilingOpInterface target,
+              ScopeAttrInterface scope, ArrayRef<OpFoldResult> tileSizes) {
   // Only LoopOp is supported for now.
   if constexpr (!std::is_same_v<OpTy, LoopOp>) {
     return rewriter.notifyMatchFailure(
@@ -129,8 +128,7 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
       readwriteInits.push_back(op->getOperand(i));
     } else {
       // Tileable non-DPS-init -> readonly sref.
-      operandToReadonlySrefIdx[i] =
-          static_cast<int64_t>(readonlyInits.size());
+      operandToReadonlySrefIdx[i] = static_cast<int64_t>(readonlyInits.size());
       readonlyInits.push_back(op->getOperand(i));
     }
   }
@@ -138,7 +136,7 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
   // Step 5: Create the LoopOp.
   rewriter.setInsertionPoint(op);
   LoopOp loopOp = LoopOp::create(rewriter, loc, scope, iterationCounts,
-                                  readonlyInits, readwriteInits);
+                                 readonlyInits, readwriteInits);
 
   // Step 6: Inside the body, compute tile offsets/sizes from the loop's
   // ID args.
@@ -154,8 +152,7 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
     // offset[i] = id[i] * tileSize[i].
     AffineExpr d0, d1;
     bindSymbols(rewriter.getContext(), d0, d1);
-    AffineMap mulMap =
-        AffineMap::get(0, 2, d0 * d1, rewriter.getContext());
+    AffineMap mulMap = AffineMap::get(0, 2, d0 * d1, rewriter.getContext());
 
     // size[i] = min(tileSize[i], domain[i].size - offset[i]).
     AffineExpr s2;
@@ -175,8 +172,7 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
         // Tiled dimension: compute offset and clamped size.
         OpFoldResult idVal = idArgs[tiledDimIdx];
         OpFoldResult offset = affine::makeComposedFoldedAffineApply(
-            rewriter, loc, mulMap,
-            ArrayRef<OpFoldResult>{idVal, tileSizes[i]});
+            rewriter, loc, mulMap, ArrayRef<OpFoldResult>{idVal, tileSizes[i]});
         offsets[i] = offset;
 
         // Clamp size to handle boundary tiles.
@@ -201,8 +197,7 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
 
       // Scalar tileable operands (e.g. fill value) are passed through
       // directly; they don't have sref args.
-      if (operandToReadonlySrefIdx[i] < 0 &&
-          operandToReadwriteSrefIdx[i] < 0) {
+      if (operandToReadonlySrefIdx[i] < 0 && operandToReadwriteSrefIdx[i] < 0) {
         operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
         continue;
       }
@@ -227,9 +222,8 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
     }
 
     // Step 9: Call getDistributedImplementation.
-    FailureOr<TilingResult> tilingResult =
-        target.getDistributedImplementation(rewriter, offsets, sizes,
-                                            operandInfo, resultInfo);
+    FailureOr<TilingResult> tilingResult = target.getDistributedImplementation(
+        rewriter, offsets, sizes, operandInfo, resultInfo);
     if (failed(tilingResult)) {
       // Clean up the loop op on failure.
       rewriter.eraseOp(loopOp);
@@ -254,8 +248,7 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
       // Use the same approach as the distributed implementation for computing
       // result tile position - typically the implementation handles this itself
       // when destSref is set. But if it returns a tile value, we write it.
-      int64_t resultRank =
-          cast<ShapedType>(tiledValue.getType()).getRank();
+      int64_t resultRank = cast<ShapedType>(tiledValue.getType()).getRank();
       SmallVector<OpFoldResult> writeOffsets(offsets.begin(), offsets.end());
       SmallVector<OpFoldResult> writeSizes(sizes.begin(), sizes.end());
       SmallVector<OpFoldResult> writeStrides(resultRank,
@@ -266,9 +259,9 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
         writeOffsets.push_back(rewriter.getIndexAttr(0));
       }
       while (static_cast<int64_t>(writeSizes.size()) < resultRank) {
-        writeSizes.push_back(rewriter.getIndexAttr(
-            cast<ShapedType>(tiledValue.getType())
-                .getDimSize(writeSizes.size())));
+        writeSizes.push_back(
+            rewriter.getIndexAttr(cast<ShapedType>(tiledValue.getType())
+                                      .getDimSize(writeSizes.size())));
       }
       writeOffsets.resize(resultRank);
       writeSizes.resize(resultRank);
@@ -300,9 +293,9 @@ static FailureOr<OpTy> tileToPCFImpl(RewriterBase &rewriter,
 //===----------------------------------------------------------------------===//
 
 FailureOr<LoopOp> tileToPCFLoop(RewriterBase &rewriter,
-                                 PCFTilingOpInterface target,
-                                 ScopeAttrInterface scope,
-                                 ArrayRef<OpFoldResult> tileSizes) {
+                                PCFTilingOpInterface target,
+                                ScopeAttrInterface scope,
+                                ArrayRef<OpFoldResult> tileSizes) {
   return tileToPCFImpl<LoopOp>(rewriter, target, scope, tileSizes);
 }
 
@@ -311,9 +304,9 @@ FailureOr<LoopOp> tileToPCFLoop(RewriterBase &rewriter,
 //===----------------------------------------------------------------------===//
 
 FailureOr<GenericOp> tileToPCFGeneric(RewriterBase &rewriter,
-                                       PCFTilingOpInterface target,
-                                       ScopeAttrInterface scope,
-                                       ArrayRef<OpFoldResult> tileSizes) {
+                                      PCFTilingOpInterface target,
+                                      ScopeAttrInterface scope,
+                                      ArrayRef<OpFoldResult> tileSizes) {
   return tileToPCFImpl<GenericOp>(rewriter, target, scope, tileSizes);
 }
 

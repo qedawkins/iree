@@ -26,7 +26,7 @@ namespace {
 /// If destSref is set, we write the padded tile to it.
 struct PadOpDistributedTilingModel
     : public PCFTilingOpInterface::ExternalModel<PadOpDistributedTilingModel,
-                                                  tensor::PadOp> {
+                                                 tensor::PadOp> {
 
   SmallVector<unsigned> getTileableOperandIndices(Operation *op) const {
     // PadOp has one shaped operand (the source tensor) at index 0.
@@ -76,22 +76,24 @@ struct PadOpDistributedTilingModel
   }
 
   // Reduction methods not applicable to pad ops.
-  SmallVector<Type> getReductionIterArgTypes(
-      Operation *op, OpBuilder &b,
-      const MultiLevelTilingParams &params) const {
+  SmallVector<Type>
+  getReductionIterArgTypes(Operation *op, OpBuilder &b,
+                           const MultiLevelTilingParams &params) const {
     return {};
   }
-  SmallVector<Value> emitReductionInit(
-      Operation *op, OpBuilder &b, ValueRange resultSrefs,
-      ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
-      const MultiLevelTilingParams &params) const {
+  SmallVector<Value>
+  emitReductionInit(Operation *op, OpBuilder &b, ValueRange resultSrefs,
+                    ArrayRef<OpFoldResult> offsets,
+                    ArrayRef<OpFoldResult> sizes,
+                    const MultiLevelTilingParams &params) const {
     return {};
   }
-  void emitReductionWriteback(
-      Operation *op, OpBuilder &b, ValueRange reductionResults,
-      ValueRange resultSrefs, ArrayRef<OpFoldResult> offsets,
-      ArrayRef<OpFoldResult> sizes,
-      const MultiLevelTilingParams &params) const {}
+  void emitReductionWriteback(Operation *op, OpBuilder &b,
+                              ValueRange reductionResults,
+                              ValueRange resultSrefs,
+                              ArrayRef<OpFoldResult> offsets,
+                              ArrayRef<OpFoldResult> sizes,
+                              const MultiLevelTilingParams &params) const {}
 };
 
 } // namespace
@@ -103,10 +105,9 @@ void attachTensorDistributedTilingModels(MLIRContext *ctx) {
 }
 
 void registerTensorDistributedTilingModels(DialectRegistry &registry) {
-  registry.addExtension(
-      +[](MLIRContext *ctx, tensor::TensorDialect *dialect) {
-        attachTensorDistributedTilingModels(ctx);
-      });
+  registry.addExtension(+[](MLIRContext *ctx, tensor::TensorDialect *dialect) {
+    attachTensorDistributedTilingModels(ctx);
+  });
 }
 
 } // namespace mlir::iree_compiler::IREE::PCF

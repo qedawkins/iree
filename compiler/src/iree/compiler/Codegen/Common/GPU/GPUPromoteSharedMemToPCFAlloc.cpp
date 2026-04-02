@@ -40,16 +40,16 @@ static bool hasWorkgroupMemorySpace(bufferization::AllocTensorOp allocOp) {
 /// Process a single bufferization.alloc_tensor with workgroup memory space
 /// inside a shared_executor. Converts the alloc_tensor + transfer_write +
 /// value_barrier + transfer_read chain to pcf.alloc + sref ops.
-static LogicalResult
-processAllocTensor(bufferization::AllocTensorOp allocOp,
-                   SharedExecutorOp sharedExec, IRRewriter &rewriter) {
+static LogicalResult processAllocTensor(bufferization::AllocTensorOp allocOp,
+                                        SharedExecutorOp sharedExec,
+                                        IRRewriter &rewriter) {
   ScopeAttrInterface scope = sharedExec.getScope();
   Location loc = allocOp.getLoc();
 
   RankedTensorType tensorType = allocOp.getType();
-  ShapedRefType srefType = ShapedRefType::get(
-      rewriter.getContext(), tensorType.getShape(),
-      tensorType.getElementType(), scope);
+  ShapedRefType srefType =
+      ShapedRefType::get(rewriter.getContext(), tensorType.getShape(),
+                         tensorType.getElementType(), scope);
 
   // Create pcf.alloc in the initializer region.
   Region &initializer = sharedExec.getInitializer();
@@ -83,8 +83,7 @@ processAllocTensor(bufferization::AllocTensorOp allocOp,
   // Add a leading block argument to the execute region for the sref.
   Block &execBlock = sharedExec.getRegion().front();
   int64_t numLeading = sharedExec.getNumLeadingArgs();
-  BlockArgument srefArg =
-      execBlock.insertArgument(numLeading, srefType, loc);
+  BlockArgument srefArg = execBlock.insertArgument(numLeading, srefType, loc);
   sharedExec.setNumLeadingArgs(numLeading + 1);
 
   // Now replace the usage chain:
@@ -108,15 +107,14 @@ processAllocTensor(bufferization::AllocTensorOp allocOp,
     }
     AffineMap permMap = writeOp.getPermutationMap();
     TransferWriteOp::create(rewriter, writeOp.getLoc(), writeOp.getVector(),
-                            srefArg, writeOp.getIndices(), inBounds,
-                            permMap, writeOp.getMask());
+                            srefArg, writeOp.getIndices(), inBounds, permMap,
+                            writeOp.getMask());
 
     // Find value_barrier ops consuming this transfer_write's result.
     Value writtenTensor = writeOp.getResult();
     SmallVector<IREE::GPU::ValueBarrierOp> barriersToConvert;
     for (OpOperand &use : writtenTensor.getUses()) {
-      if (auto barrier =
-              dyn_cast<IREE::GPU::ValueBarrierOp>(use.getOwner())) {
+      if (auto barrier = dyn_cast<IREE::GPU::ValueBarrierOp>(use.getOwner())) {
         barriersToConvert.push_back(barrier);
       }
     }
@@ -137,8 +135,7 @@ processAllocTensor(bufferization::AllocTensorOp allocOp,
 
         SmallVector<vector::TransferReadOp> readsToConvert;
         for (OpOperand &use : barrierResult.getUses()) {
-          if (auto readOp =
-                  dyn_cast<vector::TransferReadOp>(use.getOwner())) {
+          if (auto readOp = dyn_cast<vector::TransferReadOp>(use.getOwner())) {
             readsToConvert.push_back(readOp);
           }
         }
@@ -153,9 +150,8 @@ processAllocTensor(bufferization::AllocTensorOp allocOp,
           }
           AffineMap readPermMap = readOp.getPermutationMap();
           Value newRead = IREE::VectorExt::TransferReadOp::create(
-              rewriter, readOp.getLoc(), vecType, srefArg,
-              readOp.getIndices(), readOp.getPadding(), readInBounds,
-              readPermMap, readOp.getMask());
+              rewriter, readOp.getLoc(), vecType, srefArg, readOp.getIndices(),
+              readOp.getPadding(), readInBounds, readPermMap, readOp.getMask());
           rewriter.replaceOp(readOp, newRead);
         }
       }
@@ -189,12 +185,11 @@ struct GPUPromoteSharedMemToPCFAllocPass final
     getOperation()->walk([&](SharedExecutorOp sharedExec) {
       // Collect alloc_tensor ops with workgroup memory space.
       SmallVector<bufferization::AllocTensorOp> allocOps;
-      sharedExec.getRegion().walk(
-          [&](bufferization::AllocTensorOp allocOp) {
-            if (hasWorkgroupMemorySpace(allocOp)) {
-              allocOps.push_back(allocOp);
-            }
-          });
+      sharedExec.getRegion().walk([&](bufferization::AllocTensorOp allocOp) {
+        if (hasWorkgroupMemorySpace(allocOp)) {
+          allocOps.push_back(allocOp);
+        }
+      });
 
       for (bufferization::AllocTensorOp allocOp : allocOps) {
         if (failed(processAllocTensor(allocOp, sharedExec, rewriter))) {

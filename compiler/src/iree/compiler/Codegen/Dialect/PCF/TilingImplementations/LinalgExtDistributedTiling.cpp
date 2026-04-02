@@ -38,13 +38,13 @@ static Value readTile(OpBuilder &b, Location loc, Value value,
     RankedTensorType resultType =
         RankedTensorType::get(staticSizes, srefType.getElementType());
     SmallVector<OpFoldResult> strides(rank, b.getIndexAttr(1));
-    return ReadSliceOp::create(b, loc, resultType, value,
-                               tileOffsets, tileSizes, strides);
+    return ReadSliceOp::create(b, loc, resultType, value, tileOffsets,
+                               tileSizes, strides);
   }
   int64_t rank = cast<RankedTensorType>(value.getType()).getRank();
   SmallVector<OpFoldResult> strides(rank, b.getIndexAttr(1));
-  return tensor::ExtractSliceOp::create(b, loc, value,
-                                        tileOffsets, tileSizes, strides);
+  return tensor::ExtractSliceOp::create(b, loc, value, tileOffsets, tileSizes,
+                                        strides);
 }
 
 //===----------------------------------------------------------------------===//
@@ -57,8 +57,7 @@ static Value readTile(OpBuilder &b, Location loc, Value value,
 /// tensor results.
 struct ScatterOpDistributedTilingModel
     : public PCFTilingOpInterface::ExternalModel<
-          ScatterOpDistributedTilingModel,
-          IREE::LinalgExt::ScatterOp> {
+          ScatterOpDistributedTilingModel, IREE::LinalgExt::ScatterOp> {
 
   SmallVector<unsigned> getTileableOperandIndices(Operation *op) const {
     // updates (0) and original (2) are tileable. indices (1) are tiled along
@@ -94,9 +93,9 @@ struct ScatterOpDistributedTilingModel
       int64_t indicesRank = scatterOp.getIndicesType().getRank();
       int64_t batchRank = scatterOp.getBatchRank();
       SmallVector<OpFoldResult> indicesOffsets(offsets.begin(),
-                                              offsets.begin() + batchRank);
+                                               offsets.begin() + batchRank);
       SmallVector<OpFoldResult> indicesSizes(sizes.begin(),
-                                            sizes.begin() + batchRank);
+                                             sizes.begin() + batchRank);
       if (batchRank != indicesRank) {
         indicesOffsets.push_back(b.getIndexAttr(0));
         indicesSizes.push_back(b.getIndexAttr(scatterOp.getIndexDepth()));
@@ -115,8 +114,8 @@ struct ScatterOpDistributedTilingModel
       resultTypes.push_back(original.getType());
     }
 
-    Operation *tiledOp = mlir::clone(b, op, resultTypes,
-                                     {updates, indices, original});
+    Operation *tiledOp =
+        mlir::clone(b, op, resultTypes, {updates, indices, original});
 
     SmallVector<Value> tiledValues;
     if (destIsSref) {
@@ -129,22 +128,24 @@ struct ScatterOpDistributedTilingModel
   }
 
   // Reduction methods not applicable to scatter ops.
-  SmallVector<Type> getReductionIterArgTypes(
-      Operation *op, OpBuilder &b,
-      const MultiLevelTilingParams &params) const {
+  SmallVector<Type>
+  getReductionIterArgTypes(Operation *op, OpBuilder &b,
+                           const MultiLevelTilingParams &params) const {
     return {};
   }
-  SmallVector<Value> emitReductionInit(
-      Operation *op, OpBuilder &b, ValueRange resultSrefs,
-      ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
-      const MultiLevelTilingParams &params) const {
+  SmallVector<Value>
+  emitReductionInit(Operation *op, OpBuilder &b, ValueRange resultSrefs,
+                    ArrayRef<OpFoldResult> offsets,
+                    ArrayRef<OpFoldResult> sizes,
+                    const MultiLevelTilingParams &params) const {
     return {};
   }
-  void emitReductionWriteback(
-      Operation *op, OpBuilder &b, ValueRange reductionResults,
-      ValueRange resultSrefs, ArrayRef<OpFoldResult> offsets,
-      ArrayRef<OpFoldResult> sizes,
-      const MultiLevelTilingParams &params) const {}
+  void emitReductionWriteback(Operation *op, OpBuilder &b,
+                              ValueRange reductionResults,
+                              ValueRange resultSrefs,
+                              ArrayRef<OpFoldResult> offsets,
+                              ArrayRef<OpFoldResult> sizes,
+                              const MultiLevelTilingParams &params) const {}
 };
 
 //===----------------------------------------------------------------------===//
@@ -155,8 +156,7 @@ struct ScatterOpDistributedTilingModel
 /// When the output is an sref, the op writes directly to it.
 struct MapStoreOpDistributedTilingModel
     : public PCFTilingOpInterface::ExternalModel<
-          MapStoreOpDistributedTilingModel,
-          IREE::LinalgExt::MapStoreOp> {
+          MapStoreOpDistributedTilingModel, IREE::LinalgExt::MapStoreOp> {
 
   SmallVector<unsigned> getTileableOperandIndices(Operation *op) const {
     // input (0) is tileable. output (1) is the destination.
@@ -186,16 +186,15 @@ struct MapStoreOpDistributedTilingModel
       resultTypes.push_back(output.getType());
     }
 
-    Operation *tiledOp = mlir::clone(b, op, resultTypes,
-                                     {tiledInput, output});
+    Operation *tiledOp = mlir::clone(b, op, resultTypes, {tiledInput, output});
     auto tiledMapStoreOp = cast<IREE::LinalgExt::MapStoreOp>(tiledOp);
 
     // Compose the tiling offsets into the transformation body.
     auto indexTransformBuilder =
         [&](ArrayRef<BlockArgument> srcIndices) -> SmallVector<Value> {
       SmallVector<OpFoldResult> offsetIndices;
-      AffineMap addMap = AffineMap::get(
-          2, 0, {b.getAffineDimExpr(0) + b.getAffineDimExpr(1)});
+      AffineMap addMap =
+          AffineMap::get(2, 0, {b.getAffineDimExpr(0) + b.getAffineDimExpr(1)});
       for (auto [srcIdx, offset] : llvm::zip_equal(srcIndices, offsets)) {
         offsetIndices.push_back(affine::makeComposedFoldedAffineApply(
             b, loc, addMap, {OpFoldResult(srcIdx), offset}));
@@ -216,22 +215,24 @@ struct MapStoreOpDistributedTilingModel
   }
 
   // Reduction methods not applicable to map_store ops.
-  SmallVector<Type> getReductionIterArgTypes(
-      Operation *op, OpBuilder &b,
-      const MultiLevelTilingParams &params) const {
+  SmallVector<Type>
+  getReductionIterArgTypes(Operation *op, OpBuilder &b,
+                           const MultiLevelTilingParams &params) const {
     return {};
   }
-  SmallVector<Value> emitReductionInit(
-      Operation *op, OpBuilder &b, ValueRange resultSrefs,
-      ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
-      const MultiLevelTilingParams &params) const {
+  SmallVector<Value>
+  emitReductionInit(Operation *op, OpBuilder &b, ValueRange resultSrefs,
+                    ArrayRef<OpFoldResult> offsets,
+                    ArrayRef<OpFoldResult> sizes,
+                    const MultiLevelTilingParams &params) const {
     return {};
   }
-  void emitReductionWriteback(
-      Operation *op, OpBuilder &b, ValueRange reductionResults,
-      ValueRange resultSrefs, ArrayRef<OpFoldResult> offsets,
-      ArrayRef<OpFoldResult> sizes,
-      const MultiLevelTilingParams &params) const {}
+  void emitReductionWriteback(Operation *op, OpBuilder &b,
+                              ValueRange reductionResults,
+                              ValueRange resultSrefs,
+                              ArrayRef<OpFoldResult> offsets,
+                              ArrayRef<OpFoldResult> sizes,
+                              const MultiLevelTilingParams &params) const {}
 };
 
 } // namespace
@@ -239,8 +240,8 @@ struct MapStoreOpDistributedTilingModel
 namespace mlir::iree_compiler::IREE::PCF {
 
 void attachLinalgExtDistributedTilingModels(MLIRContext *ctx) {
-  IREE::LinalgExt::ScatterOp::attachInterface<
-      ScatterOpDistributedTilingModel>(*ctx);
+  IREE::LinalgExt::ScatterOp::attachInterface<ScatterOpDistributedTilingModel>(
+      *ctx);
   IREE::LinalgExt::MapStoreOp::attachInterface<
       MapStoreOpDistributedTilingModel>(*ctx);
 }

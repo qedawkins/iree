@@ -15,9 +15,9 @@ iree_lit_test_suite(
     lit
   SRCS
     "amdgpu_lower_coalesced_dma_to_gather_lds.mlir"
-    "gpu_absorb_tensor_reads_into_pcf.mlir"
     "decompose_horizontally_fused_gemms.mlir"
     "flatten_swizzle_hint_allocs.mlir"
+    "gpu_absorb_tensor_reads_into_pcf.mlir"
     "gpu_alloc_private_memory_for_dps_ops.mlir"
     "gpu_apply_derived_thread_config.mlir"
     "gpu_apply_padding_online_attention.mlir"

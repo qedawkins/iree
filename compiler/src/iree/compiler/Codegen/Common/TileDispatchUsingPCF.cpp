@@ -38,8 +38,8 @@ struct TilingInfo {
   SmallVector<OpFoldResult> tileSizes;
 };
 
-static FailureOr<TilingInfo>
-getTilingInfo(RewriterBase &rewriter, ArrayRef<Operation *> computeOps) {
+static FailureOr<TilingInfo> getTilingInfo(RewriterBase &rewriter,
+                                           ArrayRef<Operation *> computeOps) {
   Operation *tilableOp = nullptr;
   for (Operation *op : llvm::reverse(computeOps)) {
     if (getLoweringConfig(op)) {
@@ -113,8 +113,7 @@ getTilingInfo(RewriterBase &rewriter, ArrayRef<Operation *> computeOps) {
 //===----------------------------------------------------------------------===//
 
 /// Pattern to fuse distributed consumers into pcf.loop.
-struct FuseConsumerIntoLoopOp final
-    : OpRewritePattern<IREE::PCF::LoopOp> {
+struct FuseConsumerIntoLoopOp final : OpRewritePattern<IREE::PCF::LoopOp> {
   using Base::Base;
   LogicalResult matchAndRewrite(IREE::PCF::LoopOp loopOp,
                                 PatternRewriter &rewriter) const override {
@@ -143,14 +142,12 @@ struct FuseConsumerIntoLoopOp final
 };
 
 /// Pattern to fuse distributed producers into pcf.loop.
-struct FuseProducerIntoLoopOp final
-    : OpRewritePattern<IREE::PCF::LoopOp> {
+struct FuseProducerIntoLoopOp final : OpRewritePattern<IREE::PCF::LoopOp> {
   using Base::Base;
   LogicalResult matchAndRewrite(IREE::PCF::LoopOp loopOp,
                                 PatternRewriter &rewriter) const override {
     IREE::PCF::DistributedProducerFusionParams params;
-    if (failed(
-            IREE::PCF::matchDistributedProducer(rewriter, loopOp, params))) {
+    if (failed(IREE::PCF::matchDistributedProducer(rewriter, loopOp, params))) {
       return failure();
     }
     IREE::PCF::fuseDistributedProducer(rewriter, loopOp, params);
@@ -214,8 +211,7 @@ void TileAndDistributeToWorkgroupsUsingPCFPass::runOnOperation() {
     RewritePatternSet fusionPatterns(context);
     fusionPatterns.add<FuseProducerIntoLoopOp>(context);
     IREE::PCF::populatePCFDropUnusedResultPatterns(fusionPatterns);
-    if (failed(
-            applyPatternsGreedily(funcOp, std::move(fusionPatterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(fusionPatterns)))) {
       funcOp.emitOpError("producer fusion failed");
       return signalPassFailure();
     }
@@ -225,22 +221,19 @@ void TileAndDistributeToWorkgroupsUsingPCFPass::runOnOperation() {
   {
     IRRewriter irRewriter(context);
     SmallVector<IREE::PCF::LoopOp> loops;
-    funcOp->walk([&](IREE::PCF::LoopOp loopOp) {
-      loops.push_back(loopOp);
-    });
+    funcOp->walk([&](IREE::PCF::LoopOp loopOp) { loops.push_back(loopOp); });
     for (IREE::PCF::LoopOp loopOp : loops) {
       IREE::PCF::ConsumerFusionParams params;
       IREE::PCF::PCFTilingOpInterface fusionTarget;
       for (Operation *user : loopOp->getUsers()) {
-        fusionTarget =
-            dyn_cast<IREE::PCF::PCFTilingOpInterface>(user);
+        fusionTarget = dyn_cast<IREE::PCF::PCFTilingOpInterface>(user);
         if (!fusionTarget) {
           continue;
         }
         IREE::PCF::ConsumerFusionParams tempParams;
         if (succeeded(IREE::PCF::matchTilableConsumer(
-                irRewriter, loopOp,
-                cast<TilingInterface>(*fusionTarget), tempParams))) {
+                irRewriter, loopOp, cast<TilingInterface>(*fusionTarget),
+                tempParams))) {
           std::swap(params, tempParams);
           break;
         }
@@ -249,8 +242,8 @@ void TileAndDistributeToWorkgroupsUsingPCFPass::runOnOperation() {
       if (!fusionTarget) {
         continue;
       }
-      IREE::PCF::fuseDistributedConsumer(irRewriter, loopOp,
-                                         fusionTarget, params);
+      IREE::PCF::fuseDistributedConsumer(irRewriter, loopOp, fusionTarget,
+                                         params);
     }
   }
 }

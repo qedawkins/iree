@@ -427,4 +427,67 @@ def IREEGPU_PromoteOperandOp : Op<IREEGPU_Dialect, "promote_operand", [
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// DmaCopyOp
+//===----------------------------------------------------------------------===//
+
+def IREEGPU_DmaCopyOp : Op<IREEGPU_Dialect, "dma_copy", [
+    AttrSizedOperandSegments]> {
+  let summary = [{DMA copy between srefs at different scopes.}];
+  let description = [{
+    Copies data from a source sref to a destination sref using DMA.
+    Each worker (lane) contributes one element per invocation, and the
+    subgroup collectively fills the destination tile. The `transfer_type`
+    determines the granularity of each lane's transfer.
+
+    This is the PCF-level equivalent of `amdgpu.gather_to_lds`. It
+    operates on srefs rather than memrefs and is designed to lower to
+    hardware DMA instructions.
+
+    The source and destination must have matching element types. The
+    offsets/sizes/strides describe the tile region to copy from the source
+    and the region to write in the destination.
+
+    Example:
+    ```mlir
+    iree_gpu.dma_copy %source[%off0, %off1] [%sz0, %sz1] [1, 1]
+                      to %dest[0, 0] [%sz0, %sz1] [1, 1]
+                      : !pcf.sref<128x256xf16, #outer_scope>
+                     -> !pcf.sref<32x16xf16, #inner_scope>
+    ```
+  }];
+
+  let arguments = (ins
+    AnyNonVectorShaped:$source,
+    Variadic<Index>:$source_offsets,
+    Variadic<Index>:$source_sizes,
+    Variadic<Index>:$source_strides,
+    DenseI64ArrayAttr:$static_source_offsets,
+    DenseI64ArrayAttr:$static_source_sizes,
+    DenseI64ArrayAttr:$static_source_strides,
+    AnyNonVectorShaped:$dest,
+    Variadic<Index>:$dest_offsets,
+    Variadic<Index>:$dest_sizes,
+    Variadic<Index>:$dest_strides,
+    DenseI64ArrayAttr:$static_dest_offsets,
+    DenseI64ArrayAttr:$static_dest_sizes,
+    DenseI64ArrayAttr:$static_dest_strides
+  );
+
+  let results = (outs);
+
+  let assemblyFormat = [{
+    $source
+    custom<DynamicIndexList>($source_offsets, $static_source_offsets)
+    custom<DynamicIndexList>($source_sizes, $static_source_sizes)
+    custom<DynamicIndexList>($source_strides, $static_source_strides)
+    `to`
+    $dest
+    custom<DynamicIndexList>($dest_offsets, $static_dest_offsets)
+    custom<DynamicIndexList>($dest_sizes, $static_dest_sizes)
+    custom<DynamicIndexList>($dest_strides, $static_dest_strides)
+    attr-dict `:` type($source) `->` type($dest)
+  }];
+}
+
 #endif // IREE_CODEGEN_DIALECT_IREEGPUOPS

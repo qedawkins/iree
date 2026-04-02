@@ -4,17 +4,17 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
-#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
-#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTilingInterface.h"
-#include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTilingInterface.h"
+#include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
@@ -39,11 +39,12 @@ static bool isZeroTileSize(OpFoldResult ofr) {
 /// `workerIds` has one entry per tiled dimension (in order).
 /// `tileSizes` has one entry per iteration domain dimension.
 /// `domainSizes` has one entry per iteration domain dimension.
-static void computeTileOffsetsAndSizes(
-    OpBuilder &b, Location loc, ArrayRef<OpFoldResult> tileSizes,
-    ArrayRef<Range> iterDomain, ArrayRef<BlockArgument> workerIds,
-    SmallVectorImpl<OpFoldResult> &offsets,
-    SmallVectorImpl<OpFoldResult> &sizes) {
+static void computeTileOffsetsAndSizes(OpBuilder &b, Location loc,
+                                       ArrayRef<OpFoldResult> tileSizes,
+                                       ArrayRef<Range> iterDomain,
+                                       ArrayRef<BlockArgument> workerIds,
+                                       SmallVectorImpl<OpFoldResult> &offsets,
+                                       SmallVectorImpl<OpFoldResult> &sizes) {
   int64_t numDims = tileSizes.size();
   offsets.resize(numDims);
   sizes.resize(numDims);
@@ -66,8 +67,7 @@ static void computeTileOffsetsAndSizes(
           b, loc, mulMap, {idVal, tileSizes[i]});
       offsets[i] = offset;
       OpFoldResult size = affine::makeComposedFoldedAffineMin(
-          b, loc, minMap3,
-          {tileSizes[i], iterDomain[i].size, offset});
+          b, loc, minMap3, {tileSizes[i], iterDomain[i].size, offset});
       sizes[i] = size;
       ++tiledIdx;
     }
@@ -88,9 +88,9 @@ static int64_t countTiledDims(ArrayRef<OpFoldResult> tileSizes) {
 /// Returns the promotion attribute for the given operand index.
 /// If promotionTypes is set, uses the corresponding entry.
 /// Otherwise falls back to DerivedThreadConfig.
-static IREE::GPU::PromotionAttr getPromotionAttr(
-    MLIRContext *ctx, const MultiLevelTilingParams &params,
-    unsigned operandIdx) {
+static IREE::GPU::PromotionAttr
+getPromotionAttr(MLIRContext *ctx, const MultiLevelTilingParams &params,
+                 unsigned operandIdx) {
   // Find the position of operandIdx in operandsToPromote.
   for (int64_t i = 0, e = params.operandsToPromote.size(); i < e; ++i) {
     if (params.operandsToPromote[i] == operandIdx) {
@@ -105,9 +105,9 @@ static IREE::GPU::PromotionAttr getPromotionAttr(
       IREE::GPU::DerivedThreadConfigAttr::get(ctx));
 }
 
-FailureOr<GenericOp> applyMultiLevelTiling(
-    RewriterBase &rewriter, PCFTilingOpInterface target,
-    const MultiLevelTilingParams &params) {
+FailureOr<GenericOp>
+applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
+                      const MultiLevelTilingParams &params) {
   Location loc = target.getLoc();
   Operation *op = target.getOperation();
 
@@ -145,32 +145,32 @@ FailureOr<GenericOp> applyMultiLevelTiling(
       continue;
     }
     if (dpsInitIndices.contains(idx)) {
-      operandToReadwriteIdx[i] =
-          static_cast<int64_t>(readwriteInits.size());
+      operandToReadwriteIdx[i] = static_cast<int64_t>(readwriteInits.size());
       readwriteInits.push_back(op->getOperand(i));
     } else {
-      operandToReadonlyIdx[i] =
-          static_cast<int64_t>(readonlyInits.size());
+      operandToReadonlyIdx[i] = static_cast<int64_t>(readonlyInits.size());
       readonlyInits.push_back(op->getOperand(i));
     }
   }
 
   // Pad tile sizes to iteration domain size.
   SmallVector<OpFoldResult> sgTileSizes(numDims, rewriter.getIndexAttr(0));
-  for (int64_t i = 0, e = std::min(numDims,
-           static_cast<int64_t>(params.subgroup.tileSizes.size()));
+  for (int64_t i = 0,
+               e = std::min(numDims, static_cast<int64_t>(
+                                         params.subgroup.tileSizes.size()));
        i < e; ++i) {
     sgTileSizes[i] = params.subgroup.tileSizes[i];
   }
   SmallVector<OpFoldResult> laneTileSizes(numDims, rewriter.getIndexAttr(0));
-  for (int64_t i = 0, e = std::min(numDims,
-           static_cast<int64_t>(params.lane.tileSizes.size()));
+  for (int64_t i = 0, e = std::min(numDims, static_cast<int64_t>(
+                                                params.lane.tileSizes.size()));
        i < e; ++i) {
     laneTileSizes[i] = params.lane.tileSizes[i];
   }
   SmallVector<OpFoldResult> redTileSizes(numDims, rewriter.getIndexAttr(0));
-  for (int64_t i = 0, e = std::min(numDims,
-           static_cast<int64_t>(params.reductionTileSizes.size()));
+  for (int64_t i = 0,
+               e = std::min(numDims, static_cast<int64_t>(
+                                         params.reductionTileSizes.size()));
        i < e; ++i) {
     redTileSizes[i] = params.reductionTileSizes[i];
   }
@@ -209,8 +209,8 @@ FailureOr<GenericOp> applyMultiLevelTiling(
       AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&opOperand);
 
       for (auto [d, expr] : llvm::enumerate(indexingMap.getResults())) {
-        std::string symName = "operand_" + std::to_string(promIdx) +
-                              "_dim_" + std::to_string(d);
+        std::string symName =
+            "operand_" + std::to_string(promIdx) + "_dim_" + std::to_string(d);
         auto dimExpr = dyn_cast<AffineDimExpr>(expr);
         OpFoldResult tileSize;
         if (dimExpr) {
@@ -244,16 +244,14 @@ FailureOr<GenericOp> applyMultiLevelTiling(
     OpBuilder::InsertionGuard outerGuard(rewriter);
     rewriter.setInsertionPointToStart(&outerGeneric.getRegion().front());
 
-    ArrayRef<BlockArgument> sgReadonlyRefs =
-        outerGeneric.getReadonlyRefArgs();
-    ArrayRef<BlockArgument> sgReadwriteRefs =
-        outerGeneric.getRegionRefArgs();
+    ArrayRef<BlockArgument> sgReadonlyRefs = outerGeneric.getReadonlyRefArgs();
+    ArrayRef<BlockArgument> sgReadwriteRefs = outerGeneric.getRegionRefArgs();
     ArrayRef<BlockArgument> sgIdArgs = outerGeneric.getIdArgs();
 
     // Compute subgroup tile offsets/sizes.
     SmallVector<OpFoldResult> sgOffsets, sgSizes;
-    computeTileOffsetsAndSizes(rewriter, loc, sgTileSizes, iterDomain,
-                               sgIdArgs, sgOffsets, sgSizes);
+    computeTileOffsetsAndSizes(rewriter, loc, sgTileSizes, iterDomain, sgIdArgs,
+                               sgOffsets, sgSizes);
 
     // Build a sub-domain for the lane level (subgroup-relative).
     SmallVector<Range> sgDomain(numDims);
@@ -266,9 +264,10 @@ FailureOr<GenericOp> applyMultiLevelTiling(
     // === Create inner pcf.generic (lane scope) ===
     // No inits/results — captures outer srefs directly.
     auto laneScope = cast<ScopeAttrInterface>(params.lane.scope);
-    GenericOp innerGeneric = numLaneIterators > 0
-        ? GenericOp::create(rewriter, loc, laneScope, numLaneIterators)
-        : GenericOp::create(rewriter, loc, laneScope, /*numIterators=*/1);
+    GenericOp innerGeneric =
+        numLaneIterators > 0
+            ? GenericOp::create(rewriter, loc, laneScope, numLaneIterators)
+            : GenericOp::create(rewriter, loc, laneScope, /*numIterators=*/1);
 
     {
       OpBuilder::InsertionGuard innerGuard(rewriter);
@@ -321,15 +320,15 @@ FailureOr<GenericOp> applyMultiLevelTiling(
         SmallVector<Value> loopResults;
         if (!reductionDims.empty()) {
           int64_t redDim = reductionDims.front();
-          Value lb = getValueOrCreateConstantIndexOp(
-              rewriter, loc, rewriter.getIndexAttr(0));
-          Value ub = getValueOrCreateConstantIndexOp(
-              rewriter, loc, iterDomain[redDim].size);
-          Value step = getValueOrCreateConstantIndexOp(
-              rewriter, loc, redTileSizes[redDim]);
+          Value lb = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                     rewriter.getIndexAttr(0));
+          Value ub = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                     iterDomain[redDim].size);
+          Value step = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                       redTileSizes[redDim]);
 
-          auto forOp = scf::ForOp::create(rewriter, loc, lb, ub, step,
-                                           initValues);
+          auto forOp =
+              scf::ForOp::create(rewriter, loc, lb, ub, step, initValues);
           {
             OpBuilder::InsertionGuard forGuard(rewriter);
             rewriter.setInsertionPointToStart(forOp.getBody());
@@ -426,177 +425,173 @@ FailureOr<GenericOp> applyMultiLevelTiling(
 
         ReturnOp::create(rewriter, loc);
       } else {
-      // === Regular path (non-MMA): use PCFTilingOpInterface ===
-      SmallVector<Value> initValues = target.emitReductionInit(
-          rewriter, sgReadwriteRefs, laneOffsets, laneSizes, params);
+        // === Regular path (non-MMA): use PCFTilingOpInterface ===
+        SmallVector<Value> initValues = target.emitReductionInit(
+            rewriter, sgReadwriteRefs, laneOffsets, laneSizes, params);
 
-      // === Determine reduction loop bounds ===
-      SmallVector<int64_t> reductionDims;
-      for (int64_t i = 0; i < numDims; ++i) {
-        if (iterTypes[i] == utils::IteratorType::reduction &&
-            !isZeroTileSize(redTileSizes[i])) {
-          reductionDims.push_back(i);
+        // === Determine reduction loop bounds ===
+        SmallVector<int64_t> reductionDims;
+        for (int64_t i = 0; i < numDims; ++i) {
+          if (iterTypes[i] == utils::IteratorType::reduction &&
+              !isZeroTileSize(redTileSizes[i])) {
+            reductionDims.push_back(i);
+          }
         }
-      }
 
-      SmallVector<Value> loopResults;
-      if (!reductionDims.empty()) {
-        // For simplicity, handle one reduction dim. Multiple reduction dims
-        // would need nested loops.
-        int64_t redDim = reductionDims.front();
-        Value lb = getValueOrCreateConstantIndexOp(
-            rewriter, loc, rewriter.getIndexAttr(0));
-        Value ub = getValueOrCreateConstantIndexOp(
-            rewriter, loc, iterDomain[redDim].size);
-        Value step = getValueOrCreateConstantIndexOp(
-            rewriter, loc, redTileSizes[redDim]);
+        SmallVector<Value> loopResults;
+        if (!reductionDims.empty()) {
+          // For simplicity, handle one reduction dim. Multiple reduction dims
+          // would need nested loops.
+          int64_t redDim = reductionDims.front();
+          Value lb = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                     rewriter.getIndexAttr(0));
+          Value ub = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                     iterDomain[redDim].size);
+          Value step = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                       redTileSizes[redDim]);
 
-        auto forOp = scf::ForOp::create(rewriter, loc, lb, ub, step,
-                                         initValues);
+          auto forOp =
+              scf::ForOp::create(rewriter, loc, lb, ub, step, initValues);
 
-        {
-          OpBuilder::InsertionGuard forGuard(rewriter);
-          rewriter.setInsertionPointToStart(forOp.getBody());
+          {
+            OpBuilder::InsertionGuard forGuard(rewriter);
+            rewriter.setInsertionPointToStart(forOp.getBody());
 
-          Value iv = forOp.getInductionVar();
-          ValueRange iterArgs = forOp.getRegionIterArgs();
+            Value iv = forOp.getInductionVar();
+            ValueRange iterArgs = forOp.getRegionIterArgs();
 
-          // Compute tile offsets including reduction.
-          SmallVector<OpFoldResult> tileOffsets(laneOffsets);
-          SmallVector<OpFoldResult> tileSizes(laneSizes);
-          tileOffsets[redDim] = iv;
-          tileSizes[redDim] = redTileSizes[redDim];
+            // Compute tile offsets including reduction.
+            SmallVector<OpFoldResult> tileOffsets(laneOffsets);
+            SmallVector<OpFoldResult> tileSizes(laneSizes);
+            tileOffsets[redDim] = iv;
+            tileSizes[redDim] = redTileSizes[redDim];
 
-          // === Build DistributedOperandInfo ===
+            // === Build DistributedOperandInfo ===
+            SmallVector<DistributedOperandInfo> operandInfo;
+            for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
+              unsigned idx = static_cast<unsigned>(i);
+              if (!tileableSet.contains(idx) ||
+                  !isa<ShapedType>(op->getOperand(i).getType())) {
+                // Non-tileable or scalar: pass through.
+                operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
+                continue;
+              }
+
+              if (dpsInitIndices.contains(idx)) {
+                // DPS init: use the iter_arg from the reduction loop.
+                int64_t rwIdx = operandToReadwriteIdx[i];
+                if (rwIdx >= 0 &&
+                    rwIdx < static_cast<int64_t>(iterArgs.size())) {
+                  operandInfo.push_back({iterArgs[rwIdx], /*isTile=*/true});
+                } else {
+                  operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
+                }
+              } else {
+                // Input: use the readonly sref from outer generic.
+                int64_t roIdx = operandToReadonlyIdx[i];
+                if (roIdx >= 0) {
+                  Value sref = sgReadonlyRefs[roIdx];
+
+                  // Check if this operand should be promoted.
+                  if (llvm::is_contained(params.operandsToPromote, idx)) {
+                    // Create promote_operand op. Build symbol names for each
+                    // dimension of the sref.
+                    ShapedRefType srefType =
+                        cast<ShapedRefType>(sref.getType());
+                    int64_t rank = srefType.getRank();
+                    SmallVector<Attribute> symbolNames;
+                    for (int64_t d = 0; d < rank; ++d) {
+                      std::string name = "operand_" + std::to_string(i) +
+                                         "_dim_" + std::to_string(d);
+                      symbolNames.push_back(rewriter.getStringAttr(name));
+                    }
+                    ArrayAttr symbols = rewriter.getArrayAttr(symbolNames);
+
+                    // The promoted sref has the same shape but the subgroup
+                    // scope (inner scope for shared memory).
+                    ShapedRefType promotedType = ShapedRefType::get(
+                        rewriter.getContext(), srefType.getShape(),
+                        srefType.getElementType(),
+                        cast<ScopeAttrInterface>(params.subgroup.scope));
+
+                    // Get the promotion attribute for this operand.
+                    IREE::GPU::PromotionAttr promotion =
+                        getPromotionAttr(rewriter.getContext(), params, idx);
+
+                    Value promoted = IREE::GPU::PromoteOperandOp::create(
+                        rewriter, loc, promotedType, promotion, sref, symbols);
+                    operandInfo.push_back({promoted, /*isTile=*/false});
+                  } else {
+                    operandInfo.push_back({sref, /*isTile=*/false});
+                  }
+                } else {
+                  operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
+                }
+              }
+            }
+
+            // === Build DistributedResultInfo ===
+            // Inside the reduction loop, results should be returned as tiles
+            // (not written to srefs) since they become iter_args.
+            SmallVector<DistributedResultInfo> resultInfo;
+            for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
+              resultInfo.push_back({Value()}); // null destSref — return tile.
+            }
+
+            // === Call getDistributedImplementation ===
+            FailureOr<TilingResult> tiledResult =
+                target.getDistributedImplementation(
+                    rewriter, tileOffsets, tileSizes, operandInfo, resultInfo);
+            if (failed(tiledResult)) {
+              return rewriter.notifyMatchFailure(
+                  target, "getDistributedImplementation failed");
+            }
+
+            // Yield tiled values as loop results.
+            scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
+          }
+
+          loopResults = SmallVector<Value>(forOp.getResults());
+        } else {
+          // No reduction — just call getDistributedImplementation directly.
           SmallVector<DistributedOperandInfo> operandInfo;
           for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
             unsigned idx = static_cast<unsigned>(i);
             if (!tileableSet.contains(idx) ||
                 !isa<ShapedType>(op->getOperand(i).getType())) {
-              // Non-tileable or scalar: pass through.
               operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
               continue;
             }
-
             if (dpsInitIndices.contains(idx)) {
-              // DPS init: use the iter_arg from the reduction loop.
               int64_t rwIdx = operandToReadwriteIdx[i];
-              if (rwIdx >= 0 && rwIdx < static_cast<int64_t>(iterArgs.size())) {
-                operandInfo.push_back({iterArgs[rwIdx], /*isTile=*/true});
-              } else {
-                operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
-              }
+              operandInfo.push_back({sgReadwriteRefs[rwIdx], /*isTile=*/false});
             } else {
-              // Input: use the readonly sref from outer generic.
               int64_t roIdx = operandToReadonlyIdx[i];
-              if (roIdx >= 0) {
-                Value sref = sgReadonlyRefs[roIdx];
-
-                // Check if this operand should be promoted.
-                if (llvm::is_contained(params.operandsToPromote, idx)) {
-                  // Create promote_operand op. Build symbol names for each
-                  // dimension of the sref.
-                  ShapedRefType srefType =
-                      cast<ShapedRefType>(sref.getType());
-                  int64_t rank = srefType.getRank();
-                  SmallVector<Attribute> symbolNames;
-                  for (int64_t d = 0; d < rank; ++d) {
-                    std::string name =
-                        "operand_" + std::to_string(i) + "_dim_" +
-                        std::to_string(d);
-                    symbolNames.push_back(
-                        rewriter.getStringAttr(name));
-                  }
-                  ArrayAttr symbols =
-                      rewriter.getArrayAttr(symbolNames);
-
-                  // The promoted sref has the same shape but the subgroup
-                  // scope (inner scope for shared memory).
-                  ShapedRefType promotedType = ShapedRefType::get(
-                      rewriter.getContext(), srefType.getShape(),
-                      srefType.getElementType(),
-                      cast<ScopeAttrInterface>(params.subgroup.scope));
-
-                  // Get the promotion attribute for this operand.
-                  IREE::GPU::PromotionAttr promotion =
-                      getPromotionAttr(rewriter.getContext(), params, idx);
-
-                  Value promoted =
-                      IREE::GPU::PromoteOperandOp::create(
-                          rewriter, loc, promotedType, promotion,
-                          sref, symbols);
-                  operandInfo.push_back({promoted, /*isTile=*/false});
-                } else {
-                  operandInfo.push_back({sref, /*isTile=*/false});
-                }
-              } else {
-                operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
-              }
+              operandInfo.push_back({sgReadonlyRefs[roIdx], /*isTile=*/false});
             }
           }
-
-          // === Build DistributedResultInfo ===
-          // Inside the reduction loop, results should be returned as tiles
-          // (not written to srefs) since they become iter_args.
           SmallVector<DistributedResultInfo> resultInfo;
           for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
-            resultInfo.push_back({Value()}); // null destSref — return tile.
+            resultInfo.push_back({sgReadwriteRefs[i]});
           }
-
-          // === Call getDistributedImplementation ===
           FailureOr<TilingResult> tiledResult =
               target.getDistributedImplementation(
-                  rewriter, tileOffsets, tileSizes, operandInfo, resultInfo);
+                  rewriter, laneOffsets, laneSizes, operandInfo, resultInfo);
           if (failed(tiledResult)) {
             return rewriter.notifyMatchFailure(
                 target, "getDistributedImplementation failed");
           }
-
-          // Yield tiled values as loop results.
-          scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
+          loopResults = SmallVector<Value>(tiledResult->tiledValues);
         }
 
-        loopResults = SmallVector<Value>(forOp.getResults());
-      } else {
-        // No reduction — just call getDistributedImplementation directly.
-        SmallVector<DistributedOperandInfo> operandInfo;
-        for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
-          unsigned idx = static_cast<unsigned>(i);
-          if (!tileableSet.contains(idx) ||
-              !isa<ShapedType>(op->getOperand(i).getType())) {
-            operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
-            continue;
-          }
-          if (dpsInitIndices.contains(idx)) {
-            int64_t rwIdx = operandToReadwriteIdx[i];
-            operandInfo.push_back({sgReadwriteRefs[rwIdx], /*isTile=*/false});
-          } else {
-            int64_t roIdx = operandToReadonlyIdx[i];
-            operandInfo.push_back({sgReadonlyRefs[roIdx], /*isTile=*/false});
-          }
+        // === Emit writeback ===
+        if (!reductionDims.empty()) {
+          target.emitReductionWriteback(rewriter, loopResults, sgReadwriteRefs,
+                                        laneOffsets, laneSizes, params);
         }
-        SmallVector<DistributedResultInfo> resultInfo;
-        for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
-          resultInfo.push_back({sgReadwriteRefs[i]});
-        }
-        FailureOr<TilingResult> tiledResult =
-            target.getDistributedImplementation(
-                rewriter, laneOffsets, laneSizes, operandInfo, resultInfo);
-        if (failed(tiledResult)) {
-          return rewriter.notifyMatchFailure(
-              target, "getDistributedImplementation failed");
-        }
-        loopResults = SmallVector<Value>(tiledResult->tiledValues);
-      }
 
-      // === Emit writeback ===
-      if (!reductionDims.empty()) {
-        target.emitReductionWriteback(rewriter, loopResults, sgReadwriteRefs,
-                                      laneOffsets, laneSizes, params);
-      }
-
-      // Create pcf.return for inner generic.
-      ReturnOp::create(rewriter, loc);
+        // Create pcf.return for inner generic.
+        ReturnOp::create(rewriter, loc);
       } // end else (regular path)
     }
 

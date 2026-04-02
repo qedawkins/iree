@@ -24,11 +24,10 @@ namespace {
 /// iteration domain offsets/sizes and the operand's indexing map.
 /// Returns std::nullopt if the operand is not tiled (all mapped dims have
 /// zero tile size).
-static std::optional<std::pair<SmallVector<OpFoldResult>,
-                               SmallVector<OpFoldResult>>>
+static std::optional<
+    std::pair<SmallVector<OpFoldResult>, SmallVector<OpFoldResult>>>
 computeOperandTilePosition(OpBuilder &b, Location loc, LinalgOp linalgOp,
-                           OpOperand &opOperand,
-                           ArrayRef<OpFoldResult> offsets,
+                           OpOperand &opOperand, ArrayRef<OpFoldResult> offsets,
                            ArrayRef<OpFoldResult> sizes) {
   AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&opOperand);
   int64_t rank = indexingMap.getNumResults();
@@ -72,8 +71,8 @@ static Value readTileFromSref(OpBuilder &b, Location loc, Value sref,
       RankedTensorType::get(staticSizes, srefType.getElementType());
 
   SmallVector<OpFoldResult> strides(rank, b.getIndexAttr(1));
-  return ReadSliceOp::create(b, loc, resultType, sref,
-                             tileOffsets, tileSizes, strides);
+  return ReadSliceOp::create(b, loc, resultType, sref, tileOffsets, tileSizes,
+                             strides);
 }
 
 /// External model implementing PCFTilingOpInterface for all LinalgOps.
@@ -135,8 +134,8 @@ struct LinalgOpDistributedTilingModel
 
       // Need to extract a tile. Compute tile position from indexing map.
       OpOperand &opOperand = linalgOp->getOpOperand(i);
-      std::optional<std::pair<SmallVector<OpFoldResult>,
-                              SmallVector<OpFoldResult>>>
+      std::optional<
+          std::pair<SmallVector<OpFoldResult>, SmallVector<OpFoldResult>>>
           tilePos = computeOperandTilePosition(b, loc, linalgOp, opOperand,
                                                offsets, sizes);
       if (!tilePos) {
@@ -203,9 +202,8 @@ struct LinalgOpDistributedTilingModel
         // Use a plain builder to avoid greedy rewriter notification issues.
         OpBuilder writeBuilder(b.getContext());
         writeBuilder.setInsertionPointAfter(tiledOp);
-        WriteSliceOp::create(writeBuilder, loc, result,
-                             resultInfo[i].destSref, resultOffsets,
-                             resultSizes, strides);
+        WriteSliceOp::create(writeBuilder, loc, result, resultInfo[i].destSref,
+                             resultOffsets, resultSizes, strides);
         tiledValues.push_back(Value());
       } else {
         tiledValues.push_back(result);
@@ -215,9 +213,9 @@ struct LinalgOpDistributedTilingModel
     return TilingResult{tiledOps, tiledValues, /*generatedSlices=*/{}};
   }
 
-  SmallVector<Type> getReductionIterArgTypes(
-      Operation *op, OpBuilder &b,
-      const MultiLevelTilingParams &params) const {
+  SmallVector<Type>
+  getReductionIterArgTypes(Operation *op, OpBuilder &b,
+                           const MultiLevelTilingParams &params) const {
     LinalgOp linalgOp = cast<LinalgOp>(op);
     SmallVector<Type> types;
     // For each DPS init, compute the tiled type from the lane tile sizes.
@@ -247,8 +245,7 @@ struct LinalgOpDistributedTilingModel
           }
         }
         // Untiled or dynamic — use original dim.
-        tiledShape.push_back(initType.getDimSize(
-            tiledShape.size()));
+        tiledShape.push_back(initType.getDimSize(tiledShape.size()));
       }
       types.push_back(
           RankedTensorType::get(tiledShape, initType.getElementType()));
@@ -256,15 +253,15 @@ struct LinalgOpDistributedTilingModel
     return types;
   }
 
-  SmallVector<Value> emitReductionInit(
-      Operation *op, OpBuilder &b, ValueRange resultSrefs,
-      ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
-      const MultiLevelTilingParams &params) const {
+  SmallVector<Value>
+  emitReductionInit(Operation *op, OpBuilder &b, ValueRange resultSrefs,
+                    ArrayRef<OpFoldResult> offsets,
+                    ArrayRef<OpFoldResult> sizes,
+                    const MultiLevelTilingParams &params) const {
     Location loc = op->getLoc();
     LinalgOp linalgOp = cast<LinalgOp>(op);
     SmallVector<Value> inits;
-    for (auto [i, init] :
-         llvm::enumerate(linalgOp.getDpsInitsMutable())) {
+    for (auto [i, init] : llvm::enumerate(linalgOp.getDpsInitsMutable())) {
       Value sref = resultSrefs[i];
       // Compute tile position from the output indexing map.
       AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&init);
@@ -282,15 +279,15 @@ struct LinalgOpDistributedTilingModel
     return inits;
   }
 
-  void emitReductionWriteback(
-      Operation *op, OpBuilder &b, ValueRange reductionResults,
-      ValueRange resultSrefs, ArrayRef<OpFoldResult> offsets,
-      ArrayRef<OpFoldResult> sizes,
-      const MultiLevelTilingParams &params) const {
+  void emitReductionWriteback(Operation *op, OpBuilder &b,
+                              ValueRange reductionResults,
+                              ValueRange resultSrefs,
+                              ArrayRef<OpFoldResult> offsets,
+                              ArrayRef<OpFoldResult> sizes,
+                              const MultiLevelTilingParams &params) const {
     Location loc = op->getLoc();
     LinalgOp linalgOp = cast<LinalgOp>(op);
-    for (auto [i, init] :
-         llvm::enumerate(linalgOp.getDpsInitsMutable())) {
+    for (auto [i, init] : llvm::enumerate(linalgOp.getDpsInitsMutable())) {
       Value result = reductionResults[i];
       Value sref = resultSrefs[i];
       // Compute tile position from the output indexing map.
@@ -305,8 +302,8 @@ struct LinalgOpDistributedTilingModel
       }
       int64_t resultRank = cast<ShapedType>(result.getType()).getRank();
       SmallVector<OpFoldResult> strides(resultRank, b.getIndexAttr(1));
-      WriteSliceOp::create(b, loc, result, sref,
-                           tileOffsets, tileSizes, strides);
+      WriteSliceOp::create(b, loc, result, sref, tileOffsets, tileSizes,
+                           strides);
     }
   }
 };
@@ -340,10 +337,9 @@ void attachLinalgDistributedTilingModels(MLIRContext *ctx) {
 }
 
 void registerLinalgDistributedTilingModels(DialectRegistry &registry) {
-  registry.addExtension(
-      +[](MLIRContext *ctx, linalg::LinalgDialect *dialect) {
-        attachLinalgDistributedTilingModels(ctx);
-      });
+  registry.addExtension(+[](MLIRContext *ctx, linalg::LinalgDialect *dialect) {
+    attachLinalgDistributedTilingModels(ctx);
+  });
 }
 
 } // namespace mlir::iree_compiler::IREE::PCF

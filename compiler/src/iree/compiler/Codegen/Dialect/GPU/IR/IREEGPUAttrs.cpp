@@ -2745,70 +2745,44 @@ bool UseGlobalLoadDMAAttr::hasTilingLevel(unsigned level) const {
   return level == llvm::to_underlying(GPU::TilingLevel::Thread);
 }
 
-void UseGlobalLoadDMAAttr::emitDistributedCopy(
-    OpBuilder &builder, Location loc, Value sourceSref, Value destSref,
-    ArrayRef<OpFoldResult> tileSizes, Value laneId, Value laneCount) const {
-  // Emit the distributed copy and annotate it with the DMA config so
-  // a later pass can convert to hardware DMA ops. The annotation goes
-  // on the read_slice op.
-  //
-  // TODO: Once a PCF-native DMA op exists, emit that directly instead
-  // of annotated read_slice/write_slice.
+void UseGlobalLoadDMAAttr::emitDistributedCopy(OpBuilder &builder, Location loc,
+                                               Value sourceSref, Value destSref,
+                                               ArrayRef<OpFoldResult> tileSizes,
+                                               Value laneId,
+                                               Value laneCount) const {
+  // Emit a DMA copy op that transfers the tile from source to dest.
+  // The DMA op handles the per-lane distribution internally — each lane
+  // contributes one element and the subgroup collectively fills the tile.
   int64_t rank = tileSizes.size();
   if (rank == 0) {
     return;
   }
 
-  auto srefType =
-      cast<iree_compiler::IREE::PCF::ShapedRefType>(sourceSref.getType());
-
-  // Same row-distribution as default.
-  AffineExpr s0, s1;
-  bindSymbols(builder.getContext(), s0, s1);
-  AffineMap ceilDivMap =
-      AffineMap::get(0, 2, s0.ceilDiv(s1), builder.getContext());
-  AffineMap mulMap =
-      AffineMap::get(0, 2, s0 * s1, builder.getContext());
-  AffineExpr s2;
-  bindSymbols(builder.getContext(), s0, s1, s2);
-  AffineMap minMap =
-      AffineMap::get(0, 3, {s0, s1 - s2}, builder.getContext());
-
-  OpFoldResult leadDim = tileSizes[0];
-  OpFoldResult chunk = affine::makeComposedFoldedAffineApply(
-      builder, loc, ceilDivMap, {leadDim, OpFoldResult(laneCount)});
-  OpFoldResult start = affine::makeComposedFoldedAffineApply(
-      builder, loc, mulMap, {OpFoldResult(laneId), chunk});
-  OpFoldResult size = affine::makeComposedFoldedAffineMin(
-      builder, loc, minMap, {chunk, leadDim, start});
-
-  SmallVector<OpFoldResult> offsets(rank, builder.getIndexAttr(0));
-  offsets[0] = start;
-  SmallVector<OpFoldResult> sizes;
-  sizes.push_back(size);
-  for (int64_t i = 1; i < rank; ++i) {
-    sizes.push_back(tileSizes[i]);
-  }
+  SmallVector<OpFoldResult> srcOffsets(rank, builder.getIndexAttr(0));
+  SmallVector<OpFoldResult> dstOffsets(rank, builder.getIndexAttr(0));
   SmallVector<OpFoldResult> strides(rank, builder.getIndexAttr(1));
 
-  SmallVector<int64_t> staticSizes;
-  for (OpFoldResult s : sizes) {
-    if (auto attr = dyn_cast<Attribute>(s)) {
-      staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
-    } else {
-      staticSizes.push_back(ShapedType::kDynamic);
-    }
-  }
-  RankedTensorType tileType =
-      RankedTensorType::get(staticSizes, srefType.getElementType());
+  // Dispatch to static/dynamic.
+  SmallVector<int64_t> staticSrcOffsets, staticSrcSizes, staticSrcStrides;
+  SmallVector<int64_t> staticDstOffsets, staticDstSizes, staticDstStrides;
+  SmallVector<Value> dynSrcOffsets, dynSrcSizes, dynSrcStrides;
+  SmallVector<Value> dynDstOffsets, dynDstSizes, dynDstStrides;
+  dispatchIndexOpFoldResults(srcOffsets, dynSrcOffsets, staticSrcOffsets);
+  dispatchIndexOpFoldResults(tileSizes, dynSrcSizes, staticSrcSizes);
+  dispatchIndexOpFoldResults(strides, dynSrcStrides, staticSrcStrides);
+  dispatchIndexOpFoldResults(dstOffsets, dynDstOffsets, staticDstOffsets);
+  dispatchIndexOpFoldResults(tileSizes, dynDstSizes, staticDstSizes);
+  dispatchIndexOpFoldResults(strides, dynDstStrides, staticDstStrides);
 
-  auto readOp = iree_compiler::IREE::PCF::ReadSliceOp::create(
-      builder, loc, tileType, sourceSref, offsets, sizes, strides);
-  // Annotate with DMA config for later lowering.
-  readOp->setAttr("iree_gpu.dma_config",
-                   UseGlobalLoadDMAAttr::get(builder.getContext()));
-  iree_compiler::IREE::PCF::WriteSliceOp::create(
-      builder, loc, readOp, destSref, offsets, sizes, strides);
+  DmaCopyOp::create(builder, loc, sourceSref, dynSrcOffsets, dynSrcSizes,
+                    dynSrcStrides,
+                    builder.getDenseI64ArrayAttr(staticSrcOffsets),
+                    builder.getDenseI64ArrayAttr(staticSrcSizes),
+                    builder.getDenseI64ArrayAttr(staticSrcStrides), destSref,
+                    dynDstOffsets, dynDstSizes, dynDstStrides,
+                    builder.getDenseI64ArrayAttr(staticDstOffsets),
+                    builder.getDenseI64ArrayAttr(staticDstSizes),
+                    builder.getDenseI64ArrayAttr(staticDstStrides));
 }
 
 //===----------------------------------------------------------------------===//
@@ -2834,7 +2808,7 @@ void PromoteWithCacheSwizzleAttr::emitDistributedCopy(
       builder, loc, sourceSref.getType(), sourceSref, stride);
   // Do the distributed copy from the cast source.
   defaultDistributedCopyImpl(builder, loc, castSource, destSref, tileSizes,
-                              laneId, laneCount);
+                             laneId, laneCount);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2846,15 +2820,17 @@ Value SwizzleOperandAttr::promoteOperand(mlir::OpBuilder &builder,
   return swizzlePromotionImpl(builder, operand, getCopyConfig(), getSwizzle());
 }
 
-void SwizzleOperandAttr::emitDistributedCopy(
-    OpBuilder &builder, Location loc, Value sourceSref, Value destSref,
-    ArrayRef<OpFoldResult> tileSizes, Value laneId, Value laneCount) const {
+void SwizzleOperandAttr::emitDistributedCopy(OpBuilder &builder, Location loc,
+                                             Value sourceSref, Value destSref,
+                                             ArrayRef<OpFoldResult> tileSizes,
+                                             Value laneId,
+                                             Value laneCount) const {
   // Apply swizzle_hint on the dest sref to minimize bank conflicts.
   Value swizzledDest = Codegen::SwizzleHintOp::create(
       builder, loc, destSref.getType(), destSref, getSwizzle());
   // Do the distributed copy into the swizzled destination.
   defaultDistributedCopyImpl(builder, loc, sourceSref, swizzledDest, tileSizes,
-                              laneId, laneCount);
+                             laneId, laneCount);
 }
 
 //===----------------------------------------------------------------------===//

@@ -24,8 +24,7 @@ namespace mlir::iree_compiler::IREE::GPU {
 namespace {
 
 /// Lowers iree_gpu.promote_operand into pcf.alloc + distributed copy.
-struct LowerPromoteOperandPattern final
-    : OpRewritePattern<PromoteOperandOp> {
+struct LowerPromoteOperandPattern final : OpRewritePattern<PromoteOperandOp> {
   using Base::Base;
   LogicalResult matchAndRewrite(PromoteOperandOp promoteOp,
                                 PatternRewriter &rewriter) const override {
@@ -45,9 +44,9 @@ struct LowerPromoteOperandPattern final
       std::optional<OpFoldResult> resolved =
           PCF::resolveNamespacedSymbol(promoteOp, nsSym);
       if (!resolved) {
-        return rewriter.notifyMatchFailure(
-            promoteOp, "failed to resolve symbol '" +
-                           symName.getValue().str() + "'");
+        return rewriter.notifyMatchFailure(promoteOp,
+                                           "failed to resolve symbol '" +
+                                               symName.getValue().str() + "'");
       }
       tileSizes.push_back(*resolved);
     }

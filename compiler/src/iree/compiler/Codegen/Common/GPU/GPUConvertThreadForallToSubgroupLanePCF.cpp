@@ -48,13 +48,12 @@ getSrefTypeFromTensor(RankedTensorType tensorType,
 }
 
 /// Create a pcf.sref type matching a shaped type's shape and element type.
-static IREE::PCF::ShapedRefType
-getSrefType(ShapedType shapedType, IREE::PCF::ScopeAttrInterface scope,
-            Attribute syncScope = {}) {
-  return IREE::PCF::ShapedRefType::get(shapedType.getContext(),
-                                       shapedType.getShape(),
-                                       shapedType.getElementType(), scope,
-                                       syncScope);
+static IREE::PCF::ShapedRefType getSrefType(ShapedType shapedType,
+                                            IREE::PCF::ScopeAttrInterface scope,
+                                            Attribute syncScope = {}) {
+  return IREE::PCF::ShapedRefType::get(
+      shapedType.getContext(), shapedType.getShape(),
+      shapedType.getElementType(), scope, syncScope);
 }
 
 /// Walk a single-use def chain from an sref value, converting tensor ops to
@@ -76,9 +75,8 @@ static void convertSrefConsumerChain(IRRewriter &rewriter, Value srefVal,
       if (auto expandOp = dyn_cast<tensor::ExpandShapeOp>(user)) {
         rewriter.setInsertionPoint(expandOp);
         RankedTensorType resultTensorType = expandOp.getResultType();
-        IREE::PCF::ShapedRefType expandedSrefType =
-            getSrefType(resultTensorType, scope,
-                        currentSrefType.getSyncScope());
+        IREE::PCF::ShapedRefType expandedSrefType = getSrefType(
+            resultTensorType, scope, currentSrefType.getSyncScope());
 
         auto pcfExpand = IREE::PCF::ExpandShapeOp::create(
             rewriter, expandOp.getLoc(), expandedSrefType, currentVal,
@@ -91,9 +89,8 @@ static void convertSrefConsumerChain(IRRewriter &rewriter, Value srefVal,
       if (auto extractOp = dyn_cast<tensor::ExtractSliceOp>(user)) {
         rewriter.setInsertionPoint(extractOp);
         RankedTensorType resultTensorType = extractOp.getResultType();
-        IREE::PCF::ShapedRefType subviewSrefType =
-            getSrefType(resultTensorType, scope,
-                        currentSrefType.getSyncScope());
+        IREE::PCF::ShapedRefType subviewSrefType = getSrefType(
+            resultTensorType, scope, currentSrefType.getSyncScope());
 
         auto pcfSubview = IREE::PCF::SubviewOp::create(
             rewriter, extractOp.getLoc(), subviewSrefType, currentVal,
@@ -110,8 +107,7 @@ static void convertSrefConsumerChain(IRRewriter &rewriter, Value srefVal,
 
         // Create offsets from the transfer_read indices.
         SmallVector<OpFoldResult> offsets = llvm::map_to_vector(
-            readOp.getIndices(),
-            [](Value v) -> OpFoldResult { return v; });
+            readOp.getIndices(), [](Value v) -> OpFoldResult { return v; });
         SmallVector<OpFoldResult> sizes;
         for (int64_t dim : vecType.getShape()) {
           sizes.push_back(rewriter.getIndexAttr(dim));
@@ -119,9 +115,9 @@ static void convertSrefConsumerChain(IRRewriter &rewriter, Value srefVal,
         SmallVector<OpFoldResult> strides(vecType.getRank(),
                                           rewriter.getIndexAttr(1));
 
-        auto pcfRead = IREE::PCF::ReadSliceOp::create(
-            rewriter, readOp.getLoc(), vecType, currentVal, offsets, sizes,
-            strides);
+        auto pcfRead =
+            IREE::PCF::ReadSliceOp::create(rewriter, readOp.getLoc(), vecType,
+                                           currentVal, offsets, sizes, strides);
         rewriter.replaceOp(readOp, pcfRead.getResult());
         continue;
       }
@@ -152,8 +148,7 @@ static IREE::PCF::ScopeAttrInterface findOutermostScope(Operation *op) {
 /// Converts to: pcf.alloc → barrier_region(sref) → pcf ops.
 /// The alloc_tensor may live outside the pcf.generic (e.g. at workgroup
 /// scope) while the barrier_region consumers live inside it.
-static void convertBarrierChainToSref(IRRewriter &rewriter,
-                                      Operation *funcOp) {
+static void convertBarrierChainToSref(IRRewriter &rewriter, Operation *funcOp) {
   // Find all workgroup-scoped alloc_tensor ops in the function.
   SmallVector<bufferization::AllocTensorOp> allocOps;
   funcOp->walk([&](bufferization::AllocTensorOp allocOp) {
@@ -162,8 +157,7 @@ static void convertBarrierChainToSref(IRRewriter &rewriter,
       return;
     }
     auto addrSpace = dyn_cast<gpu::AddressSpaceAttr>(*memSpace);
-    if (!addrSpace ||
-        addrSpace.getValue() != gpu::AddressSpace::Workgroup) {
+    if (!addrSpace || addrSpace.getValue() != gpu::AddressSpace::Workgroup) {
       return;
     }
     allocOps.push_back(allocOp);
@@ -229,8 +223,7 @@ static void convertBarrierChainToSref(IRRewriter &rewriter,
             continue;
           }
 
-          BlockArgument sharedOut =
-              innerForall.getRegionIterArgs()[outputIdx];
+          BlockArgument sharedOut = innerForall.getRegionIterArgs()[outputIdx];
 
           // Convert parallel_insert_slice ops to pcf.write_slice, writing
           // directly to the sref alloc (bypassing the forall's DPS).
@@ -270,8 +263,7 @@ static void convertBarrierChainToSref(IRRewriter &rewriter,
 
       // Update the yield op to yield the sref block arg.
       auto yieldOp = cast<IREE::GPU::YieldOp>(body.getTerminator());
-      for (auto [idx, yieldOperand] :
-           llvm::enumerate(yieldOp.getOperands())) {
+      for (auto [idx, yieldOperand] : llvm::enumerate(yieldOp.getOperands())) {
         if (yieldOperand.getType() == tensorType) {
           yieldOp.setOperand(idx, blockArg);
         }
@@ -300,8 +292,8 @@ struct GPUConvertThreadForallToSubgroupLanePCFPass final
     // Create nested scopes: subgroup (outer) + lane (inner).
     auto subgroupScope = cast<IREE::PCF::ScopeAttrInterface>(
         IREE::GPU::SubgroupScopeAttr::get(ctx));
-    auto laneScope = cast<IREE::PCF::ScopeAttrInterface>(
-        IREE::GPU::LaneScopeAttr::get(ctx));
+    auto laneScope =
+        cast<IREE::PCF::ScopeAttrInterface>(IREE::GPU::LaneScopeAttr::get(ctx));
 
     SmallVector<IREE::PCF::ScopeAttrInterface> scopes = {subgroupScope,
                                                          laneScope};

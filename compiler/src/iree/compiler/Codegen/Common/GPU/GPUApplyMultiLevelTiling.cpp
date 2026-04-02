@@ -64,15 +64,12 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     }
 
     // Check if this op has subgroup or thread tiling.
-    bool hasSubgroup =
-        gpuConfig.hasTilingLevel(
-            llvm::to_underlying(IREE::GPU::TilingLevel::Subgroup));
-    bool hasThread =
-        gpuConfig.hasTilingLevel(
-            llvm::to_underlying(IREE::GPU::TilingLevel::Thread));
-    bool hasReduction =
-        gpuConfig.hasTilingLevel(
-            llvm::to_underlying(IREE::GPU::TilingLevel::Reduction));
+    bool hasSubgroup = gpuConfig.hasTilingLevel(
+        llvm::to_underlying(IREE::GPU::TilingLevel::Subgroup));
+    bool hasThread = gpuConfig.hasTilingLevel(
+        llvm::to_underlying(IREE::GPU::TilingLevel::Thread));
+    bool hasReduction = gpuConfig.hasTilingLevel(
+        llvm::to_underlying(IREE::GPU::TilingLevel::Reduction));
 
     if (!hasSubgroup && !hasThread) {
       return;
@@ -85,14 +82,12 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
 
     if (hasSubgroup) {
       sgTileSizes = gpuConfig.getTilingLevelSizes(
-          rewriter,
-          llvm::to_underlying(IREE::GPU::TilingLevel::Subgroup), op);
+          rewriter, llvm::to_underlying(IREE::GPU::TilingLevel::Subgroup), op);
     }
     if (hasThread) {
       // Thread tiling — if subgroup is not set, thread = subgroup level.
       SmallVector<OpFoldResult> threadTiles = gpuConfig.getTilingLevelSizes(
-          rewriter,
-          llvm::to_underlying(IREE::GPU::TilingLevel::Thread), op);
+          rewriter, llvm::to_underlying(IREE::GPU::TilingLevel::Thread), op);
       if (!hasSubgroup) {
         sgTileSizes = threadTiles;
       } else {
@@ -101,14 +96,12 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     }
     if (hasReduction) {
       reductionTileSizes = gpuConfig.getTilingLevelSizes(
-          rewriter,
-          llvm::to_underlying(IREE::GPU::TilingLevel::Reduction), op);
+          rewriter, llvm::to_underlying(IREE::GPU::TilingLevel::Reduction), op);
     }
 
     // Get promotion info.
     SmallVector<unsigned> operandsToPromote;
-    if (auto promotedList =
-            IREE::GPU::getPromotedOperandList(gpuConfig)) {
+    if (auto promotedList = IREE::GPU::getPromotedOperandList(gpuConfig)) {
       for (int64_t idx : *promotedList) {
         operandsToPromote.push_back(static_cast<unsigned>(idx));
       }
@@ -116,8 +109,7 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
 
     // Get per-operand promotion types if specified.
     SmallVector<Attribute> promotionTypes;
-    if (auto typesList =
-            IREE::GPU::getPromotionTypesList(gpuConfig)) {
+    if (auto typesList = IREE::GPU::getPromotionTypesList(gpuConfig)) {
       promotionTypes.assign(typesList->begin(), typesList->end());
     }
 

@@ -8,6 +8,8 @@
 # To disable autogeneration for this file entirely, delete this header.        #
 ################################################################################
 
+iree_add_all_subdirs()
+
 iree_cc_library(
   NAME
     TilingImplementations
@@ -21,6 +23,7 @@ iree_cc_library(
   DEPS
     LLVMSupport
     MLIRAffineDialect
+    MLIRArithUtils
     MLIRIR
     MLIRLinalgDialect
     MLIRLinalgUtils
