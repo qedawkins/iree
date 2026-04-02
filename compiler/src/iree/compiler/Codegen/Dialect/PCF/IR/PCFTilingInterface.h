@@ -45,6 +45,10 @@ struct MultiLevelTilingParams {
   SmallVector<OpFoldResult> reductionTileSizes;
   /// Indices of operands to promote.
   SmallVector<unsigned> operandsToPromote;
+  /// Per-operand promotion attributes. If non-empty, promotionTypes[i]
+  /// corresponds to operandsToPromote[i]. If empty, all promoted operands
+  /// use DerivedThreadConfig.
+  SmallVector<Attribute> promotionTypes;
   /// If set, use InnerTileDescAttrInterface-based conversion at the lane
   /// level instead of getDistributedImplementation. This is for MMA/intrinsic
   /// ops where lane distribution is handled by the inner tile descriptor.

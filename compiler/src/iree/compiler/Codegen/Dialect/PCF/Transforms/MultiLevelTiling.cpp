@@ -85,6 +85,26 @@ static int64_t countTiledDims(ArrayRef<OpFoldResult> tileSizes) {
   return count;
 }
 
+/// Returns the promotion attribute for the given operand index.
+/// If promotionTypes is set, uses the corresponding entry.
+/// Otherwise falls back to DerivedThreadConfig.
+static IREE::GPU::PromotionAttr getPromotionAttr(
+    MLIRContext *ctx, const MultiLevelTilingParams &params,
+    unsigned operandIdx) {
+  // Find the position of operandIdx in operandsToPromote.
+  for (int64_t i = 0, e = params.operandsToPromote.size(); i < e; ++i) {
+    if (params.operandsToPromote[i] == operandIdx) {
+      if (i < static_cast<int64_t>(params.promotionTypes.size())) {
+        return cast<IREE::GPU::PromotionAttr>(params.promotionTypes[i]);
+      }
+      break;
+    }
+  }
+  // Default.
+  return cast<IREE::GPU::PromotionAttr>(
+      IREE::GPU::DerivedThreadConfigAttr::get(ctx));
+}
+
 FailureOr<GenericOp> applyMultiLevelTiling(
     RewriterBase &rewriter, PCFTilingOpInterface target,
     const MultiLevelTilingParams &params) {
@@ -358,9 +378,7 @@ FailureOr<GenericOp> applyMultiLevelTiling(
                         srefType.getElementType(),
                         cast<ScopeAttrInterface>(params.subgroup.scope));
                     IREE::GPU::PromotionAttr promotion =
-                        cast<IREE::GPU::PromotionAttr>(
-                            IREE::GPU::DerivedThreadConfigAttr::get(
-                                rewriter.getContext()));
+                        getPromotionAttr(rewriter.getContext(), params, idx);
                     Value promoted = IREE::GPU::PromoteOperandOp::create(
                         rewriter, loc, promotedType, promotion, sref,
                         rewriter.getArrayAttr(symbolNames));
@@ -499,11 +517,9 @@ FailureOr<GenericOp> applyMultiLevelTiling(
                       srefType.getElementType(),
                       cast<ScopeAttrInterface>(params.subgroup.scope));
 
-                  // Use a default promotion attribute.
+                  // Get the promotion attribute for this operand.
                   IREE::GPU::PromotionAttr promotion =
-                      cast<IREE::GPU::PromotionAttr>(
-                          IREE::GPU::DerivedThreadConfigAttr::get(
-                              rewriter.getContext()));
+                      getPromotionAttr(rewriter.getContext(), params, idx);
 
                   Value promoted =
                       IREE::GPU::PromoteOperandOp::create(
