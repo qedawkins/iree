@@ -79,8 +79,7 @@ struct ScatterOpDistributedTilingModel
       while (static_cast<int64_t>(updateOffsets.size()) < updateRank) {
         int64_t dim = updateOffsets.size();
         updateOffsets.push_back(b.getIndexAttr(0));
-        updateSizes.push_back(
-            IREE::LinalgExt::getDim(b, loc, updates, dim));
+        updateSizes.push_back(IREE::LinalgExt::getDim(b, loc, updates, dim));
       }
       updates = readTile(b, loc, updates, updateOffsets, updateSizes);
     }

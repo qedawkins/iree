@@ -52,8 +52,7 @@ static void computeTileOffsetsAndSizes(OpBuilder &b, Location loc,
   AffineMap minMap3 = AffineMap::get(0, 3, {s0, s1 - s2}, b.getContext());
 
   // Add domain offset: offset = domainOffset + id * tileSize.
-  AffineMap addMulMap =
-      AffineMap::get(0, 3, s0 + s1 * s2, b.getContext());
+  AffineMap addMulMap = AffineMap::get(0, 3, s0 + s1 * s2, b.getContext());
 
   int64_t tiledIdx = 0;
   for (int64_t i = 0; i < numDims; ++i) {
@@ -63,8 +62,7 @@ static void computeTileOffsetsAndSizes(OpBuilder &b, Location loc,
     } else {
       OpFoldResult idVal = workerIds[tiledIdx];
       OpFoldResult offset = affine::makeComposedFoldedAffineApply(
-          b, loc, addMulMap,
-          {iterDomain[i].offset, idVal, tileSizes[i]});
+          b, loc, addMulMap, {iterDomain[i].offset, idVal, tileSizes[i]});
       offsets[i] = offset;
       OpFoldResult size = affine::makeComposedFoldedAffineMin(
           b, loc, minMap3, {tileSizes[i], iterDomain[i].size, offset});
@@ -107,14 +105,14 @@ getPromotionAttr(MLIRContext *ctx, const MultiLevelTilingParams &params,
 
 /// Builds DistributedOperandInfo for all operands, handling promotion and
 /// sref routing. Used by both MMA and regular tiling paths.
-static SmallVector<DistributedOperandInfo> buildOperandInfo(
-    RewriterBase &rewriter, Location loc, Operation *op,
-    const DenseSet<unsigned> &tileableSet,
-    const DenseSet<unsigned> &dpsInitIndices,
-    ArrayRef<int64_t> operandToReadonlyIdx,
-    ArrayRef<int64_t> operandToReadwriteIdx,
-    ArrayRef<BlockArgument> sgReadonlyRefs, ValueRange iterArgs,
-    const MultiLevelTilingParams &params) {
+static SmallVector<DistributedOperandInfo>
+buildOperandInfo(RewriterBase &rewriter, Location loc, Operation *op,
+                 const DenseSet<unsigned> &tileableSet,
+                 const DenseSet<unsigned> &dpsInitIndices,
+                 ArrayRef<int64_t> operandToReadonlyIdx,
+                 ArrayRef<int64_t> operandToReadwriteIdx,
+                 ArrayRef<BlockArgument> sgReadonlyRefs, ValueRange iterArgs,
+                 const MultiLevelTilingParams &params) {
   SmallVector<DistributedOperandInfo> operandInfo;
   for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
     unsigned idx = static_cast<unsigned>(i);
@@ -145,8 +143,7 @@ static SmallVector<DistributedOperandInfo> buildOperandInfo(
           SmallVector<Attribute> symbolNames;
           for (int64_t d = 0; d < rank; ++d) {
             symbolNames.push_back(rewriter.getStringAttr(
-                "operand_" + std::to_string(i) + "_dim_" +
-                std::to_string(d)));
+                "operand_" + std::to_string(i) + "_dim_" + std::to_string(d)));
           }
           ShapedRefType promotedType = ShapedRefType::get(
               rewriter.getContext(), srefType.getShape(),
@@ -405,10 +402,10 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             tileSizes[redDim] = redTileSizes[redDim];
 
             // Build operand info using shared helper.
-            SmallVector<DistributedOperandInfo> operandInfo = buildOperandInfo(
-                rewriter, loc, op, tileableSet, dpsInitIndices,
-                operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
-                iterArgs, params);
+            SmallVector<DistributedOperandInfo> operandInfo =
+                buildOperandInfo(rewriter, loc, op, tileableSet, dpsInitIndices,
+                                 operandToReadonlyIdx, operandToReadwriteIdx,
+                                 sgReadonlyRefs, iterArgs, params);
 
             // For MMA path, call getDistributedImplementation with the
             // MMA kind set. The implementation should create the inner_tiled
@@ -489,10 +486,10 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             tileSizes[redDim] = redTileSizes[redDim];
 
             // === Build DistributedOperandInfo ===
-            SmallVector<DistributedOperandInfo> operandInfo = buildOperandInfo(
-                rewriter, loc, op, tileableSet, dpsInitIndices,
-                operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
-                iterArgs, params);
+            SmallVector<DistributedOperandInfo> operandInfo =
+                buildOperandInfo(rewriter, loc, op, tileableSet, dpsInitIndices,
+                                 operandToReadonlyIdx, operandToReadwriteIdx,
+                                 sgReadonlyRefs, iterArgs, params);
 
             // === Build DistributedResultInfo ===
             // Inside the reduction loop, results should be returned as tiles
@@ -529,15 +526,32 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             }
             if (dpsInitIndices.contains(idx)) {
               int64_t rwIdx = operandToReadwriteIdx[i];
+              assert(rwIdx >= 0 &&
+                     "DPS init should have been mapped to readwrite sref");
               operandInfo.push_back({sgReadwriteRefs[rwIdx], /*isTile=*/false});
             } else {
               int64_t roIdx = operandToReadonlyIdx[i];
+              assert(roIdx >= 0 &&
+                     "tileable input should have been mapped to readonly sref");
               operandInfo.push_back({sgReadonlyRefs[roIdx], /*isTile=*/false});
             }
           }
+          // Build result info: map each result to its readwrite sref via the
+          // DPS init operand, not via result index directly.
           SmallVector<DistributedResultInfo> resultInfo;
-          for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
-            resultInfo.push_back({sgReadwriteRefs[i]});
+          if (dpsOp) {
+            for (auto [i, init] :
+                 llvm::enumerate(dpsOp.getDpsInitsMutable())) {
+              int64_t rwIdx =
+                  operandToReadwriteIdx[init.getOperandNumber()];
+              assert(rwIdx >= 0 &&
+                     "DPS init should have been mapped to readwrite sref");
+              resultInfo.push_back({sgReadwriteRefs[rwIdx]});
+            }
+          } else {
+            for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
+              resultInfo.push_back({sgReadwriteRefs[i]});
+            }
           }
           FailureOr<TilingResult> tiledResult =
               target.getDistributedImplementation(

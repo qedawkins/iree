@@ -21,11 +21,8 @@
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Passes.h"
-#include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
-#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "iree/compiler/Codegen/Utils/CodegenOptions.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
@@ -35,6 +32,7 @@
 #include "iree/compiler/Dialect/HAL/Transforms/Passes.h"
 #include "iree/compiler/Dialect/HAL/Utils/ExecutableDebugInfoUtils.h"
 #include "iree/compiler/Dialect/HAL/Utils/LLVMLinkerUtils.h"
+#include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/PluginAPI/Client.h"
 #include "iree/compiler/Utils/EmbeddedDataDirectory.h"
@@ -61,16 +59,18 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "mlir/Dialect/AMDGPU/Utils/Chipset.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LogicalResult.h"
-#include "mlir/Transforms/Passes.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
+#include "mlir/Transforms/Passes.h"
 
 #define DEBUG_TYPE "iree-rocm-target"
 
@@ -267,8 +267,8 @@ struct ROCMOptions {
         cl::desc("Deprecated; use --iree-rocm-emit-debug-info instead."),
         Deprecated("use --iree-rocm-emit-debug-info instead"));
     binder.opt<bool>(
-        "iree-rocm-experimental-staged-pipeline",
-        experimentalStagedPipeline, cl::cat(category),
+        "iree-rocm-experimental-staged-pipeline", experimentalStagedPipeline,
+        cl::cat(category),
         cl::desc("Enable experimental staged pipeline for VectorDistribute "
                  "dispatches. When set, VectorDistribute dispatches use the "
                  "PCF-based staged pipeline instead of the monolithic one."));
@@ -504,8 +504,7 @@ public:
   struct AutoEnableStagedPipelinePass
       : PassWrapper<AutoEnableStagedPipelinePass,
                     OperationPass<IREE::HAL::ExecutableVariantOp>> {
-    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
-        AutoEnableStagedPipelinePass)
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AutoEnableStagedPipelinePass)
 
     StringRef getArgument() const override {
       return "iree-rocm-auto-enable-staged-pipeline";
@@ -548,9 +547,8 @@ public:
 
       // Set experimental_staged_pipeline = true on the variant options.
       ROCM::ROCDLPipelineOptions opts;
-      if (auto existingOpts =
-              dyn_cast_if_present<ROCM::PipelineOptionsAttr>(
-                  variantOp.getOptionsAttr())) {
+      if (auto existingOpts = dyn_cast_if_present<ROCM::PipelineOptionsAttr>(
+              variantOp.getOptionsAttr())) {
         opts = existingOpts.getValue();
       }
       opts.experimentalStagedPipeline = true;
@@ -629,9 +627,8 @@ public:
     if (!translationInfo) {
       return std::nullopt;
     }
-    auto pipelineAttr =
-        dyn_cast_if_present<IREE::GPU::PipelineAttr>(
-            translationInfo.getPassPipeline());
+    auto pipelineAttr = dyn_cast_if_present<IREE::GPU::PipelineAttr>(
+        translationInfo.getPassPipeline());
     if (!pipelineAttr) {
       return std::nullopt;
     }
@@ -673,8 +670,7 @@ public:
       return WalkResult::advance();
     });
     if (hasDynamicShapes) {
-      funcOp->setAttr(excludeAttrName,
-                      UnitAttr::get(funcOp->getContext()));
+      funcOp->setAttr(excludeAttrName, UnitAttr::get(funcOp->getContext()));
       return false;
     }
     return true;
@@ -685,7 +681,7 @@ public:
   /// module-level break points:
   ///   1. func(Workgroup distribution)
   ///   2. module(Ukernel placeholder)
-  ///   3. func(Subgroup + thread distribution) -- DO NOT SUBMIT placeholder
+  ///   3. func(Subgroup + thread distribution) -- TODO: implement.
   ///   4. module(Bufferization placeholder)
   ///   5. func(Post-bufferization placeholder)
   void buildExperimentalStagedPipeline(OpPassManager &passManager) {
@@ -706,10 +702,9 @@ public:
       MultiPipelineNest nest(modulePM);
 
       // VectorDistribute: workgroup distribution only.
-      OpPassManager &stagedFuncPM =
-          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
-                      func::FuncOp::getOperationName(),
-                      TypeID::get<func::FuncOp>());
+      OpPassManager &stagedFuncPM = nest.nestIf(
+          [](Operation *op) { return hasStagedPipeline(op); },
+          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
       stagedFuncPM.addPass(
           createTileAndDistributeToWorkgroupsWithReordering(false));
       stagedFuncPM.addPass(createConfigTrackingCanonicalizerPass());
@@ -717,19 +712,17 @@ public:
       stagedFuncPM.addPass(createConvertWorkgroupForallToPCFPass());
 
       // All other pipelines: run their full native pipeline.
-      OpPassManager &defaultFuncPM =
-          nest.nestIf([](Operation *op) { return !hasStagedPipeline(op); },
-                      func::FuncOp::getOperationName(),
-                      TypeID::get<func::FuncOp>());
-      defaultFuncPM.addPass(
-          createLLVMGPULowerExecutableTargetPass(lowerOpts));
+      OpPassManager &defaultFuncPM = nest.nestIf(
+          [](Operation *op) { return !hasStagedPipeline(op); },
+          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
+      defaultFuncPM.addPass(createLLVMGPULowerExecutableTargetPass(lowerOpts));
 
       nest.commitPass();
     }
 
-    // The expectation is that by the time we get here, all code has been distributed
-    // to a pcf.generic/loop with block level scope. So block level shared_executor
-    // should be resolved either now or right before now.
+    // The expectation is that by the time we get here, all code has been
+    // distributed to a pcf.generic/loop with block level scope. So block level
+    // shared_executor should be resolved either now or right before now.
 
     // --- Module break: ukernel stuff ---
     // Placeholder for ukernel passes that run at module level between
@@ -743,10 +736,9 @@ public:
 
       // VectorDistribute path: wrap workgroup-scoped PCF ops in
       // shared_executor with thread scope.
-      OpPassManager &vdFuncPM =
-          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
-                      func::FuncOp::getOperationName(),
-                      TypeID::get<func::FuncOp>());
+      OpPassManager &vdFuncPM = nest.nestIf(
+          [](Operation *op) { return hasStagedPipeline(op); },
+          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
       vdFuncPM.addPass(createGPUWrapInSharedExecutorPass());
 
       // Pre-bufferization VectorDistribute passes (tiling, vectorization,
@@ -773,8 +765,7 @@ public:
     }
 
     // Fusion cleanup: fuse consumers into subgroup-level pcf producers.
-    FunctionLikeNest(modulePM)
-        .addPass(createGPUFuseSubgroupConsumersPass);
+    FunctionLikeNest(modulePM).addPass(createGPUFuseSubgroupConsumersPass);
 
     // --- Module break: Bufferization ---
     // Bufferize with a default allocation function. By this point the code
@@ -783,13 +774,11 @@ public:
     {
       MultiPipelineNest nest(modulePM);
 
-      OpPassManager &stagedFuncPM =
-          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
-                      func::FuncOp::getOperationName(),
-                      TypeID::get<func::FuncOp>());
+      OpPassManager &stagedFuncPM = nest.nestIf(
+          [](Operation *op) { return hasStagedPipeline(op); },
+          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
       stagedFuncPM.addPass(createEliminateEmptyTensorsPass());
-      stagedFuncPM.addPass(
-          bufferization::createEmptyTensorToAllocTensorPass());
+      stagedFuncPM.addPass(bufferization::createEmptyTensorToAllocTensorPass());
       stagedFuncPM.addPass(createGPUBubbleResourceCastsPass());
       // Use default allocation function (no memory space requirements).
       BufferizationOptions::MemCpyFn memcpyFn =
@@ -810,12 +799,10 @@ public:
     {
       MultiPipelineNest nest(modulePM);
 
-      OpPassManager &stagedFuncPM =
-          nest.nestIf([](Operation *op) { return hasStagedPipeline(op); },
-                      func::FuncOp::getOperationName(),
-                      TypeID::get<func::FuncOp>());
-      stagedFuncPM.addPass(
-          IREE::LinalgExt::createDecomposeMapStorePass());
+      OpPassManager &stagedFuncPM = nest.nestIf(
+          [](Operation *op) { return hasStagedPipeline(op); },
+          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
+      stagedFuncPM.addPass(IREE::LinalgExt::createDecomposeMapStorePass());
       stagedFuncPM.addPass(IREE::GPU::createUnrollToIntrinsicsPass());
       stagedFuncPM.addPass(IREE::GPU::createLowerIREEGPUOpsPass());
       stagedFuncPM.addPass(createCanonicalizerPass());

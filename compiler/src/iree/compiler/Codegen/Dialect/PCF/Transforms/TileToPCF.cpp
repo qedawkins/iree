@@ -244,28 +244,35 @@ tileToPCFImpl(RewriterBase &rewriter, PCFTilingOpInterface target,
         continue;
       }
 
-      // Write the tile to the sref. Compute write position from offsets/sizes.
-      // Use the same approach as the distributed implementation for computing
-      // result tile position - typically the implementation handles this itself
-      // when destSref is set. But if it returns a tile value, we write it.
+      // Compute the result tile position using the TilingInterface.
+      // This correctly handles non-identity output indexing maps.
+      SmallVector<OpFoldResult> writeOffsets;
+      SmallVector<OpFoldResult> writeSizes;
+      TilingInterface tilingIface =
+          cast<TilingInterface>(target.getOperation());
+      LogicalResult posResult = tilingIface.getResultTilePosition(
+          rewriter, i, offsets, sizes, writeOffsets, writeSizes);
+      if (failed(posResult)) {
+        // Fallback: use iteration domain offsets truncated to result rank.
+        int64_t resultRank = cast<ShapedType>(tiledValue.getType()).getRank();
+        writeOffsets.assign(offsets.begin(),
+                            offsets.begin() + std::min<int64_t>(
+                                offsets.size(), resultRank));
+        writeSizes.assign(sizes.begin(),
+                          sizes.begin() + std::min<int64_t>(
+                              sizes.size(), resultRank));
+        while (static_cast<int64_t>(writeOffsets.size()) < resultRank) {
+          writeOffsets.push_back(rewriter.getIndexAttr(0));
+        }
+        while (static_cast<int64_t>(writeSizes.size()) < resultRank) {
+          writeSizes.push_back(rewriter.getIndexAttr(
+              cast<ShapedType>(tiledValue.getType())
+                  .getDimSize(writeSizes.size())));
+        }
+      }
       int64_t resultRank = cast<ShapedType>(tiledValue.getType()).getRank();
-      SmallVector<OpFoldResult> writeOffsets(offsets.begin(), offsets.end());
-      SmallVector<OpFoldResult> writeSizes(sizes.begin(), sizes.end());
       SmallVector<OpFoldResult> writeStrides(resultRank,
                                              rewriter.getIndexAttr(1));
-
-      // Pad to result rank if needed.
-      while (static_cast<int64_t>(writeOffsets.size()) < resultRank) {
-        writeOffsets.push_back(rewriter.getIndexAttr(0));
-      }
-      while (static_cast<int64_t>(writeSizes.size()) < resultRank) {
-        writeSizes.push_back(
-            rewriter.getIndexAttr(cast<ShapedType>(tiledValue.getType())
-                                      .getDimSize(writeSizes.size())));
-      }
-      writeOffsets.resize(resultRank);
-      writeSizes.resize(resultRank);
-
       WriteSliceOp::create(rewriter, loc, tiledValue, resultInfo[i].destSref,
                            writeOffsets, writeSizes, writeStrides);
     }

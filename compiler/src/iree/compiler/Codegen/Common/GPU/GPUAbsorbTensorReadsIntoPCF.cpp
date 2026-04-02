@@ -110,9 +110,9 @@ static void convertInputReads(SharedExecutorOp sharedExec,
     Value source = readOp.getBase();
     Location loc = readOp.getLoc();
     RankedTensorType tensorType = cast<RankedTensorType>(source.getType());
-    ShapedRefType srefType = ShapedRefType::get(
-        rewriter.getContext(), tensorType.getShape(),
-        tensorType.getElementType(), scope);
+    ShapedRefType srefType =
+        ShapedRefType::get(rewriter.getContext(), tensorType.getShape(),
+                           tensorType.getElementType(), scope);
 
     rewriter.setInsertionPoint(readOp);
     Value sref = ToSrefOp::create(rewriter, loc, srefType, source);

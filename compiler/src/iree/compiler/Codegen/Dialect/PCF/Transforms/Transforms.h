@@ -211,6 +211,10 @@ void fuseDistributedProducer(RewriterBase &rewriter, PCF::GenericOp genericOp,
 void fuseDistributedProducer(RewriterBase &rewriter, PCF::LoopOp loopOp,
                              const DistributedProducerFusionParams &params);
 
+// TODO(shared-exec): Extract shared addReadonly{AndReadwrite}Args helpers
+// from DistributedFuseConsumers.cpp and DistributedFuseProducers.cpp into a
+// shared utility. Currently both files have local copies that will diverge.
+
 // Pattern set for dropping unused results from scoped ops. Due to memory
 // effects this requires cascading operation erasure and is unsuitable for
 // a canonicalization pattern.

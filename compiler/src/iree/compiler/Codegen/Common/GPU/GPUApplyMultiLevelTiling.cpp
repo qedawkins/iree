@@ -105,8 +105,7 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     }
     if (hasReduction) {
       reductionTileSizes = gpuConfig.getTilingLevelSizes(
-          rewriter, llvm::to_underlying(IREE::GPU::TilingLevel::Reduction),
-          op);
+          rewriter, llvm::to_underlying(IREE::GPU::TilingLevel::Reduction), op);
     }
 
     // Get promotion info.

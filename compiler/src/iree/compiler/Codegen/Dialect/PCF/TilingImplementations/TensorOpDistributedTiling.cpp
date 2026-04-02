@@ -65,8 +65,8 @@ struct PadOpDistributedTilingModel
       int64_t rank = cast<ShapedType>(result.getType()).getRank();
       SmallVector<OpFoldResult> strides(rank, b.getIndexAttr(1));
       WriteSliceOp::create(b, loc, result, resultInfo[0].destSref,
-                           llvm::to_vector(offsets),
-                           llvm::to_vector(sizes), strides);
+                           llvm::to_vector(offsets), llvm::to_vector(sizes),
+                           strides);
       tiledResult->tiledValues[0] = Value();
     }
 

@@ -250,6 +250,49 @@ func.func @fuse_fill_vector_read(%dest: tensor<8x16xf32>) -> tensor<8x16xf32> {
 
 // -----
 
+// Fuse an elementwise linalg.generic producer (not a fill or transpose).
+func.func @fuse_elementwise_producer(%src: tensor<8x16xf32>,
+                                      %dest: tensor<8x16xf32>) -> tensor<8x16xf32> {
+  %neg = linalg.generic {
+    indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                     affine_map<(d0, d1) -> (d0, d1)>],
+    iterator_types = ["parallel", "parallel"]
+  } ins(%src : tensor<8x16xf32>) outs(%dest : tensor<8x16xf32>) {
+  ^bb0(%in: f32, %out: f32):
+    %0 = arith.negf %in : f32
+    linalg.yield %0 : f32
+  } -> tensor<8x16xf32>
+  %1 = pcf.generic scope(#pcf.test_scope)
+    execute(%ref = %neg)[%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<8x16xf32, sync(#pcf.test_scope)>)
+        -> (tensor<8x16xf32>) {
+    %slice = pcf.read_slice %ref[%id0, %id1] [4, 8] [1, 1]
+        : !pcf.sref<8x16xf32, sync(#pcf.test_scope)> to tensor<4x8xf32>
+    %result = linalg.exp ins(%slice : tensor<4x8xf32>)
+                          outs(%slice : tensor<4x8xf32>) -> tensor<4x8xf32>
+    pcf.write_slice %result into %ref[%id0, %id1] [4, 8] [1, 1]
+        : tensor<4x8xf32> into !pcf.sref<8x16xf32, sync(#pcf.test_scope)>
+    pcf.return
+  }
+  return %1 : tensor<8x16xf32>
+}
+
+// CHECK-LABEL: @fuse_elementwise_producer
+//  CHECK-SAME:   %[[SRC:[A-Za-z0-9_]+]]: tensor<8x16xf32>
+//  CHECK-SAME:   %[[DEST:[A-Za-z0-9_]+]]: tensor<8x16xf32>
+//   CHECK-NOT:  linalg.generic {{.*}} arith.negf
+//       CHECK:  pcf.generic scope(#pcf.test_scope)
+//       CHECK:    execute(%[[REF:.+]] = %[[DEST]])[%[[ID0:[A-Za-z0-9_]+]]: index, %[[ID1:[A-Za-z0-9_]+]]: index
+//       CHECK:    tensor.extract_slice %[[SRC]][%[[ID0]], %[[ID1]]] [4, 8] [1, 1]
+//       CHECK:    tensor.extract_slice %[[DEST]][%[[ID0]], %[[ID1]]] [4, 8] [1, 1]
+//       CHECK:    linalg.generic
+//       CHECK:      arith.negf
+//       CHECK:    linalg.exp
+//       CHECK:    pcf.write_slice
+//       CHECK:    pcf.return
+
+// -----
+
 // Negative Tests:
 //  - Sref without sync(scope) (no return-only sync guarantee)
 //  - No read_slice on the sref
