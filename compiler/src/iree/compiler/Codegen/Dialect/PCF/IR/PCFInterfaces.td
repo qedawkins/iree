@@ -232,7 +232,67 @@ def PCF_NamespaceOpInterface : OpInterface<"NamespaceOpInterface"> {
       /*methodName=*/"getDefinedSymbols",
       /*args=*/(ins)
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the region that contains symbol definitions.
+      }],
+      /*retTy=*/"Region &",
+      /*methodName=*/"getSymbolRegion",
+      /*args=*/(ins)
+    >,
   ];
+}
+
+//===----------------------------------------------------------------------===//
+// IREE::PCF::NamespaceSymbolOpInterface
+//===----------------------------------------------------------------------===//
+
+def PCF_NamespaceSymbolOpInterface : OpInterface<"NamespaceSymbolOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::PCF";
+
+  let description = [{
+    Interface for operations that define a symbol within a namespace.
+    Such operations must live in the symbol-defining region of an
+    enclosing NamespaceOpInterface op.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the symbol name.
+      }],
+      /*retTy=*/"StringAttr",
+      /*methodName=*/"getSymbolName",
+      /*args=*/(ins)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the symbol definition as an OpFoldResult.
+      }],
+      /*retTy=*/"OpFoldResult",
+      /*methodName=*/"getSymbolDefinition",
+      /*args=*/(ins)
+    >,
+  ];
+
+  let verify = [{
+    // Verify the op lives in the symbol region of a NamespaceOpInterface op.
+    Region *parentRegion = $_op->getParentRegion();
+    if (!parentRegion) {
+      return $_op->emitOpError("must be inside a region");
+    }
+    Operation *parentOp = parentRegion->getParentOp();
+    auto nsOp = dyn_cast_if_present<NamespaceOpInterface>(parentOp);
+    if (!nsOp) {
+      return $_op->emitOpError(
+          "must be inside a NamespaceOpInterface op");
+    }
+    if (parentRegion != &nsOp.getSymbolRegion()) {
+      return $_op->emitOpError(
+          "must be in the symbol-defining region of the enclosing namespace");
+    }
+    return success();
+  }];
 }
 
 //===----------------------------------------------------------------------===//

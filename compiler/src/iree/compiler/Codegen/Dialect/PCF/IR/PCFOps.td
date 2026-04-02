@@ -127,6 +127,7 @@ def GenericOp : PCF_Op<"generic", [
        AutomaticAllocationScope,
        RecursiveMemoryEffects,
        DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmBlockArgumentNames"]>,
+       DeclareOpInterfaceMethods<PCF_NamespaceOpInterface>,
      ]> {
   let summary = [{
     Execute a set of workers in parallel on a region.
@@ -443,6 +444,7 @@ def SharedExecutorOp : PCF_Op<"shared_executor", [
        AutomaticAllocationScope,
        RecursiveMemoryEffects,
        DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmBlockArgumentNames"]>,
+       DeclareOpInterfaceMethods<PCF_NamespaceOpInterface>,
      ]> {
   let summary = [{
     Execute a collective region where all workers cooperatively operate on
@@ -1426,6 +1428,51 @@ def PCF_YieldOp : PCF_Op<"yield", [ParentOneOf<["IREE::PCF::GenericOp",
   let assemblyFormat = [{
     attr-dict
     $operands `:` type($operands)
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// IndexSymbolOp
+//===----------------------------------------------------------------------===//
+
+def PCF_IndexSymbolOp : PCF_Op<"index_symbol", [
+    PCF_NamespaceSymbolOpInterface,
+  ]> {
+  let summary = [{Binds an index value to a symbol name in the enclosing namespace.}];
+  let description = [{
+    Defines a named symbol with an index value in the enclosing namespace.
+    The symbol can be resolved by name from ops in the namespace's scope.
+
+    Must be placed in the symbol-defining region (e.g., the initializer)
+    of a NamespaceOpInterface op.
+
+    Example:
+    ```mlir
+    pcf.generic scope(#pcf.sequential)
+      initialize {
+        %n = arith.constant 4 : index
+        pcf.index_symbol "tile_count" = %n
+        pcf.yield
+      }
+      execute(...) { ... }
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name, Index:$value);
+  let results = (outs);
+
+  let assemblyFormat = [{
+    $sym_name `=` $value attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    // NamespaceSymbolOpInterface methods.
+    StringAttr getSymbolName() {
+      return getSymNameAttr();
+    }
+    OpFoldResult getSymbolDefinition() {
+      return getValue();
+    }
   }];
 }
 
