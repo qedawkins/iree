@@ -43,9 +43,8 @@ OpFoldResult ToLayoutOp::fold(FoldAdaptor) {
   return {};
 }
 
-// to_simd -> to_simt
-OpFoldResult ToSIMDOp::fold(FoldAdaptor adaptor) {
-  // Identity: source type == result type (e.g., 0-d vectors).
+// to_simd(to_simt(x)) -> x. Also folds identity (same type, e.g., 0-d).
+OpFoldResult ToSIMDOp::fold(FoldAdaptor) {
   if (getInput().getType() == getType()) {
     return getInput();
   }
@@ -55,9 +54,8 @@ OpFoldResult ToSIMDOp::fold(FoldAdaptor adaptor) {
   return {};
 }
 
-// to_simt -> to_simd
-OpFoldResult ToSIMTOp::fold(FoldAdaptor adaptor) {
-  // Identity: source type == result type (e.g., 0-d vectors).
+// to_simt(to_simd(x)) -> x. Also folds identity (same type, e.g., 0-d).
+OpFoldResult ToSIMTOp::fold(FoldAdaptor) {
   if (getInput().getType() == getType()) {
     return getInput();
   }
