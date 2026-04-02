@@ -21,6 +21,20 @@ def DistributeInnerTiledToLanesPass :
   ];
 }
 
+def LowerPromoteOperandPass :
+    Pass<"iree-gpu-lower-promote-operand", ""> {
+  let summary = "Lower iree_gpu.promote_operand to pcf.alloc + distributed copy.";
+  let description = [{
+    Resolves namespace symbols to get tile sizes, creates a pcf.alloc at the
+    target scope, and emits a distributed copy using the PromotionAttr
+    interface's emitDistributedCopy method.
+  }];
+  let dependentDialects = [
+    "IREE::PCF::PCFDialect",
+    "IREE::GPU::IREEGPUDialect",
+  ];
+}
+
 def ExpandUndistributedInnerTilesPass :
     InterfacePass<"iree-gpu-expand-undistributed-inner-tiles", "mlir::FunctionOpInterface"> {
   let summary = "Expands the inner dimensions of iree_codegen.inner_tiled ops to match the thread layout";

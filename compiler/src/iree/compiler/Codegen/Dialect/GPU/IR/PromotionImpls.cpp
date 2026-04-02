@@ -10,6 +10,8 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtInterfaces.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "llvm/Support/DebugLog.h"
@@ -224,6 +226,46 @@ Value cacheSwizzlePromotionImpl(OpBuilder &builder, OpOperand &operand,
   bufferCastOperand->assign(resourceCast);
 
   return promotedValue;
+}
+
+void defaultDistributedCopyImpl(OpBuilder &builder, Location loc,
+                                 Value sourceSref, Value destSref,
+                                 ArrayRef<OpFoldResult> tileSizes,
+                                 Value laneId, Value laneCount) {
+  // For now, implement a simple 1D distribution: each lane handles a chunk
+  // of the leading dimension. This is a placeholder — real implementations
+  // will use more sophisticated distribution strategies.
+  //
+  // Each lane copies: source[lane_offset:lane_offset+chunk, :] ->
+  //                   dest[lane_offset:lane_offset+chunk, :]
+  //
+  // For the v0 implementation, we just create a pcf.read_slice from source
+  // and pcf.write_slice to dest for the full tile. The distribution across
+  // lanes will be handled by later passes that tile the copy.
+  // TODO: Implement proper per-lane distribution.
+
+  int64_t rank = tileSizes.size();
+  SmallVector<OpFoldResult> offsets(rank, builder.getIndexAttr(0));
+  SmallVector<OpFoldResult> strides(rank, builder.getIndexAttr(1));
+
+  // Build the result type for the read.
+  auto srefType =
+      cast<iree_compiler::IREE::PCF::ShapedRefType>(sourceSref.getType());
+  SmallVector<int64_t> staticSizes;
+  for (OpFoldResult ts : tileSizes) {
+    if (auto attr = dyn_cast<Attribute>(ts)) {
+      staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
+    } else {
+      staticSizes.push_back(ShapedType::kDynamic);
+    }
+  }
+  RankedTensorType tileType =
+      RankedTensorType::get(staticSizes, srefType.getElementType());
+
+  Value tile = iree_compiler::IREE::PCF::ReadSliceOp::create(
+      builder, loc, tileType, sourceSref, offsets, tileSizes, strides);
+  iree_compiler::IREE::PCF::WriteSliceOp::create(builder, loc, tile, destSref,
+                                                   offsets, tileSizes, strides);
 }
 
 } // namespace mlir::iree_compiler::IREE::GPU

@@ -135,6 +135,36 @@ def IREEGPU_PromotionAttr
         return ::mlir::iree_compiler::IREE::GPU::defaultPromotionImpl(builder, operand, $_attr);
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Emits the distributed copy from sourceSref to destSref for promotion
+        in the PCF model. The copy is distributed across workers at the
+        current scope. Each worker (lane) copies its slice from the source
+        to the destination.
+
+        `laneId` and `laneCount` are the worker ID and count from the
+        enclosing pcf.generic scope. `tileSizes` are the dimensions of the
+        promoted tile (from the namespace symbols).
+
+        The default implementation distributes the copy by having each lane
+        handle a contiguous chunk along the leading dimension.
+      }],
+      /*retType=*/"void",
+      /*methodName=*/"emitDistributedCopy",
+      /*args=*/(ins
+        "::mlir::OpBuilder&":$builder,
+        "::mlir::Location":$loc,
+        "::mlir::Value":$sourceSref,
+        "::mlir::Value":$destSref,
+        "::mlir::ArrayRef<::mlir::OpFoldResult>":$tileSizes,
+        "::mlir::Value":$laneId,
+        "::mlir::Value":$laneCount),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return ::mlir::iree_compiler::IREE::GPU::defaultDistributedCopyImpl(
+            builder, loc, sourceSref, destSref, tileSizes, laneId, laneCount);
+      }]
+    >,
   ];
 }
 

@@ -19,6 +19,12 @@
 namespace mlir::iree_compiler::IREE::GPU {
 Value defaultPromotionImpl(OpBuilder &builder, OpOperand &operand,
                            Attribute attr);
+/// Default distributed copy implementation for PCF promotion. Distributes
+/// the copy by having each lane handle a chunk of the leading dimension.
+void defaultDistributedCopyImpl(OpBuilder &builder, Location loc,
+                                 Value sourceSref, Value destSref,
+                                 ArrayRef<OpFoldResult> tileSizes,
+                                 Value laneId, Value laneCount);
 } // namespace mlir::iree_compiler::IREE::GPU
 
 // clang-format off
