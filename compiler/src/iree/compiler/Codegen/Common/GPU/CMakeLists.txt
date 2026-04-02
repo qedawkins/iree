@@ -55,6 +55,7 @@ iree_cc_library(
     "GPUAbsorbTensorReadsIntoPCF.cpp"
     "GPUAllocPrivateMemoryForDPSOps.cpp"
     "GPUApplyPaddingLevel.cpp"
+    "GPUApplyMultiLevelTiling.cpp"
     "GPUApplyTilingLevel.cpp"
     "GPUBubbleResourceCasts.cpp"
     "GPUCheckResourceUsage.cpp"
@@ -157,6 +158,7 @@ iree_cc_library(
     iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
     iree::compiler::Codegen::Dialect::GPU::Transforms::GPUTransforms
     iree::compiler::Codegen::Dialect::PCF::IR
+    iree::compiler::Codegen::Dialect::PCF::TilingImplementations
     iree::compiler::Codegen::Dialect::PCF::Transforms
     iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect
     iree::compiler::Codegen::Dialect::VectorExt::Transforms::VectorExtTransforms

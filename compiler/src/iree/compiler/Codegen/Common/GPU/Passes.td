@@ -453,6 +453,24 @@ def GPUApplyTilingLevelPass :
   ];
 }
 
+def GPUApplyMultiLevelTilingPass :
+    InterfacePass<"iree-codegen-gpu-apply-multi-level-tiling",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Apply multi-level tiling using PCF generics.";
+  let description = [{
+    Reads lowering configs to extract subgroup/thread/lane/reduction tile sizes
+    and creates nested pcf.generic (subgroup + lane) + scf.for (reduction)
+    structure using applyMultiLevelTiling.
+  }];
+  let dependentDialects = [
+    "::mlir::affine::AffineDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::linalg::LinalgDialect",
+    "IREE::GPU::IREEGPUDialect",
+    "IREE::PCF::PCFDialect",
+  ];
+}
+
 def GPUApplyPaddingLevelPass :
     InterfacePass<"iree-codegen-gpu-apply-padding-level", "mlir::FunctionOpInterface"> {
   let summary = "Pass to pad based on tiling configs";
