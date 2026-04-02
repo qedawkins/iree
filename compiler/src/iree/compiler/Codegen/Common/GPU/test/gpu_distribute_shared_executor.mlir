@@ -13,11 +13,12 @@
 
 // Test: The pass reads workgroup_size and subgroup_size from translation_info
 // and uses them for vector distribution within tile_group/run_cluster ops.
+// With trivial distribution (1 subgroup, 1 thread), to_simt/to_simd pairs
+// fold to identity, leaving the original SIMD-shaped constant.
 //
 // CHECK-LABEL: func.func @distribute_from_translation_info
-// CHECK: arith.constant dense<0.000000e+00> : vector<1x1x1x1x16x16xf32>
+// CHECK: arith.constant dense<0.000000e+00> : vector<16x16xf32>
 // CHECK: scf.index_switch
-// CHECK: iree_vector_ext.to_simd {{.*}} : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
 // CHECK-NOT: tile_group
 func.func @distribute_from_translation_info(
     %tg: !pcf.threadgroup<#pcf.test_scope>, %k: index)

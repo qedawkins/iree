@@ -88,6 +88,47 @@ static void convertInputReads(SharedExecutorOp sharedExec,
     }
   });
 
+  // Second pass: find transfer_reads on tensors captured from outside the
+  // shared_executor region (not via read_slice). Convert via pcf.to_sref.
+  SmallVector<vector::TransferReadOp> capturedReads;
+  region.walk([&](vector::TransferReadOp readOp) {
+    Value source = readOp.getBase();
+    if (!isa<RankedTensorType>(source.getType())) {
+      return;
+    }
+    // Skip if already handled by trace path.
+    if (traceToSref(source).has_value()) {
+      return;
+    }
+    // Check if the tensor is defined outside the shared_executor.
+    if (isDefinedOutside(source, region)) {
+      capturedReads.push_back(readOp);
+    }
+  });
+
+  for (vector::TransferReadOp readOp : capturedReads) {
+    Value source = readOp.getBase();
+    Location loc = readOp.getLoc();
+    RankedTensorType tensorType = cast<RankedTensorType>(source.getType());
+    ShapedRefType srefType = ShapedRefType::get(
+        rewriter.getContext(), tensorType.getShape(),
+        tensorType.getElementType(), scope);
+
+    rewriter.setInsertionPoint(readOp);
+    Value sref = ToSrefOp::create(rewriter, loc, srefType, source);
+
+    VectorType vecType = readOp.getVectorType();
+    SmallVector<bool> inBounds;
+    for (Attribute attr : readOp.getInBounds()) {
+      inBounds.push_back(cast<BoolAttr>(attr).getValue());
+    }
+    AffineMap permMap = readOp.getPermutationMap();
+    Value newRead = TransferReadOp::create(
+        rewriter, loc, vecType, sref, readOp.getIndices(), readOp.getPadding(),
+        inBounds, permMap, readOp.getMask());
+    rewriter.replaceOp(readOp, newRead);
+  }
+
   for (vector::TransferReadOp readOp : readsToConvert) {
     Value source = readOp.getBase();
     Location loc = readOp.getLoc();
@@ -122,7 +163,7 @@ static void convertInputReads(SharedExecutorOp sharedExec,
         SmallVector<Value> outputShape;
         for (int64_t dim : resultTensorType.getShape()) {
           outputShape.push_back(
-              rewriter.create<arith::ConstantIndexOp>(loc, dim));
+              arith::ConstantIndexOp::create(rewriter, loc, dim));
         }
         sref =
             ExpandShapeOp::create(rewriter, loc, resultSrefType, sref,

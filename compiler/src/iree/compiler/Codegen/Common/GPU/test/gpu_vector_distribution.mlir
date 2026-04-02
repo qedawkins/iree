@@ -75,7 +75,9 @@ func.func @distribute_scf_for(%a: vector<16x16xi32>, %b: vector<16x16xi32>) -> v
   thread_strides   = []
 >
 
+// For 0-d vectors, to_simt/to_simd are identity (same type) and get folded.
 // CHECK-LABEL: @distribute_scf_for_0d
+// CHECK-SAME: (%[[A:.*]]: vector<i32>, %[[B:.*]]: vector<i32>)
 func.func @distribute_scf_for_0d(%a: vector<i32>, %b: vector<i32>) -> vector<i32> {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -85,10 +87,8 @@ func.func @distribute_scf_for_0d(%a: vector<i32>, %b: vector<i32>) -> vector<i32
   %rootl = iree_vector_ext.to_layout %root to layout(#layout_0d) : vector<i32>
   // CHECK: iter_args(%[[ARG0:.*]] = %[[ROOT]]) -> (vector<i32>)
   %out = scf.for %i = %c0 to %c128 step %c1 iter_args(%arg0 = %rootl) -> (vector<i32>) {
-    // CHECK-DAG: %[[B:.*]] = iree_vector_ext.to_simt %{{.*}} : vector<i32> -> vector<i32>
     // CHECK-DAG: %[[C:.*]] = arith.muli %[[ARG0]], %[[B]] : vector<i32>
     %c = arith.muli %arg0, %b : vector<i32>
-    // CHECK-DAG: %[[A:.*]] = iree_vector_ext.to_simt %{{.*}} : vector<i32> -> vector<i32>
     // CHECK-DAG: %[[D:.*]] = arith.addi %[[C]], %[[A]] : vector<i32>
     %d = arith.addi %c, %a : vector<i32>
     // CHECK: scf.yield %[[D]] : vector<i32>
@@ -97,17 +97,18 @@ func.func @distribute_scf_for_0d(%a: vector<i32>, %b: vector<i32>) -> vector<i32
   return %out : vector<i32>
 }
 
+// For 0-d vectors, to_simt/to_simd are identity (same type) and get folded.
 // CHECK-LABEL: @distribute_scalar_extract
+// CHECK-SAME: (%[[A:.*]]: f16, %[[B:.*]]: vector<f16>)
 func.func @distribute_scalar_extract(%a: f16, %b: vector<f16>) -> f16 {
   // CHECK: %[[ROOT:.*]] = arith.constant dense<0.000000e+00> : vector<f16>
   %root = arith.constant dense<0.0> : vector<f16>
   %rootl = iree_vector_ext.to_layout %root to layout(#layout_0d) : vector<f16>
-  // CHECK-DAG: %[[B:.*]] = iree_vector_ext.to_simt %{{.*}} : vector<f16> -> vector<f16>
   // CHECK-DAG: %[[C:.*]] = arith.mulf %[[B]], %[[ROOT]] : vector<f16>
   // CHECK-DAG: %[[SCALAR:.*]] = vector.extract %[[C]][] : f16 from vector<f16>
   %c = arith.mulf %rootl, %b : vector<f16>
   %scalar = vector.extract %c[] : f16 from vector<f16>
-  // CHECK-DAG: %[[D:.*]] = arith.addf %[[SCALAR]], %{{.*}} : f16
+  // CHECK-DAG: %[[D:.*]] = arith.addf %[[SCALAR]], %[[A]] : f16
   %d = arith.addf %scalar, %a : f16
   return %d : f16
 }
