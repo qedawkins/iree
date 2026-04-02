@@ -8,6 +8,8 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTilingInterface.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -215,7 +217,148 @@ FailureOr<GenericOp> applyMultiLevelTiling(
         laneSizes = SmallVector<OpFoldResult>(sgSizes);
       }
 
-      // === Emit reduction init ===
+      // Branch on MMA vs regular tiling for the inner body.
+      if (params.mmaKind) {
+        // === MMA path: use InnerTileDescAttrInterface ===
+        auto mmaDesc =
+            cast<IREE::Codegen::InnerTileDescAttrInterface>(params.mmaKind);
+
+        // Get undistributed tile types for operands and accumulator.
+        SmallVector<VectorType> undistTileTypes;
+        mmaDesc.getUndistributedTileTypes(undistTileTypes);
+
+        // The last undistributed type is the accumulator.
+        // For matmul: [MxKxf16, KxNxf16, MxNxf32]
+        (void)undistTileTypes;
+        (void)mmaDesc;
+
+        // Iter arg types are the accumulator types (as tensors for now,
+        // will be converted to vectors by inner_tiled conversion).
+        // TODO: Determine whether iter args should be tensors or vectors.
+        // For now, use the PCFTilingOpInterface path for init/writeback.
+        SmallVector<Value> initValues = target.emitReductionInit(
+            rewriter, sgReadwriteRefs, laneOffsets, laneSizes, params);
+
+        // Determine reduction loop bounds.
+        SmallVector<int64_t> reductionDims;
+        for (int64_t i = 0; i < numDims; ++i) {
+          if (iterTypes[i] == utils::IteratorType::reduction &&
+              !isZeroTileSize(redTileSizes[i])) {
+            reductionDims.push_back(i);
+          }
+        }
+
+        SmallVector<Value> loopResults;
+        if (!reductionDims.empty()) {
+          int64_t redDim = reductionDims.front();
+          Value lb = getValueOrCreateConstantIndexOp(
+              rewriter, loc, rewriter.getIndexAttr(0));
+          Value ub = getValueOrCreateConstantIndexOp(
+              rewriter, loc, iterDomain[redDim].size);
+          Value step = getValueOrCreateConstantIndexOp(
+              rewriter, loc, redTileSizes[redDim]);
+
+          auto forOp = scf::ForOp::create(rewriter, loc, lb, ub, step,
+                                           initValues);
+          {
+            OpBuilder::InsertionGuard forGuard(rewriter);
+            rewriter.setInsertionPointToStart(forOp.getBody());
+            Value iv = forOp.getInductionVar();
+            ValueRange iterArgs = forOp.getRegionIterArgs();
+
+            SmallVector<OpFoldResult> tileOffsets(laneOffsets);
+            SmallVector<OpFoldResult> tileSizes(laneSizes);
+            tileOffsets[redDim] = iv;
+            tileSizes[redDim] = redTileSizes[redDim];
+
+            // Build operand info — same as regular path but with MMA
+            // annotation. For now, use the same operand handling.
+            SmallVector<DistributedOperandInfo> operandInfo;
+            for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
+              unsigned idx = static_cast<unsigned>(i);
+              if (!tileableSet.contains(idx) ||
+                  !isa<ShapedType>(op->getOperand(i).getType())) {
+                operandInfo.push_back({op->getOperand(i), false});
+                continue;
+              }
+              if (dpsInitIndices.contains(idx)) {
+                int64_t rwIdx = operandToReadwriteIdx[i];
+                if (rwIdx >= 0 &&
+                    rwIdx < static_cast<int64_t>(iterArgs.size())) {
+                  operandInfo.push_back({iterArgs[rwIdx], true});
+                } else {
+                  operandInfo.push_back({op->getOperand(i), false});
+                }
+              } else {
+                int64_t roIdx = operandToReadonlyIdx[i];
+                if (roIdx >= 0) {
+                  Value sref = sgReadonlyRefs[roIdx];
+                  if (llvm::is_contained(params.operandsToPromote, idx)) {
+                    ShapedRefType srefType =
+                        cast<ShapedRefType>(sref.getType());
+                    int64_t rank = srefType.getRank();
+                    SmallVector<Attribute> symbolNames;
+                    for (int64_t d = 0; d < rank; ++d) {
+                      symbolNames.push_back(rewriter.getStringAttr(
+                          "operand_" + std::to_string(i) + "_dim_" +
+                          std::to_string(d)));
+                    }
+                    ShapedRefType promotedType = ShapedRefType::get(
+                        rewriter.getContext(), srefType.getShape(),
+                        srefType.getElementType(),
+                        cast<ScopeAttrInterface>(params.subgroup.scope));
+                    IREE::GPU::PromotionAttr promotion =
+                        cast<IREE::GPU::PromotionAttr>(
+                            IREE::GPU::DerivedThreadConfigAttr::get(
+                                rewriter.getContext()));
+                    Value promoted = IREE::GPU::PromoteOperandOp::create(
+                        rewriter, loc, promotedType, promotion, sref,
+                        rewriter.getArrayAttr(symbolNames));
+                    operandInfo.push_back({promoted, false});
+                  } else {
+                    operandInfo.push_back({sref, false});
+                  }
+                } else {
+                  operandInfo.push_back({op->getOperand(i), false});
+                }
+              }
+            }
+
+            // For MMA path, call getDistributedImplementation with the
+            // MMA kind set. The implementation should create the inner_tiled
+            // op. For now, fall back to the regular implementation and let
+            // the inner_tiled conversion happen in a subsequent pass.
+            // TODO: Create iree_codegen.inner_tiled directly here.
+            SmallVector<DistributedResultInfo> resultInfo;
+            for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
+              resultInfo.push_back({Value()});
+            }
+            FailureOr<TilingResult> tiledResult =
+                target.getDistributedImplementation(
+                    rewriter, tileOffsets, tileSizes, operandInfo, resultInfo);
+            if (failed(tiledResult)) {
+              return rewriter.notifyMatchFailure(
+                  target, "MMA: getDistributedImplementation failed");
+            }
+            // Attach the mma_kind as an attribute on the tiled op for later
+            // conversion.
+            for (Operation *tiledOp : tiledResult->tiledOps) {
+              tiledOp->setAttr("mma_kind", params.mmaKind);
+            }
+            scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
+          }
+          loopResults = SmallVector<Value>(forOp.getResults());
+        }
+
+        // Writeback.
+        if (!reductionDims.empty()) {
+          target.emitReductionWriteback(rewriter, loopResults, sgReadwriteRefs,
+                                        laneOffsets, laneSizes, params);
+        }
+
+        ReturnOp::create(rewriter, loc);
+      } else {
+      // === Regular path (non-MMA): use PCFTilingOpInterface ===
       SmallVector<Value> initValues = target.emitReductionInit(
           rewriter, sgReadwriteRefs, laneOffsets, laneSizes, params);
 
@@ -388,6 +531,7 @@ FailureOr<GenericOp> applyMultiLevelTiling(
 
       // Create pcf.return for inner generic.
       ReturnOp::create(rewriter, loc);
+      } // end else (regular path)
     }
 
     // Create pcf.return for outer generic.

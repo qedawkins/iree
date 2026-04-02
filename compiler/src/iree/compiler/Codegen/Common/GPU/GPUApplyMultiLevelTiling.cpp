@@ -123,6 +123,11 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     params.reductionTileSizes = reductionTileSizes;
     params.operandsToPromote = operandsToPromote;
 
+    // Check for MMA kind.
+    if (auto mmaKind = IREE::GPU::getMmaKind(gpuConfig)) {
+      params.mmaKind = mmaKind;
+    }
+
     rewriter.setInsertionPoint(op);
     (void)IREE::PCF::applyMultiLevelTiling(rewriter, pcfTilingOp, params);
   });
