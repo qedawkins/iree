@@ -1668,6 +1668,66 @@ std::optional<StringAttr> TileGroupOp::getNamespaceName() {
   return std::nullopt;
 }
 
+//===----------------------------------------------------------------------===//
+// GenericOp - NamespaceOpInterface
+//===----------------------------------------------------------------------===//
+
+std::optional<StringAttr> GenericOp::getNamespaceName() {
+  return std::nullopt; // Anonymous namespace.
+}
+
+Region &GenericOp::getSymbolRegion() { return getInitializer(); }
+
+SmallVector<std::pair<Attribute, OpFoldResult>>
+GenericOp::getDefinedSymbols() {
+  SmallVector<std::pair<Attribute, OpFoldResult>> symbols;
+  if (getInitializer().empty()) {
+    return symbols;
+  }
+  for (Operation &op : getInitializer().front()) {
+    if (auto symOp = dyn_cast<NamespaceSymbolOpInterface>(&op)) {
+      StringAttr name = symOp.getSymbolName();
+      NamespacedSymbolAttr nsSym =
+          NamespacedSymbolAttr::get(getContext(), ArrayRef<StringAttr>{name});
+      symbols.push_back({nsSym, symOp.getSymbolDefinition()});
+    }
+  }
+  return symbols;
+}
+
+//===----------------------------------------------------------------------===//
+// SharedExecutorOp - NamespaceOpInterface
+//===----------------------------------------------------------------------===//
+
+std::optional<StringAttr> SharedExecutorOp::getNamespaceName() {
+  return std::nullopt; // Anonymous namespace.
+}
+
+Region &SharedExecutorOp::getSymbolRegion() { return getInitializer(); }
+
+SmallVector<std::pair<Attribute, OpFoldResult>>
+SharedExecutorOp::getDefinedSymbols() {
+  SmallVector<std::pair<Attribute, OpFoldResult>> symbols;
+  if (getInitializer().empty()) {
+    return symbols;
+  }
+  for (Operation &op : getInitializer().front()) {
+    if (auto symOp = dyn_cast<NamespaceSymbolOpInterface>(&op)) {
+      StringAttr name = symOp.getSymbolName();
+      NamespacedSymbolAttr nsSym =
+          NamespacedSymbolAttr::get(getContext(), ArrayRef<StringAttr>{name});
+      symbols.push_back({nsSym, symOp.getSymbolDefinition()});
+    }
+  }
+  return symbols;
+}
+
+//===----------------------------------------------------------------------===//
+// TileGroupOp - NamespaceOpInterface
+//===----------------------------------------------------------------------===//
+
+Region &TileGroupOp::getSymbolRegion() { return getBody(); }
+
 SmallVector<std::pair<Attribute, OpFoldResult>>
 TileGroupOp::getDefinedSymbols() {
   SmallVector<std::pair<Attribute, OpFoldResult>> symbols;
