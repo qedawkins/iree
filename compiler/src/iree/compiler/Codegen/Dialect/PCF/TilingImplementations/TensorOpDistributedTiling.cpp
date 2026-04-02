@@ -10,9 +10,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
-using namespace mlir;
-using namespace mlir::iree_compiler::IREE::PCF;
-
+namespace mlir::iree_compiler::IREE::PCF {
 namespace {
 
 //===----------------------------------------------------------------------===//
@@ -67,8 +65,8 @@ struct PadOpDistributedTilingModel
       int64_t rank = cast<ShapedType>(result.getType()).getRank();
       SmallVector<OpFoldResult> strides(rank, b.getIndexAttr(1));
       WriteSliceOp::create(b, loc, result, resultInfo[0].destSref,
-                           SmallVector<OpFoldResult>(offsets),
-                           SmallVector<OpFoldResult>(sizes), strides);
+                           llvm::to_vector(offsets),
+                           llvm::to_vector(sizes), strides);
       tiledResult->tiledValues[0] = Value();
     }
 
@@ -97,8 +95,6 @@ struct PadOpDistributedTilingModel
 };
 
 } // namespace
-
-namespace mlir::iree_compiler::IREE::PCF {
 
 void attachTensorDistributedTilingModels(MLIRContext *ctx) {
   tensor::PadOp::attachInterface<PadOpDistributedTilingModel>(*ctx);

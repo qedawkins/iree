@@ -24,12 +24,10 @@
 
 namespace mlir::iree_compiler::IREE::PCF {
 
-/// Returns true if the OpFoldResult is zero.
+/// Returns true if the OpFoldResult is a constant zero.
 static bool isZeroTileSize(OpFoldResult ofr) {
-  if (auto attr = dyn_cast<Attribute>(ofr)) {
-    return cast<IntegerAttr>(attr).getInt() == 0;
-  }
-  return false;
+  std::optional<int64_t> val = getConstantIntValue(ofr);
+  return val && *val == 0;
 }
 
 /// Computes tile offsets and sizes for a set of tiled dimensions given
@@ -50,21 +48,23 @@ static void computeTileOffsetsAndSizes(OpBuilder &b, Location loc,
   sizes.resize(numDims);
 
   AffineExpr s0, s1, s2;
-  bindSymbols(b.getContext(), s0, s1);
-  AffineMap mulMap = AffineMap::get(0, 2, s0 * s1, b.getContext());
-
   bindSymbols(b.getContext(), s0, s1, s2);
   AffineMap minMap3 = AffineMap::get(0, 3, {s0, s1 - s2}, b.getContext());
+
+  // Add domain offset: offset = domainOffset + id * tileSize.
+  AffineMap addMulMap =
+      AffineMap::get(0, 3, s0 + s1 * s2, b.getContext());
 
   int64_t tiledIdx = 0;
   for (int64_t i = 0; i < numDims; ++i) {
     if (isZeroTileSize(tileSizes[i])) {
-      offsets[i] = b.getIndexAttr(0);
+      offsets[i] = iterDomain[i].offset;
       sizes[i] = iterDomain[i].size;
     } else {
       OpFoldResult idVal = workerIds[tiledIdx];
       OpFoldResult offset = affine::makeComposedFoldedAffineApply(
-          b, loc, mulMap, {idVal, tileSizes[i]});
+          b, loc, addMulMap,
+          {iterDomain[i].offset, idVal, tileSizes[i]});
       offsets[i] = offset;
       OpFoldResult size = affine::makeComposedFoldedAffineMin(
           b, loc, minMap3, {tileSizes[i], iterDomain[i].size, offset});
@@ -103,6 +103,70 @@ getPromotionAttr(MLIRContext *ctx, const MultiLevelTilingParams &params,
   // Default.
   return cast<IREE::GPU::PromotionAttr>(
       IREE::GPU::DerivedThreadConfigAttr::get(ctx));
+}
+
+/// Builds DistributedOperandInfo for all operands, handling promotion and
+/// sref routing. Used by both MMA and regular tiling paths.
+static SmallVector<DistributedOperandInfo> buildOperandInfo(
+    RewriterBase &rewriter, Location loc, Operation *op,
+    const DenseSet<unsigned> &tileableSet,
+    const DenseSet<unsigned> &dpsInitIndices,
+    ArrayRef<int64_t> operandToReadonlyIdx,
+    ArrayRef<int64_t> operandToReadwriteIdx,
+    ArrayRef<BlockArgument> sgReadonlyRefs, ValueRange iterArgs,
+    const MultiLevelTilingParams &params) {
+  SmallVector<DistributedOperandInfo> operandInfo;
+  for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
+    unsigned idx = static_cast<unsigned>(i);
+    if (!tileableSet.contains(idx) ||
+        !isa<ShapedType>(op->getOperand(i).getType())) {
+      operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
+      continue;
+    }
+
+    if (dpsInitIndices.contains(idx)) {
+      // DPS init: use the iter_arg from the reduction loop.
+      int64_t rwIdx = operandToReadwriteIdx[i];
+      if (rwIdx >= 0 && rwIdx < static_cast<int64_t>(iterArgs.size())) {
+        operandInfo.push_back({iterArgs[rwIdx], /*isTile=*/true});
+      } else {
+        operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
+      }
+    } else {
+      // Input: use the readonly sref from outer generic.
+      int64_t roIdx = operandToReadonlyIdx[i];
+      if (roIdx >= 0) {
+        Value sref = sgReadonlyRefs[roIdx];
+
+        // Check if this operand should be promoted.
+        if (llvm::is_contained(params.operandsToPromote, idx)) {
+          ShapedRefType srefType = cast<ShapedRefType>(sref.getType());
+          int64_t rank = srefType.getRank();
+          SmallVector<Attribute> symbolNames;
+          for (int64_t d = 0; d < rank; ++d) {
+            symbolNames.push_back(rewriter.getStringAttr(
+                "operand_" + std::to_string(i) + "_dim_" +
+                std::to_string(d)));
+          }
+          ShapedRefType promotedType = ShapedRefType::get(
+              rewriter.getContext(), srefType.getShape(),
+              srefType.getElementType(),
+              cast<ScopeAttrInterface>(params.subgroup.scope));
+          IREE::GPU::PromotionAttr promotion =
+              getPromotionAttr(rewriter.getContext(), params, idx);
+          Value promoted = IREE::GPU::PromoteOperandOp::create(
+              rewriter, loc, promotedType, promotion, sref,
+              rewriter.getArrayAttr(symbolNames));
+          operandInfo.push_back({promoted, /*isTile=*/false});
+        } else {
+          operandInfo.push_back({sref, /*isTile=*/false});
+        }
+      } else {
+        operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
+      }
+    }
+  }
+  return operandInfo;
 }
 
 FailureOr<GenericOp>
@@ -282,8 +346,8 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
                                    laneIdArgs, laneOffsets, laneSizes);
       } else {
         // No lane tiling — use full subgroup tile.
-        laneOffsets = SmallVector<OpFoldResult>(sgOffsets);
-        laneSizes = SmallVector<OpFoldResult>(sgSizes);
+        laneOffsets = llvm::to_vector(sgOffsets);
+        laneSizes = llvm::to_vector(sgSizes);
       }
 
       // Branch on MMA vs regular tiling for the inner body.
@@ -340,56 +404,11 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             tileOffsets[redDim] = iv;
             tileSizes[redDim] = redTileSizes[redDim];
 
-            // Build operand info — same as regular path but with MMA
-            // annotation. For now, use the same operand handling.
-            SmallVector<DistributedOperandInfo> operandInfo;
-            for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
-              unsigned idx = static_cast<unsigned>(i);
-              if (!tileableSet.contains(idx) ||
-                  !isa<ShapedType>(op->getOperand(i).getType())) {
-                operandInfo.push_back({op->getOperand(i), false});
-                continue;
-              }
-              if (dpsInitIndices.contains(idx)) {
-                int64_t rwIdx = operandToReadwriteIdx[i];
-                if (rwIdx >= 0 &&
-                    rwIdx < static_cast<int64_t>(iterArgs.size())) {
-                  operandInfo.push_back({iterArgs[rwIdx], true});
-                } else {
-                  operandInfo.push_back({op->getOperand(i), false});
-                }
-              } else {
-                int64_t roIdx = operandToReadonlyIdx[i];
-                if (roIdx >= 0) {
-                  Value sref = sgReadonlyRefs[roIdx];
-                  if (llvm::is_contained(params.operandsToPromote, idx)) {
-                    ShapedRefType srefType =
-                        cast<ShapedRefType>(sref.getType());
-                    int64_t rank = srefType.getRank();
-                    SmallVector<Attribute> symbolNames;
-                    for (int64_t d = 0; d < rank; ++d) {
-                      symbolNames.push_back(rewriter.getStringAttr(
-                          "operand_" + std::to_string(i) + "_dim_" +
-                          std::to_string(d)));
-                    }
-                    ShapedRefType promotedType = ShapedRefType::get(
-                        rewriter.getContext(), srefType.getShape(),
-                        srefType.getElementType(),
-                        cast<ScopeAttrInterface>(params.subgroup.scope));
-                    IREE::GPU::PromotionAttr promotion =
-                        getPromotionAttr(rewriter.getContext(), params, idx);
-                    Value promoted = IREE::GPU::PromoteOperandOp::create(
-                        rewriter, loc, promotedType, promotion, sref,
-                        rewriter.getArrayAttr(symbolNames));
-                    operandInfo.push_back({promoted, false});
-                  } else {
-                    operandInfo.push_back({sref, false});
-                  }
-                } else {
-                  operandInfo.push_back({op->getOperand(i), false});
-                }
-              }
-            }
+            // Build operand info using shared helper.
+            SmallVector<DistributedOperandInfo> operandInfo = buildOperandInfo(
+                rewriter, loc, op, tileableSet, dpsInitIndices,
+                operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
+                iterArgs, params);
 
             // For MMA path, call getDistributedImplementation with the
             // MMA kind set. The implementation should create the inner_tiled
@@ -414,7 +433,8 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             }
             scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
           }
-          loopResults = SmallVector<Value>(forOp.getResults());
+          loopResults.assign(forOp.getResults().begin(),
+                             forOp.getResults().end());
         }
 
         // Writeback.
@@ -440,8 +460,10 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
 
         SmallVector<Value> loopResults;
         if (!reductionDims.empty()) {
-          // For simplicity, handle one reduction dim. Multiple reduction dims
-          // would need nested loops.
+          if (reductionDims.size() > 1) {
+            return rewriter.notifyMatchFailure(
+                target, "multiple reduction dimensions not yet supported");
+          }
           int64_t redDim = reductionDims.front();
           Value lb = getValueOrCreateConstantIndexOp(rewriter, loc,
                                                      rewriter.getIndexAttr(0));
@@ -467,68 +489,10 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             tileSizes[redDim] = redTileSizes[redDim];
 
             // === Build DistributedOperandInfo ===
-            SmallVector<DistributedOperandInfo> operandInfo;
-            for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
-              unsigned idx = static_cast<unsigned>(i);
-              if (!tileableSet.contains(idx) ||
-                  !isa<ShapedType>(op->getOperand(i).getType())) {
-                // Non-tileable or scalar: pass through.
-                operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
-                continue;
-              }
-
-              if (dpsInitIndices.contains(idx)) {
-                // DPS init: use the iter_arg from the reduction loop.
-                int64_t rwIdx = operandToReadwriteIdx[i];
-                if (rwIdx >= 0 &&
-                    rwIdx < static_cast<int64_t>(iterArgs.size())) {
-                  operandInfo.push_back({iterArgs[rwIdx], /*isTile=*/true});
-                } else {
-                  operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
-                }
-              } else {
-                // Input: use the readonly sref from outer generic.
-                int64_t roIdx = operandToReadonlyIdx[i];
-                if (roIdx >= 0) {
-                  Value sref = sgReadonlyRefs[roIdx];
-
-                  // Check if this operand should be promoted.
-                  if (llvm::is_contained(params.operandsToPromote, idx)) {
-                    // Create promote_operand op. Build symbol names for each
-                    // dimension of the sref.
-                    ShapedRefType srefType =
-                        cast<ShapedRefType>(sref.getType());
-                    int64_t rank = srefType.getRank();
-                    SmallVector<Attribute> symbolNames;
-                    for (int64_t d = 0; d < rank; ++d) {
-                      std::string name = "operand_" + std::to_string(i) +
-                                         "_dim_" + std::to_string(d);
-                      symbolNames.push_back(rewriter.getStringAttr(name));
-                    }
-                    ArrayAttr symbols = rewriter.getArrayAttr(symbolNames);
-
-                    // The promoted sref has the same shape but the subgroup
-                    // scope (inner scope for shared memory).
-                    ShapedRefType promotedType = ShapedRefType::get(
-                        rewriter.getContext(), srefType.getShape(),
-                        srefType.getElementType(),
-                        cast<ScopeAttrInterface>(params.subgroup.scope));
-
-                    // Get the promotion attribute for this operand.
-                    IREE::GPU::PromotionAttr promotion =
-                        getPromotionAttr(rewriter.getContext(), params, idx);
-
-                    Value promoted = IREE::GPU::PromoteOperandOp::create(
-                        rewriter, loc, promotedType, promotion, sref, symbols);
-                    operandInfo.push_back({promoted, /*isTile=*/false});
-                  } else {
-                    operandInfo.push_back({sref, /*isTile=*/false});
-                  }
-                } else {
-                  operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
-                }
-              }
-            }
+            SmallVector<DistributedOperandInfo> operandInfo = buildOperandInfo(
+                rewriter, loc, op, tileableSet, dpsInitIndices,
+                operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
+                iterArgs, params);
 
             // === Build DistributedResultInfo ===
             // Inside the reduction loop, results should be returned as tiles
@@ -551,7 +515,8 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
           }
 
-          loopResults = SmallVector<Value>(forOp.getResults());
+          loopResults.assign(forOp.getResults().begin(),
+                             forOp.getResults().end());
         } else {
           // No reduction — just call getDistributedImplementation directly.
           SmallVector<DistributedOperandInfo> operandInfo;
@@ -581,7 +546,7 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             return rewriter.notifyMatchFailure(
                 target, "getDistributedImplementation failed");
           }
-          loopResults = SmallVector<Value>(tiledResult->tiledValues);
+          loopResults = llvm::to_vector(tiledResult->tiledValues);
         }
 
         // === Emit writeback ===

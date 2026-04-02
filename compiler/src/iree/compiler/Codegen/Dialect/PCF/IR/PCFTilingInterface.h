@@ -7,6 +7,8 @@
 #ifndef IREE_COMPILER_CODEGEN_DIALECT_PCF_IR_PCFTILINGINTERFACE_H_
 #define IREE_COMPILER_CODEGEN_DIALECT_PCF_IR_PCFTILINGINTERFACE_H_
 
+#include "llvm/ADT/SmallVector.h"
+#include "mlir/IR/Attributes.h"
 #include "mlir/IR/Value.h"
 
 namespace mlir::iree_compiler::IREE::PCF {

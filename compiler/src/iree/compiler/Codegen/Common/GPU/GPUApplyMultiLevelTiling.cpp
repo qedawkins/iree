@@ -43,37 +43,46 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
   // Ensure PCFTilingOpInterface external models are attached.
   IREE::PCF::attachAllDistributedTilingModels(context);
 
-  // Find ops with lowering configs that have thread/subgroup/reduction levels.
-  IRRewriter rewriter(context);
-
+  // Collect targets first, then process. We cannot mutate ops during a walk
+  // because applyMultiLevelTiling replaces/erases the visited op.
+  SmallVector<IREE::PCF::PCFTilingOpInterface> targets;
   funcOp->walk([&](Operation *op) {
     auto pcfTilingOp = dyn_cast<IREE::PCF::PCFTilingOpInterface>(op);
     if (!pcfTilingOp) {
       return;
     }
-
     IREE::Codegen::LoweringConfigAttrInterface loweringConfig =
         getLoweringConfig(op);
     if (!loweringConfig) {
       return;
     }
-
     auto gpuConfig = dyn_cast<IREE::GPU::LoweringConfigAttr>(loweringConfig);
     if (!gpuConfig) {
       return;
     }
+    bool hasSubgroup = gpuConfig.hasTilingLevel(
+        llvm::to_underlying(IREE::GPU::TilingLevel::Subgroup));
+    bool hasThread = gpuConfig.hasTilingLevel(
+        llvm::to_underlying(IREE::GPU::TilingLevel::Thread));
+    if (!hasSubgroup && !hasThread) {
+      return;
+    }
+    targets.push_back(pcfTilingOp);
+  });
 
-    // Check if this op has subgroup or thread tiling.
+  IRRewriter rewriter(context);
+  for (IREE::PCF::PCFTilingOpInterface pcfTilingOp : targets) {
+    Operation *op = pcfTilingOp.getOperation();
+    IREE::Codegen::LoweringConfigAttrInterface loweringConfig =
+        getLoweringConfig(op);
+    auto gpuConfig = cast<IREE::GPU::LoweringConfigAttr>(loweringConfig);
+
     bool hasSubgroup = gpuConfig.hasTilingLevel(
         llvm::to_underlying(IREE::GPU::TilingLevel::Subgroup));
     bool hasThread = gpuConfig.hasTilingLevel(
         llvm::to_underlying(IREE::GPU::TilingLevel::Thread));
     bool hasReduction = gpuConfig.hasTilingLevel(
         llvm::to_underlying(IREE::GPU::TilingLevel::Reduction));
-
-    if (!hasSubgroup && !hasThread) {
-      return;
-    }
 
     // Get tile sizes.
     SmallVector<OpFoldResult> sgTileSizes;
@@ -96,7 +105,8 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     }
     if (hasReduction) {
       reductionTileSizes = gpuConfig.getTilingLevelSizes(
-          rewriter, llvm::to_underlying(IREE::GPU::TilingLevel::Reduction), op);
+          rewriter, llvm::to_underlying(IREE::GPU::TilingLevel::Reduction),
+          op);
     }
 
     // Get promotion info.
@@ -129,8 +139,9 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     }
 
     rewriter.setInsertionPoint(op);
+    // Ignore per-op failure — a failed tiling leaves the op untiled.
     (void)IREE::PCF::applyMultiLevelTiling(rewriter, pcfTilingOp, params);
-  });
+  }
 }
 
 } // namespace
