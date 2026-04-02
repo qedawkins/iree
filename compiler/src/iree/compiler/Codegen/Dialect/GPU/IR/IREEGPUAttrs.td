@@ -80,7 +80,9 @@ def IREEGPU_UseGlobalLoadDma :
         "getTilingLevelSizes",
         "hasTilingLevel",
       ]>,
-      DeclareAttrInterfaceMethods<IREEGPU_PromotionAttr>
+      DeclareAttrInterfaceMethods<IREEGPU_PromotionAttr, [
+        "emitDistributedCopy",
+      ]>
     ]> {
   let mnemonic = "use_global_load_dma";
   let summary = [{
@@ -100,6 +102,7 @@ def IREEGPU_PromoteWithCacheSwizzle :
     AttrDef<IREEGPU_Dialect, "PromoteWithCacheSwizzle", [
       DeclareAttrInterfaceMethods<IREEGPU_PromotionAttr, [
         "promoteOperand",
+        "emitDistributedCopy",
       ]>
     ]> {
   let mnemonic = "promote_with_cache_swizzle";
@@ -135,6 +138,7 @@ def IREEGPU_SwizzleOperand :
     AttrDef<IREEGPU_Dialect, "SwizzleOperand", [
       DeclareAttrInterfaceMethods<IREEGPU_PromotionAttr, [
         "promoteOperand",
+        "emitDistributedCopy",
       ]>
     ]> {
   let mnemonic = "swizzle_operand";
