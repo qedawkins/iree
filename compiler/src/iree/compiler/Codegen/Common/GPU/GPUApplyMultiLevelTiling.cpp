@@ -114,6 +114,13 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
       }
     }
 
+    // Get per-operand promotion types if specified.
+    SmallVector<Attribute> promotionTypes;
+    if (auto typesList =
+            IREE::GPU::getPromotionTypesList(gpuConfig)) {
+      promotionTypes.assign(typesList->begin(), typesList->end());
+    }
+
     // Build params.
     IREE::PCF::MultiLevelTilingParams params;
     params.subgroup.scope = IREE::GPU::SubgroupScopeAttr::get(context);
@@ -122,6 +129,7 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     params.lane.tileSizes = laneTileSizes;
     params.reductionTileSizes = reductionTileSizes;
     params.operandsToPromote = operandsToPromote;
+    params.promotionTypes = promotionTypes;
 
     // Check for MMA kind.
     if (auto mmaKind = IREE::GPU::getMmaKind(gpuConfig)) {

@@ -228,32 +228,65 @@ Value cacheSwizzlePromotionImpl(OpBuilder &builder, OpOperand &operand,
   return promotedValue;
 }
 
-void defaultDistributedCopyImpl(OpBuilder &builder, Location loc,
-                                 Value sourceSref, Value destSref,
-                                 ArrayRef<OpFoldResult> tileSizes,
-                                 Value laneId, Value laneCount) {
-  // For now, implement a simple 1D distribution: each lane handles a chunk
-  // of the leading dimension. This is a placeholder — real implementations
-  // will use more sophisticated distribution strategies.
-  //
-  // Each lane copies: source[lane_offset:lane_offset+chunk, :] ->
-  //                   dest[lane_offset:lane_offset+chunk, :]
-  //
-  // For the v0 implementation, we just create a pcf.read_slice from source
-  // and pcf.write_slice to dest for the full tile. The distribution across
-  // lanes will be handled by later passes that tile the copy.
-  // TODO: Implement proper per-lane distribution.
-
+/// Emits a distributed copy where each lane handles a chunk of the leading
+/// dimension. For a tile [M, K] with N lanes, each lane copies
+/// ceil(M/N) rows from source to dest.
+static void emitRowDistributedCopy(OpBuilder &builder, Location loc,
+                                    Value sourceSref, Value destSref,
+                                    ArrayRef<OpFoldResult> tileSizes,
+                                    Value laneId, Value laneCount) {
   int64_t rank = tileSizes.size();
+  if (rank == 0) {
+    return;
+  }
+
+  auto srefType =
+      cast<iree_compiler::IREE::PCF::ShapedRefType>(sourceSref.getType());
+
+  // Compute per-lane chunk along the leading dimension.
+  // chunk = ceildiv(tileSizes[0], laneCount)
+  // start = laneId * chunk
+  // size = min(chunk, tileSizes[0] - start)
+  AffineExpr s0, s1;
+  bindSymbols(builder.getContext(), s0, s1);
+  AffineMap ceilDivMap =
+      AffineMap::get(0, 2, s0.ceilDiv(s1), builder.getContext());
+  AffineMap mulMap =
+      AffineMap::get(0, 2, s0 * s1, builder.getContext());
+
+  AffineExpr s2;
+  bindSymbols(builder.getContext(), s0, s1, s2);
+  AffineMap minMap =
+      AffineMap::get(0, 3, {s0, s1 - s2}, builder.getContext());
+
+  OpFoldResult leadDim = tileSizes[0];
+  OpFoldResult laneIdOFR = laneId;
+  OpFoldResult laneCountOFR = laneCount;
+
+  OpFoldResult chunk = affine::makeComposedFoldedAffineApply(
+      builder, loc, ceilDivMap, {leadDim, laneCountOFR});
+  OpFoldResult start = affine::makeComposedFoldedAffineApply(
+      builder, loc, mulMap, {laneIdOFR, chunk});
+  OpFoldResult size = affine::makeComposedFoldedAffineMin(
+      builder, loc, minMap, {chunk, leadDim, start});
+
+  // Build offsets: [start, 0, 0, ...]
   SmallVector<OpFoldResult> offsets(rank, builder.getIndexAttr(0));
+  offsets[0] = start;
+
+  // Build sizes: [size, tileSizes[1], tileSizes[2], ...]
+  SmallVector<OpFoldResult> sizes;
+  sizes.push_back(size);
+  for (int64_t i = 1; i < rank; ++i) {
+    sizes.push_back(tileSizes[i]);
+  }
+
   SmallVector<OpFoldResult> strides(rank, builder.getIndexAttr(1));
 
   // Build the result type for the read.
-  auto srefType =
-      cast<iree_compiler::IREE::PCF::ShapedRefType>(sourceSref.getType());
   SmallVector<int64_t> staticSizes;
-  for (OpFoldResult ts : tileSizes) {
-    if (auto attr = dyn_cast<Attribute>(ts)) {
+  for (OpFoldResult s : sizes) {
+    if (auto attr = dyn_cast<Attribute>(s)) {
       staticSizes.push_back(cast<IntegerAttr>(attr).getInt());
     } else {
       staticSizes.push_back(ShapedType::kDynamic);
@@ -263,9 +296,17 @@ void defaultDistributedCopyImpl(OpBuilder &builder, Location loc,
       RankedTensorType::get(staticSizes, srefType.getElementType());
 
   Value tile = iree_compiler::IREE::PCF::ReadSliceOp::create(
-      builder, loc, tileType, sourceSref, offsets, tileSizes, strides);
+      builder, loc, tileType, sourceSref, offsets, sizes, strides);
   iree_compiler::IREE::PCF::WriteSliceOp::create(builder, loc, tile, destSref,
-                                                   offsets, tileSizes, strides);
+                                                   offsets, sizes, strides);
+}
+
+void defaultDistributedCopyImpl(OpBuilder &builder, Location loc,
+                                 Value sourceSref, Value destSref,
+                                 ArrayRef<OpFoldResult> tileSizes,
+                                 Value laneId, Value laneCount) {
+  emitRowDistributedCopy(builder, loc, sourceSref, destSref, tileSizes,
+                          laneId, laneCount);
 }
 
 } // namespace mlir::iree_compiler::IREE::GPU
