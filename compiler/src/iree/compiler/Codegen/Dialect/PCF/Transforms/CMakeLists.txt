@@ -41,6 +41,7 @@ iree_cc_library(
     "FusePCFWrites.cpp"
     "FuseProducers.cpp"
     "LowerStructuralPCF.cpp"
+    "MultiLevelTiling.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"
     "TestDistributedFuseConsumers.cpp"
