@@ -324,4 +324,28 @@ def TestDistributedFuseProducersPass : Pass<"iree-pcf-test-distributed-fuse-prod
   ];
 }
 
+def TestMultiLevelTilingPass : Pass<"iree-pcf-test-multi-level-tiling", ""> {
+  let summary = "Test pass for applyMultiLevelTiling transform.";
+  let description = [{
+    Test pass that applies multi-level tiling (subgroup + lane + reduction)
+    to all PCFTilingOpInterface ops. Uses sequential scopes and tile sizes
+    from options.
+  }];
+  let options = [
+    ListOption<"subgroupTileSizes", "subgroup-tile-sizes", "int64_t",
+               "Tile sizes for subgroup level.">,
+    ListOption<"laneTileSizes", "lane-tile-sizes", "int64_t",
+               "Tile sizes for lane level.">,
+    ListOption<"reductionTileSizes", "reduction-tile-sizes", "int64_t",
+               "Tile sizes for reduction dimensions.">,
+  ];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::PCF::PCFDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::linalg::LinalgDialect"
+  ];
+}
+
 #endif // IREE_CODEGEN_DIALECT_PCF_TRANSFORMS_PASSES
