@@ -384,4 +384,47 @@ def IREEGPU_GlobalSubgroupBarrierOp : Op<IREEGPU_Dialect,
   let assemblyFormat = "attr-dict";
 }
 
+//===----------------------------------------------------------------------===//
+// PromoteOperandOp
+//===----------------------------------------------------------------------===//
+
+def IREEGPU_PromoteOperandOp : Op<IREEGPU_Dialect, "promote_operand", [
+    Pure,
+  ]> {
+  let summary = [{Promotes an operand tile to a different scope.}];
+  let description = [{
+    Takes a pcf.sref at one scope and produces a pcf.sref at a different
+    (typically inner) scope. The promotion attribute controls how the
+    promotion is lowered (e.g., shared memory allocation + copy).
+
+    The `symbols` attribute lists namespace symbol names whose values
+    define the tile dimensions. The number of symbols must equal the
+    rank of the source sref.
+
+    Example:
+    ```mlir
+    %promoted = iree_gpu.promote_operand
+        #iree_gpu.promote_with_cache_swizzle<#iree_gpu.derived_thread_config>
+        %input_sref ["m_tile", "k_tile"]
+        : !pcf.sref<64x128xf16, #wg_scope>
+        -> !pcf.sref<64x128xf16, #sg_scope>
+    ```
+  }];
+
+  let arguments = (ins
+    IREEGPU_PromotionAttr:$promotion,
+    AnyNonVectorShaped:$source,
+    ArrayAttr:$symbols
+  );
+
+  let results = (outs AnyNonVectorShaped:$result);
+
+  let assemblyFormat = [{
+    $promotion $source $symbols attr-dict
+    `:` type($source) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
 #endif // IREE_CODEGEN_DIALECT_IREEGPUOPS

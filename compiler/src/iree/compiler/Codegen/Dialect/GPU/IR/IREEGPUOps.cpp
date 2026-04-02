@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 
+#include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -380,6 +381,50 @@ LogicalResult CoalescedGatherDMAOp::verify() {
              << inBoundsAttr->size() << ") must match init rank (" << initRank
              << ")";
     }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// PromoteOperandOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult PromoteOperandOp::verify() {
+  // The source must be a shaped ref type.
+  auto sourceType = dyn_cast<PCF::ShapedRefType>(getSource().getType());
+  if (!sourceType) {
+    return emitOpError("source must be a pcf.sref type");
+  }
+
+  // The result must be a shaped ref type.
+  auto resultType = dyn_cast<PCF::ShapedRefType>(getResult().getType());
+  if (!resultType) {
+    return emitOpError("result must be a pcf.sref type");
+  }
+
+  // The number of symbols must match the rank of the source.
+  if (static_cast<int64_t>(getSymbols().size()) != sourceType.getRank()) {
+    return emitOpError("number of symbols (")
+           << getSymbols().size() << ") must match source rank ("
+           << sourceType.getRank() << ")";
+  }
+
+  // All symbols must be string attributes.
+  for (Attribute sym : getSymbols()) {
+    if (!isa<StringAttr>(sym)) {
+      return emitOpError("all symbols must be string attributes");
+    }
+  }
+
+  // Element types must match.
+  if (sourceType.getElementType() != resultType.getElementType()) {
+    return emitOpError("source and result element types must match");
+  }
+
+  // Shapes must match.
+  if (sourceType.getShape() != resultType.getShape()) {
+    return emitOpError("source and result shapes must match");
   }
 
   return success();
