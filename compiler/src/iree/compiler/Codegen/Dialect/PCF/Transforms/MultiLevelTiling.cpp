@@ -13,6 +13,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -168,6 +169,55 @@ FailureOr<GenericOp> applyMultiLevelTiling(
   auto sgScope = cast<ScopeAttrInterface>(params.subgroup.scope);
   GenericOp outerGeneric = GenericOp::create(
       rewriter, loc, sgScope, readonlyInits, readwriteInits, numSgIterators);
+
+  // === Populate initializer with promotion symbols ===
+  if (!params.operandsToPromote.empty()) {
+    OpBuilder::InsertionGuard initGuard(rewriter);
+    Region &initRegion = outerGeneric.getInitializer();
+    Block *initBlock = rewriter.createBlock(&initRegion);
+    rewriter.setInsertionPointToStart(initBlock);
+
+    // For each promoted operand, define symbols for the tile sizes of each
+    // dimension. The tile size is determined by the indexing map: parallel
+    // dims use subgroup tile sizes, reduction dims use reduction tile sizes.
+    auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+    for (unsigned promIdx : params.operandsToPromote) {
+      if (!linalgOp) {
+        break;
+      }
+      OpOperand &opOperand = op->getOpOperand(promIdx);
+      AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&opOperand);
+
+      for (auto [d, expr] : llvm::enumerate(indexingMap.getResults())) {
+        std::string symName = "operand_" + std::to_string(promIdx) +
+                              "_dim_" + std::to_string(d);
+        auto dimExpr = dyn_cast<AffineDimExpr>(expr);
+        OpFoldResult tileSize;
+        if (dimExpr) {
+          unsigned pos = dimExpr.getPosition();
+          // Use subgroup tile for parallel dims, reduction tile for
+          // reduction dims.
+          if (iterTypes[pos] == utils::IteratorType::reduction) {
+            tileSize = (pos < redTileSizes.size()) ? redTileSizes[pos]
+                                                   : rewriter.getIndexAttr(0);
+          } else {
+            tileSize = (pos < sgTileSizes.size()) ? sgTileSizes[pos]
+                                                  : rewriter.getIndexAttr(0);
+          }
+        } else {
+          // Non-simple indexing — use 0 as placeholder.
+          tileSize = rewriter.getIndexAttr(0);
+        }
+        Value tileSizeVal =
+            getValueOrCreateConstantIndexOp(rewriter, loc, tileSize);
+        IndexSymbolOp::create(rewriter, loc, rewriter.getStringAttr(symName),
+                              tileSizeVal);
+      }
+    }
+
+    // Yield nothing from the initializer.
+    YieldOp::create(rewriter, loc, ValueRange{});
+  }
 
   // === Build outer body ===
   {
