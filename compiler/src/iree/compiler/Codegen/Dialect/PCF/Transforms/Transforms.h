@@ -57,6 +57,16 @@ FailureOr<PCF::GenericOp>
 convertForallToGenericNest(RewriterBase &rewriter, scf::ForallOp forallOp,
                            ArrayRef<PCF::ScopeAttrInterface> scopes);
 
+/// Applies multi-level tiling (subgroup + lane + reduction) to a
+/// PCFTilingOpInterface op. Creates nested pcf.generic ops for subgroup
+/// and lane distribution, with an scf.for for reduction inside the inner
+/// generic.
+///
+/// Returns the outermost pcf.generic on success.
+FailureOr<PCF::GenericOp>
+applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
+                       const MultiLevelTilingParams &params);
+
 /// Tiles a PCFTilingOpInterface op into a pcf.loop with the given scope and
 /// tile sizes. Tile size semantics match scf::tileUsingSCF: zero means don't
 /// tile, non-zero is the tile size, iteration count = ceil(dim / tileSize).
