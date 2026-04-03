@@ -193,8 +193,8 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
   int64_t redDim = reductionDims.front();
   Value lb =
       getValueOrCreateConstantIndexOp(rewriter, loc, rewriter.getIndexAttr(0));
-  Value ub = getValueOrCreateConstantIndexOp(rewriter, loc,
-                                             iterDomain[redDim].size);
+  Value ub =
+      getValueOrCreateConstantIndexOp(rewriter, loc, iterDomain[redDim].size);
   Value step =
       getValueOrCreateConstantIndexOp(rewriter, loc, redTileSizes[redDim]);
 
@@ -213,10 +213,9 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
     tileSizes[redDim] = redTileSizes[redDim];
 
     // Build operand info using shared helper.
-    SmallVector<DistributedOperandInfo> operandInfo =
-        buildOperandInfo(rewriter, loc, op, tileableSet, dpsInitIndices,
-                         operandToReadonlyIdx, operandToReadwriteIdx,
-                         sgReadonlyRefs, iterArgs, params);
+    SmallVector<DistributedOperandInfo> operandInfo = buildOperandInfo(
+        rewriter, loc, op, tileableSet, dpsInitIndices, operandToReadonlyIdx,
+        operandToReadwriteIdx, sgReadonlyRefs, iterArgs, params);
 
     // Inside the reduction loop, results are returned as tiles (not written
     // to srefs) since they become iter_args.
@@ -225,12 +224,11 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
       resultInfo.push_back({Value()});
     }
 
-    FailureOr<TilingResult> tiledResult =
-        target.getDistributedImplementation(rewriter, tileOffsets, tileSizes,
-                                            operandInfo, resultInfo);
+    FailureOr<TilingResult> tiledResult = target.getDistributedImplementation(
+        rewriter, tileOffsets, tileSizes, operandInfo, resultInfo);
     if (failed(tiledResult)) {
-      return rewriter.notifyMatchFailure(
-          target, "getDistributedImplementation failed");
+      return rewriter.notifyMatchFailure(target,
+                                         "getDistributedImplementation failed");
     }
 
     // Apply post-tiling modifications (e.g., attaching mma_kind attribute).
@@ -498,10 +496,8 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
         // DPS init operand, not via result index directly.
         SmallVector<DistributedResultInfo> resultInfo;
         if (dpsOp) {
-          for (auto [i, init] :
-               llvm::enumerate(dpsOp.getDpsInitsMutable())) {
-            int64_t rwIdx =
-                operandToReadwriteIdx[init.getOperandNumber()];
+          for (auto [i, init] : llvm::enumerate(dpsOp.getDpsInitsMutable())) {
+            int64_t rwIdx = operandToReadwriteIdx[init.getOperandNumber()];
             assert(rwIdx >= 0 &&
                    "DPS init should have been mapped to readwrite sref");
             resultInfo.push_back({sgReadwriteRefs[rwIdx]});

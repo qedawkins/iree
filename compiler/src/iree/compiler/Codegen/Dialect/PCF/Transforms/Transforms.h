@@ -236,10 +236,11 @@ OpTy addReadonlyArgs(RewriterBase &rewriter, OpTy op,
 
 // Explicit specialization declarations for LoopOp and GenericOp.
 template <>
-LoopOp addReadonlyAndReadwriteArgs<LoopOp>(
-    RewriterBase &, LoopOp, ValueRange, ValueRange, ArrayRef<bool>,
-    ArrayRef<Value>, TypeRange, SmallVectorImpl<BlockArgument> &,
-    SmallVectorImpl<BlockArgument> &);
+LoopOp addReadonlyAndReadwriteArgs<LoopOp>(RewriterBase &, LoopOp, ValueRange,
+                                           ValueRange, ArrayRef<bool>,
+                                           ArrayRef<Value>, TypeRange,
+                                           SmallVectorImpl<BlockArgument> &,
+                                           SmallVectorImpl<BlockArgument> &);
 template <>
 GenericOp addReadonlyAndReadwriteArgs<GenericOp>(
     RewriterBase &, GenericOp, ValueRange, ValueRange, ArrayRef<bool>,
@@ -247,7 +248,7 @@ GenericOp addReadonlyAndReadwriteArgs<GenericOp>(
     SmallVectorImpl<BlockArgument> &);
 template <>
 LoopOp addReadonlyArgs<LoopOp>(RewriterBase &, LoopOp, ValueRange,
-                                SmallVectorImpl<BlockArgument> &);
+                               SmallVectorImpl<BlockArgument> &);
 template <>
 GenericOp addReadonlyArgs<GenericOp>(RewriterBase &, GenericOp, ValueRange,
                                      SmallVectorImpl<BlockArgument> &);

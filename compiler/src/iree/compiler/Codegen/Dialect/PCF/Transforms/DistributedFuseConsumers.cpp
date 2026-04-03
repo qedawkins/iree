@@ -197,8 +197,8 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
       rewriter, producerOp, newReadonlyInits,
       /*newReadwriteInits=*/newTiedArgs.empty() ? ValueRange()
                                                 : ValueRange(newTiedArgs),
-      newIsTied, newDynamicSizes, newResultTypes,
-      newReadonlyBlockArgs, newReadwriteBlockArgs);
+      newIsTied, newDynamicSizes, newResultTypes, newReadonlyBlockArgs,
+      newReadwriteBlockArgs);
 
   // Restore insertion point into the body, at the dominant slice.
   rewriter.setInsertionPoint(dominantSlice);
