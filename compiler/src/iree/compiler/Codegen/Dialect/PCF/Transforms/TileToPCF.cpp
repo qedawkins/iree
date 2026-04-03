@@ -268,22 +268,9 @@ tileToPCFImpl(RewriterBase &rewriter, PCFTilingOpInterface target,
       LogicalResult posResult = tilingIface.getResultTilePosition(
           rewriter, i, offsets, sizes, writeOffsets, writeSizes);
       if (failed(posResult)) {
-        // Fallback: use iteration domain offsets truncated to result rank.
-        int64_t resultRank = cast<ShapedType>(tiledValue.getType()).getRank();
-        writeOffsets.assign(offsets.begin(),
-                            offsets.begin() +
-                                std::min<int64_t>(offsets.size(), resultRank));
-        writeSizes.assign(sizes.begin(),
-                          sizes.begin() +
-                              std::min<int64_t>(sizes.size(), resultRank));
-        while (static_cast<int64_t>(writeOffsets.size()) < resultRank) {
-          writeOffsets.push_back(rewriter.getIndexAttr(0));
-        }
-        while (static_cast<int64_t>(writeSizes.size()) < resultRank) {
-          writeSizes.push_back(
-              rewriter.getIndexAttr(cast<ShapedType>(tiledValue.getType())
-                                        .getDimSize(writeSizes.size())));
-        }
+        rewriter.eraseOp(loopOp);
+        return rewriter.notifyMatchFailure(
+            target, "failed to compute result tile position");
       }
       int64_t resultRank = cast<ShapedType>(tiledValue.getType()).getRank();
       SmallVector<OpFoldResult> writeStrides(resultRank,
