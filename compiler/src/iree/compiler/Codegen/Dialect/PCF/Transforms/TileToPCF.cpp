@@ -213,12 +213,22 @@ tileToPCFImpl(RewriterBase &rewriter, PCFTilingOpInterface target,
       operandInfo.push_back({sref, /*isTile=*/false});
     }
 
-    // Step 8: Build DistributedResultInfo per result.
+    // Step 8: Build DistributedResultInfo per result. Map each result to
+    // its readwrite sref via the DPS init operand number, not result index.
     SmallVector<DistributedResultInfo> resultInfo;
     int64_t numResults = op->getNumResults();
     resultInfo.reserve(numResults);
-    for (int64_t i = 0; i < numResults; ++i) {
-      resultInfo.push_back({readwriteRefs[i]});
+    if (dpsOp) {
+      for (OpOperand &init : dpsOp.getDpsInitsMutable()) {
+        int64_t rwIdx = operandToReadwriteSrefIdx[init.getOperandNumber()];
+        assert(rwIdx >= 0 &&
+               "DPS init should have been mapped to readwrite sref");
+        resultInfo.push_back({readwriteRefs[rwIdx]});
+      }
+    } else {
+      for (int64_t i = 0; i < numResults; ++i) {
+        resultInfo.push_back({readwriteRefs[i]});
+      }
     }
 
     // Step 9: Call getDistributedImplementation.

@@ -193,6 +193,13 @@ void TileAndDistributeToWorkgroupsUsingPCFPass::runOnOperation() {
     return signalPassFailure();
   }
 
+  // PCF tiling assumes tensor semantics: readwrite inits produce results
+  // via snapshot. Memref-based ops have 0 results and operate in-place,
+  // which is not yet supported.
+  if (tilableOp->getNumResults() == 0) {
+    return;
+  }
+
   // Use workgroup scope.
   IREE::PCF::ScopeAttrInterface scope = cast<IREE::PCF::ScopeAttrInterface>(
       IREE::Codegen::WorkgroupScopeAttr::get(context, /*linearize=*/true));

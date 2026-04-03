@@ -125,11 +125,9 @@ buildOperandInfo(RewriterBase &rewriter, Location loc, Operation *op,
     if (dpsInitIndices.contains(idx)) {
       // DPS init: use the iter_arg from the reduction loop.
       int64_t rwIdx = operandToReadwriteIdx[i];
-      if (rwIdx >= 0 && rwIdx < static_cast<int64_t>(iterArgs.size())) {
-        operandInfo.push_back({iterArgs[rwIdx], /*isTile=*/true});
-      } else {
-        operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
-      }
+      assert(rwIdx >= 0 && rwIdx < static_cast<int64_t>(iterArgs.size()) &&
+             "DPS init should be mapped to a valid readwrite sref or iter arg");
+      operandInfo.push_back({iterArgs[rwIdx], /*isTile=*/true});
     } else {
       // Input: use the readonly sref from outer generic.
       int64_t roIdx = operandToReadonlyIdx[i];
