@@ -57,7 +57,8 @@ computeOperandTilePosition(OpBuilder &b, Location loc,
     // First subtract the constant offset: offset = m(lbs) - m(0).
     SmallVector<Attribute> zeros(offsets.size(), b.getIndexAttr(0));
     SmallVector<Attribute> mAtZero;
-    [[maybe_unused]] LogicalResult foldRes = subMap.constantFold(zeros, mAtZero);
+    [[maybe_unused]] LogicalResult foldRes =
+        subMap.constantFold(zeros, mAtZero);
     assert(succeeded(foldRes) &&
            "affine_map with only dims must be evaluable at zero.");
     int64_t mAtZeroInt =
@@ -72,7 +73,8 @@ computeOperandTilePosition(OpBuilder &b, Location loc,
     upperBounds.reserve(offsets.size());
     AffineExpr s0 = getAffineSymbolExpr(0, b.getContext());
     AffineExpr s1 = getAffineSymbolExpr(1, b.getContext());
-    AffineMap addMinusOneMap = AffineMap::get(0, 2, s0 + s1 - 1, b.getContext());
+    AffineMap addMinusOneMap =
+        AffineMap::get(0, 2, s0 + s1 - 1, b.getContext());
     for (auto [off, sz] : llvm::zip_equal(offsets, sizes)) {
       upperBounds.push_back(affine::makeComposedFoldedAffineApply(
           b, loc, addMinusOneMap, {off, sz}));
@@ -142,11 +144,11 @@ struct LinalgOpDistributedTilingModel
     return indices;
   }
 
-  LogicalResult canDistribute(
-      Operation *op, ArrayRef<OpFoldResult> offsets,
-      ArrayRef<OpFoldResult> sizes,
-      ArrayRef<DistributedOperandInfo> operandInfo,
-      ArrayRef<DistributedResultInfo> resultInfo) const {
+  LogicalResult
+  canDistribute(Operation *op, ArrayRef<OpFoldResult> offsets,
+                ArrayRef<OpFoldResult> sizes,
+                ArrayRef<DistributedOperandInfo> operandInfo,
+                ArrayRef<DistributedResultInfo> resultInfo) const {
     auto linalgOp = cast<linalg::LinalgOp>(op);
 
     // Check that all result indexing maps have simple dim expressions.
@@ -319,8 +321,7 @@ struct LinalgOpDistributedTilingModel
 
   SmallVector<Value>
   emitInitTileLoad(Operation *op, OpBuilder &b, ValueRange resultSrefs,
-                   ArrayRef<OpFoldResult> offsets,
-                   ArrayRef<OpFoldResult> sizes,
+                   ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
                    const MultiLevelTilingParams &params) const {
     Location loc = op->getLoc();
     linalg::LinalgOp linalgOp = cast<linalg::LinalgOp>(op);
@@ -365,8 +366,7 @@ struct LinalgOpDistributedTilingModel
   }
 
   void emitResultTileStore(Operation *op, OpBuilder &b,
-                           ValueRange reductionResults,
-                           ValueRange resultSrefs,
+                           ValueRange reductionResults, ValueRange resultSrefs,
                            ArrayRef<OpFoldResult> offsets,
                            ArrayRef<OpFoldResult> sizes,
                            const MultiLevelTilingParams &params) const {

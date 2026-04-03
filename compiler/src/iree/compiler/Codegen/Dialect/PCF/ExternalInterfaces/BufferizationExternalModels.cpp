@@ -193,8 +193,7 @@ struct GenericOpInterface
 struct LoopOpInterface
     : BufferizableOpInterface::ExternalModel<LoopOpInterface, PCF::LoopOp> {
   /// Returns true if the given operand is a readonly init.
-  static bool isReadonlyInitOperand(PCF::LoopOp loopOp,
-                                    OpOperand &opOperand) {
+  static bool isReadonlyInitOperand(PCF::LoopOp loopOp, OpOperand &opOperand) {
     OperandRange readonlyInits = loopOp.getReadonlyInits();
     if (readonlyInits.empty()) {
       return false;

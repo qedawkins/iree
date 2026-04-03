@@ -235,8 +235,7 @@ tileToPCFImpl(RewriterBase &rewriter, PCFTilingOpInterface target,
     if (failed(target.canDistribute(offsets, sizes, operandInfo, resultInfo))) {
       // Clean up the loop op on failure.
       rewriter.eraseOp(loopOp);
-      return rewriter.notifyMatchFailure(
-          target, "canDistribute check failed");
+      return rewriter.notifyMatchFailure(target, "canDistribute check failed");
     }
     FailureOr<TilingResult> tilingResult = target.getDistributedImplementation(
         rewriter, offsets, sizes, operandInfo, resultInfo);
