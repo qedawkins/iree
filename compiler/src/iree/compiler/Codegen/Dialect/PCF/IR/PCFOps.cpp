@@ -37,8 +37,7 @@ LogicalResult AllocOp::verify() {
   Operation *parentOp = parentRegion->getParentOp();
   if (isa<InitSubscopeOp>(parentOp)) {
     // InitSubscopeOp's body is a valid allocation context.
-  } else if (auto nsOp =
-                 dyn_cast_if_present<NamespaceOpInterface>(parentOp)) {
+  } else if (auto nsOp = dyn_cast_if_present<NamespaceOpInterface>(parentOp)) {
     if (parentRegion != &nsOp.getSymbolRegion()) {
       return emitOpError(
           "must be in the initializer region of the enclosing namespace op");
@@ -567,8 +566,8 @@ ParseResult GenericOp::parse(OpAsmParser &parser, OperationState &result) {
         RankedTensorType::get(srefType.getShape(), srefType.getElementType());
     {
       // Suppress the diagnostic if tensor resolution fails.
-      ScopedDiagnosticHandler diagHandler(parser.getContext(),
-                                          [](Diagnostic &) { return success(); });
+      ScopedDiagnosticHandler diagHandler(
+          parser.getContext(), [](Diagnostic &) { return success(); });
       if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
                                           result.operands))) {
         continue;
@@ -576,8 +575,7 @@ ParseResult GenericOp::parse(OpAsmParser &parser, OperationState &result) {
     }
     Type memrefType =
         MemRefType::get(srefType.getShape(), srefType.getElementType());
-    if (parser.resolveOperand(readonlyInits[i], memrefType,
-                              result.operands)) {
+    if (parser.resolveOperand(readonlyInits[i], memrefType, result.operands)) {
       return failure();
     }
   }
@@ -934,8 +932,8 @@ ParseResult LoopOp::parse(OpAsmParser &parser, OperationState &result) {
         RankedTensorType::get(srefType.getShape(), srefType.getElementType());
     {
       // Suppress the diagnostic if tensor resolution fails.
-      ScopedDiagnosticHandler diagHandler(parser.getContext(),
-                                          [](Diagnostic &) { return success(); });
+      ScopedDiagnosticHandler diagHandler(
+          parser.getContext(), [](Diagnostic &) { return success(); });
       if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
                                           result.operands))) {
         continue;
@@ -943,8 +941,7 @@ ParseResult LoopOp::parse(OpAsmParser &parser, OperationState &result) {
     }
     Type memrefType =
         MemRefType::get(srefType.getShape(), srefType.getElementType());
-    if (parser.resolveOperand(readonlyInits[i], memrefType,
-                              result.operands)) {
+    if (parser.resolveOperand(readonlyInits[i], memrefType, result.operands)) {
       return failure();
     }
   }
@@ -1423,8 +1420,8 @@ ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
         RankedTensorType::get(srefType.getShape(), srefType.getElementType());
     {
       // Suppress the diagnostic if tensor resolution fails.
-      ScopedDiagnosticHandler diagHandler(parser.getContext(),
-                                          [](Diagnostic &) { return success(); });
+      ScopedDiagnosticHandler diagHandler(
+          parser.getContext(), [](Diagnostic &) { return success(); });
       if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
                                           result.operands))) {
         continue;
@@ -1432,8 +1429,7 @@ ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
     }
     Type memrefType =
         MemRefType::get(srefType.getShape(), srefType.getElementType());
-    if (parser.resolveOperand(readonlyInits[i], memrefType,
-                              result.operands)) {
+    if (parser.resolveOperand(readonlyInits[i], memrefType, result.operands)) {
       return failure();
     }
   }

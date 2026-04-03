@@ -144,11 +144,10 @@ buildOperandInfo(RewriterBase &rewriter, Location loc, Operation *op,
           ShapedRefType srefType = cast<ShapedRefType>(sref.getType());
           int64_t rank = srefType.getRank();
           SmallVector<Attribute> symbolNames;
-          std::string nsPrefix =
-              "n" + std::to_string(i) + ".";
+          std::string nsPrefix = "n" + std::to_string(i) + ".";
           for (int64_t d = 0; d < rank; ++d) {
-            symbolNames.push_back(rewriter.getStringAttr(
-                nsPrefix + "d" + std::to_string(d)));
+            symbolNames.push_back(
+                rewriter.getStringAttr(nsPrefix + "d" + std::to_string(d)));
           }
           ShapedRefType promotedType = ShapedRefType::get(
               rewriter.getContext(), srefType.getShape(),
@@ -246,10 +245,10 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
         }
 
         // Build operand info using shared helper.
-        SmallVector<DistributedOperandInfo> operandInfo = buildOperandInfo(
-            rewriter, nestLoc, op, tileableSet, dpsInitIndices,
-            operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
-            iterArgs, params);
+        SmallVector<DistributedOperandInfo> operandInfo =
+            buildOperandInfo(rewriter, nestLoc, op, tileableSet, dpsInitIndices,
+                             operandToReadonlyIdx, operandToReadwriteIdx,
+                             sgReadonlyRefs, iterArgs, params);
 
         // Inside the reduction loop, results are returned as tiles (not
         // written to srefs) since they become iter_args.
@@ -273,8 +272,8 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
 
         // Set verified lowering config with mma_kind on the tiled ops.
         if (params.mmaKind) {
-          setMmaKindOnTiledOps(rewriter.getContext(),
-                               tiledResult->tiledOps, params.mmaKind);
+          setMmaKindOnTiledOps(rewriter.getContext(), tiledResult->tiledOps,
+                               params.mmaKind);
         }
 
         return scf::ValueVector(tiledResult->tiledValues.begin(),
@@ -282,8 +281,8 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
       });
 
   if (innerFailed) {
-    return rewriter.notifyMatchFailure(
-        target, "getDistributedImplementation failed");
+    return rewriter.notifyMatchFailure(target,
+                                       "getDistributedImplementation failed");
   }
 
   SmallVector<Value> loopResults(loopNest.results.begin(),
@@ -404,8 +403,7 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
       OpOperand &opOperand = op->getOpOperand(promIdx);
       AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&opOperand);
 
-      std::string initNsPrefix =
-          "n" + std::to_string(promIdx) + ".";
+      std::string initNsPrefix = "n" + std::to_string(promIdx) + ".";
       for (auto [d, expr] : llvm::enumerate(indexingMap.getResults())) {
         std::string symName = initNsPrefix + "d" + std::to_string(d);
         auto dimExpr = dyn_cast<AffineDimExpr>(expr);
@@ -551,8 +549,8 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
         }
         if (failed(target.canDistribute(laneOffsets, laneSizes, operandInfo,
                                         resultInfo))) {
-          return rewriter.notifyMatchFailure(
-              target, "canDistribute check failed");
+          return rewriter.notifyMatchFailure(target,
+                                             "canDistribute check failed");
         }
         FailureOr<TilingResult> tiledResult =
             target.getDistributedImplementation(

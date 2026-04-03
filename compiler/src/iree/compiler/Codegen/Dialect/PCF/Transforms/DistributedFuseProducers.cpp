@@ -296,7 +296,7 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
 
     // Check feasibility, then call getDistributedImplementation.
     assert(succeeded(producer.canDistribute(offsets, sizes, operandInfo,
-                                           resultInfo)) &&
+                                            resultInfo)) &&
            "canDistribute check failed unexpectedly during producer fusion");
     FailureOr<TilingResult> tiledResult = producer.getDistributedImplementation(
         rewriter, offsets, sizes, operandInfo, resultInfo);

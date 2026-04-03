@@ -454,8 +454,7 @@ LogicalResult DmaCopyOp::verify() {
   if (sourceType.getElementType() != destType.getElementType()) {
     return emitOpError("source element type ")
            << sourceType.getElementType()
-           << " does not match dest element type "
-           << destType.getElementType();
+           << " does not match dest element type " << destType.getElementType();
   }
   return success();
 }

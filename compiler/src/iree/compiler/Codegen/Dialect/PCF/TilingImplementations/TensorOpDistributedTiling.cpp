@@ -31,11 +31,11 @@ struct PadOpDistributedTilingModel
     return {0};
   }
 
-  LogicalResult canDistribute(
-      Operation *op, ArrayRef<OpFoldResult> offsets,
-      ArrayRef<OpFoldResult> sizes,
-      ArrayRef<DistributedOperandInfo> operandInfo,
-      ArrayRef<DistributedResultInfo> resultInfo) const {
+  LogicalResult
+  canDistribute(Operation *op, ArrayRef<OpFoldResult> offsets,
+                ArrayRef<OpFoldResult> sizes,
+                ArrayRef<DistributedOperandInfo> operandInfo,
+                ArrayRef<DistributedResultInfo> resultInfo) const {
     // Sref source handling for PadOp is not yet implemented.
     Value sourceValue = operandInfo[0].value;
     if (isa<ShapedRefType>(sourceValue.getType())) {
@@ -82,14 +82,12 @@ struct PadOpDistributedTilingModel
   }
   SmallVector<Value>
   emitInitTileLoad(Operation *op, OpBuilder &b, ValueRange resultSrefs,
-                   ArrayRef<OpFoldResult> offsets,
-                   ArrayRef<OpFoldResult> sizes,
+                   ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
                    const MultiLevelTilingParams &params) const {
     return {};
   }
   void emitResultTileStore(Operation *op, OpBuilder &b,
-                           ValueRange reductionResults,
-                           ValueRange resultSrefs,
+                           ValueRange reductionResults, ValueRange resultSrefs,
                            ArrayRef<OpFoldResult> offsets,
                            ArrayRef<OpFoldResult> sizes,
                            const MultiLevelTilingParams &params) const {}

@@ -132,14 +132,12 @@ struct ScatterOpDistributedTilingModel
   }
   SmallVector<Value>
   emitInitTileLoad(Operation *op, OpBuilder &b, ValueRange resultSrefs,
-                   ArrayRef<OpFoldResult> offsets,
-                   ArrayRef<OpFoldResult> sizes,
+                   ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
                    const MultiLevelTilingParams &params) const {
     return {};
   }
   void emitResultTileStore(Operation *op, OpBuilder &b,
-                           ValueRange reductionResults,
-                           ValueRange resultSrefs,
+                           ValueRange reductionResults, ValueRange resultSrefs,
                            ArrayRef<OpFoldResult> offsets,
                            ArrayRef<OpFoldResult> sizes,
                            const MultiLevelTilingParams &params) const {}
@@ -219,14 +217,12 @@ struct MapStoreOpDistributedTilingModel
   }
   SmallVector<Value>
   emitInitTileLoad(Operation *op, OpBuilder &b, ValueRange resultSrefs,
-                   ArrayRef<OpFoldResult> offsets,
-                   ArrayRef<OpFoldResult> sizes,
+                   ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
                    const MultiLevelTilingParams &params) const {
     return {};
   }
   void emitResultTileStore(Operation *op, OpBuilder &b,
-                           ValueRange reductionResults,
-                           ValueRange resultSrefs,
+                           ValueRange reductionResults, ValueRange resultSrefs,
                            ArrayRef<OpFoldResult> offsets,
                            ArrayRef<OpFoldResult> sizes,
                            const MultiLevelTilingParams &params) const {}
