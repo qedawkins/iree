@@ -166,6 +166,93 @@ buildOperandInfo(RewriterBase &rewriter, Location loc, Operation *op,
   return operandInfo;
 }
 
+/// Callback invoked on each TilingResult inside the reduction loop body.
+/// Can be used to attach attributes (e.g., mma_kind) to the tiled ops.
+using PostTilingCallback =
+    function_ref<void(RewriterBase &rewriter, TilingResult &tiledResult)>;
+
+/// Builds a reduction loop (scf.for) over the first reduction dimension,
+/// calling getDistributedImplementation inside the loop body. The
+/// |postTilingCb| callback is invoked on the tiled result before yielding.
+///
+/// Populates |loopResults| with the scf.for results. Emits
+/// emitReductionWriteback after the loop if |reductionDims| is non-empty.
+///
+/// Returns failure if getDistributedImplementation fails.
+static FailureOr<SmallVector<Value>> buildReductionLoop(
+    RewriterBase &rewriter, Location loc, PCFTilingOpInterface target,
+    Operation *op, ArrayRef<Range> iterDomain,
+    ArrayRef<utils::IteratorType> iterTypes,
+    ArrayRef<OpFoldResult> redTileSizes, ArrayRef<OpFoldResult> laneOffsets,
+    ArrayRef<OpFoldResult> laneSizes, ArrayRef<int64_t> reductionDims,
+    const DenseSet<unsigned> &tileableSet,
+    const DenseSet<unsigned> &dpsInitIndices,
+    ArrayRef<int64_t> operandToReadonlyIdx,
+    ArrayRef<int64_t> operandToReadwriteIdx,
+    ArrayRef<BlockArgument> sgReadonlyRefs,
+    ArrayRef<BlockArgument> sgReadwriteRefs, ValueRange initValues,
+    const MultiLevelTilingParams &params, PostTilingCallback postTilingCb) {
+  int64_t redDim = reductionDims.front();
+  Value lb =
+      getValueOrCreateConstantIndexOp(rewriter, loc, rewriter.getIndexAttr(0));
+  Value ub = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                             iterDomain[redDim].size);
+  Value step =
+      getValueOrCreateConstantIndexOp(rewriter, loc, redTileSizes[redDim]);
+
+  auto forOp = scf::ForOp::create(rewriter, loc, lb, ub, step, initValues);
+  {
+    OpBuilder::InsertionGuard forGuard(rewriter);
+    rewriter.setInsertionPointToStart(forOp.getBody());
+
+    Value iv = forOp.getInductionVar();
+    ValueRange iterArgs = forOp.getRegionIterArgs();
+
+    // Compute tile offsets including reduction.
+    SmallVector<OpFoldResult> tileOffsets(laneOffsets);
+    SmallVector<OpFoldResult> tileSizes(laneSizes);
+    tileOffsets[redDim] = iv;
+    tileSizes[redDim] = redTileSizes[redDim];
+
+    // Build operand info using shared helper.
+    SmallVector<DistributedOperandInfo> operandInfo =
+        buildOperandInfo(rewriter, loc, op, tileableSet, dpsInitIndices,
+                         operandToReadonlyIdx, operandToReadwriteIdx,
+                         sgReadonlyRefs, iterArgs, params);
+
+    // Inside the reduction loop, results are returned as tiles (not written
+    // to srefs) since they become iter_args.
+    SmallVector<DistributedResultInfo> resultInfo;
+    for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
+      resultInfo.push_back({Value()});
+    }
+
+    FailureOr<TilingResult> tiledResult =
+        target.getDistributedImplementation(rewriter, tileOffsets, tileSizes,
+                                            operandInfo, resultInfo);
+    if (failed(tiledResult)) {
+      return rewriter.notifyMatchFailure(
+          target, "getDistributedImplementation failed");
+    }
+
+    // Apply post-tiling modifications (e.g., attaching mma_kind attribute).
+    if (postTilingCb) {
+      postTilingCb(rewriter, *tiledResult);
+    }
+
+    scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
+  }
+
+  SmallVector<Value> loopResults(forOp.getResults().begin(),
+                                 forOp.getResults().end());
+
+  // Emit writeback after the reduction loop.
+  target.emitReductionWriteback(rewriter, loopResults, sgReadwriteRefs,
+                                laneOffsets, laneSizes, params);
+
+  return loopResults;
+}
+
 FailureOr<GenericOp>
 applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
                       const MultiLevelTilingParams &params) {
@@ -347,231 +434,96 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
         laneSizes = llvm::to_vector(sgSizes);
       }
 
-      // Branch on MMA vs regular tiling for the inner body.
-      if (params.mmaKind) {
-        // === MMA path: use InnerTileDescAttrInterface ===
-        auto mmaDesc =
-            cast<IREE::Codegen::InnerTileDescAttrInterface>(params.mmaKind);
+      // Emit reduction init and determine reduction dimensions. Both MMA
+      // and regular paths share the same reduction loop structure.
+      SmallVector<Value> initValues = target.emitReductionInit(
+          rewriter, sgReadwriteRefs, laneOffsets, laneSizes, params);
 
-        // Get undistributed tile types for operands and accumulator.
-        SmallVector<VectorType> undistTileTypes;
-        mmaDesc.getUndistributedTileTypes(undistTileTypes);
+      SmallVector<int64_t> reductionDims;
+      for (int64_t i = 0; i < numDims; ++i) {
+        if (iterTypes[i] == utils::IteratorType::reduction &&
+            !isZeroTileSize(redTileSizes[i])) {
+          reductionDims.push_back(i);
+        }
+      }
 
-        // The last undistributed type is the accumulator.
-        // For matmul: [MxKxf16, KxNxf16, MxNxf32]
-        (void)undistTileTypes;
-        (void)mmaDesc;
+      if (!reductionDims.empty()) {
+        if (!params.mmaKind && reductionDims.size() > 1) {
+          return rewriter.notifyMatchFailure(
+              target, "multiple reduction dimensions not yet supported");
+        }
 
-        // Iter arg types are the accumulator types (as tensors for now,
-        // will be converted to vectors by inner_tiled conversion).
-        // TODO: Determine whether iter args should be tensors or vectors.
-        // For now, use the PCFTilingOpInterface path for init/writeback.
-        SmallVector<Value> initValues = target.emitReductionInit(
-            rewriter, sgReadwriteRefs, laneOffsets, laneSizes, params);
-
-        // Determine reduction loop bounds.
-        SmallVector<int64_t> reductionDims;
-        for (int64_t i = 0; i < numDims; ++i) {
-          if (iterTypes[i] == utils::IteratorType::reduction &&
-              !isZeroTileSize(redTileSizes[i])) {
-            reductionDims.push_back(i);
+        // Post-tiling callback: attach mma_kind attribute for MMA path.
+        // The lambda must outlive the function_ref, so declare it in the
+        // same scope where buildReductionLoop is called.
+        Attribute mmaKind = params.mmaKind;
+        auto mmaCallback = [mmaKind](RewriterBase & /*rewriter*/,
+                                     TilingResult &tiledResult) {
+          for (Operation *tiledOp : tiledResult.tiledOps) {
+            tiledOp->setAttr("mma_kind", mmaKind);
           }
+        };
+        PostTilingCallback postTilingCb =
+            mmaKind ? PostTilingCallback(mmaCallback) : nullptr;
+
+        FailureOr<SmallVector<Value>> loopResults = buildReductionLoop(
+            rewriter, loc, target, op, iterDomain, iterTypes, redTileSizes,
+            laneOffsets, laneSizes, reductionDims, tileableSet, dpsInitIndices,
+            operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
+            sgReadwriteRefs, initValues, params, postTilingCb);
+        if (failed(loopResults)) {
+          return failure();
         }
-
-        SmallVector<Value> loopResults;
-        if (!reductionDims.empty()) {
-          int64_t redDim = reductionDims.front();
-          Value lb = getValueOrCreateConstantIndexOp(rewriter, loc,
-                                                     rewriter.getIndexAttr(0));
-          Value ub = getValueOrCreateConstantIndexOp(rewriter, loc,
-                                                     iterDomain[redDim].size);
-          Value step = getValueOrCreateConstantIndexOp(rewriter, loc,
-                                                       redTileSizes[redDim]);
-
-          auto forOp =
-              scf::ForOp::create(rewriter, loc, lb, ub, step, initValues);
-          {
-            OpBuilder::InsertionGuard forGuard(rewriter);
-            rewriter.setInsertionPointToStart(forOp.getBody());
-            Value iv = forOp.getInductionVar();
-            ValueRange iterArgs = forOp.getRegionIterArgs();
-
-            SmallVector<OpFoldResult> tileOffsets(laneOffsets);
-            SmallVector<OpFoldResult> tileSizes(laneSizes);
-            tileOffsets[redDim] = iv;
-            tileSizes[redDim] = redTileSizes[redDim];
-
-            // Build operand info using shared helper.
-            SmallVector<DistributedOperandInfo> operandInfo =
-                buildOperandInfo(rewriter, loc, op, tileableSet, dpsInitIndices,
-                                 operandToReadonlyIdx, operandToReadwriteIdx,
-                                 sgReadonlyRefs, iterArgs, params);
-
-            // For MMA path, call getDistributedImplementation with the
-            // MMA kind set. The implementation should create the inner_tiled
-            // op. For now, fall back to the regular implementation and let
-            // the inner_tiled conversion happen in a subsequent pass.
-            // TODO: Create iree_codegen.inner_tiled directly here.
-            SmallVector<DistributedResultInfo> resultInfo;
-            for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
-              resultInfo.push_back({Value()});
-            }
-            FailureOr<TilingResult> tiledResult =
-                target.getDistributedImplementation(
-                    rewriter, tileOffsets, tileSizes, operandInfo, resultInfo);
-            if (failed(tiledResult)) {
-              return rewriter.notifyMatchFailure(
-                  target, "MMA: getDistributedImplementation failed");
-            }
-            // Attach the mma_kind as an attribute on the tiled op for later
-            // conversion.
-            for (Operation *tiledOp : tiledResult->tiledOps) {
-              tiledOp->setAttr("mma_kind", params.mmaKind);
-            }
-            scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
-          }
-          loopResults.assign(forOp.getResults().begin(),
-                             forOp.getResults().end());
-        }
-
-        // Writeback.
-        if (!reductionDims.empty()) {
-          target.emitReductionWriteback(rewriter, loopResults, sgReadwriteRefs,
-                                        laneOffsets, laneSizes, params);
-        }
-
-        ReturnOp::create(rewriter, loc);
       } else {
-        // === Regular path (non-MMA): use PCFTilingOpInterface ===
-        SmallVector<Value> initValues = target.emitReductionInit(
-            rewriter, sgReadwriteRefs, laneOffsets, laneSizes, params);
-
-        // === Determine reduction loop bounds ===
-        SmallVector<int64_t> reductionDims;
-        for (int64_t i = 0; i < numDims; ++i) {
-          if (iterTypes[i] == utils::IteratorType::reduction &&
-              !isZeroTileSize(redTileSizes[i])) {
-            reductionDims.push_back(i);
+        // No reduction -- call getDistributedImplementation directly.
+        SmallVector<DistributedOperandInfo> operandInfo;
+        for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
+          unsigned idx = static_cast<unsigned>(i);
+          if (!tileableSet.contains(idx) ||
+              !isa<ShapedType>(op->getOperand(i).getType())) {
+            operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
+            continue;
           }
-        }
-
-        SmallVector<Value> loopResults;
-        if (!reductionDims.empty()) {
-          if (reductionDims.size() > 1) {
-            return rewriter.notifyMatchFailure(
-                target, "multiple reduction dimensions not yet supported");
-          }
-          int64_t redDim = reductionDims.front();
-          Value lb = getValueOrCreateConstantIndexOp(rewriter, loc,
-                                                     rewriter.getIndexAttr(0));
-          Value ub = getValueOrCreateConstantIndexOp(rewriter, loc,
-                                                     iterDomain[redDim].size);
-          Value step = getValueOrCreateConstantIndexOp(rewriter, loc,
-                                                       redTileSizes[redDim]);
-
-          auto forOp =
-              scf::ForOp::create(rewriter, loc, lb, ub, step, initValues);
-
-          {
-            OpBuilder::InsertionGuard forGuard(rewriter);
-            rewriter.setInsertionPointToStart(forOp.getBody());
-
-            Value iv = forOp.getInductionVar();
-            ValueRange iterArgs = forOp.getRegionIterArgs();
-
-            // Compute tile offsets including reduction.
-            SmallVector<OpFoldResult> tileOffsets(laneOffsets);
-            SmallVector<OpFoldResult> tileSizes(laneSizes);
-            tileOffsets[redDim] = iv;
-            tileSizes[redDim] = redTileSizes[redDim];
-
-            // === Build DistributedOperandInfo ===
-            SmallVector<DistributedOperandInfo> operandInfo =
-                buildOperandInfo(rewriter, loc, op, tileableSet, dpsInitIndices,
-                                 operandToReadonlyIdx, operandToReadwriteIdx,
-                                 sgReadonlyRefs, iterArgs, params);
-
-            // === Build DistributedResultInfo ===
-            // Inside the reduction loop, results should be returned as tiles
-            // (not written to srefs) since they become iter_args.
-            SmallVector<DistributedResultInfo> resultInfo;
-            for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
-              resultInfo.push_back({Value()}); // null destSref — return tile.
-            }
-
-            // === Call getDistributedImplementation ===
-            FailureOr<TilingResult> tiledResult =
-                target.getDistributedImplementation(
-                    rewriter, tileOffsets, tileSizes, operandInfo, resultInfo);
-            if (failed(tiledResult)) {
-              return rewriter.notifyMatchFailure(
-                  target, "getDistributedImplementation failed");
-            }
-
-            // Yield tiled values as loop results.
-            scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
-          }
-
-          loopResults.assign(forOp.getResults().begin(),
-                             forOp.getResults().end());
-        } else {
-          // No reduction — just call getDistributedImplementation directly.
-          SmallVector<DistributedOperandInfo> operandInfo;
-          for (int64_t i = 0, e = op->getNumOperands(); i < e; ++i) {
-            unsigned idx = static_cast<unsigned>(i);
-            if (!tileableSet.contains(idx) ||
-                !isa<ShapedType>(op->getOperand(i).getType())) {
-              operandInfo.push_back({op->getOperand(i), /*isTile=*/false});
-              continue;
-            }
-            if (dpsInitIndices.contains(idx)) {
-              int64_t rwIdx = operandToReadwriteIdx[i];
-              assert(rwIdx >= 0 &&
-                     "DPS init should have been mapped to readwrite sref");
-              operandInfo.push_back({sgReadwriteRefs[rwIdx], /*isTile=*/false});
-            } else {
-              int64_t roIdx = operandToReadonlyIdx[i];
-              assert(roIdx >= 0 &&
-                     "tileable input should have been mapped to readonly sref");
-              operandInfo.push_back({sgReadonlyRefs[roIdx], /*isTile=*/false});
-            }
-          }
-          // Build result info: map each result to its readwrite sref via the
-          // DPS init operand, not via result index directly.
-          SmallVector<DistributedResultInfo> resultInfo;
-          if (dpsOp) {
-            for (auto [i, init] :
-                 llvm::enumerate(dpsOp.getDpsInitsMutable())) {
-              int64_t rwIdx =
-                  operandToReadwriteIdx[init.getOperandNumber()];
-              assert(rwIdx >= 0 &&
-                     "DPS init should have been mapped to readwrite sref");
-              resultInfo.push_back({sgReadwriteRefs[rwIdx]});
-            }
+          if (dpsInitIndices.contains(idx)) {
+            int64_t rwIdx = operandToReadwriteIdx[i];
+            assert(rwIdx >= 0 &&
+                   "DPS init should have been mapped to readwrite sref");
+            operandInfo.push_back({sgReadwriteRefs[rwIdx], /*isTile=*/false});
           } else {
-            for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
-              resultInfo.push_back({sgReadwriteRefs[i]});
-            }
+            int64_t roIdx = operandToReadonlyIdx[i];
+            assert(roIdx >= 0 &&
+                   "tileable input should have been mapped to readonly sref");
+            operandInfo.push_back({sgReadonlyRefs[roIdx], /*isTile=*/false});
           }
-          FailureOr<TilingResult> tiledResult =
-              target.getDistributedImplementation(
-                  rewriter, laneOffsets, laneSizes, operandInfo, resultInfo);
-          if (failed(tiledResult)) {
-            return rewriter.notifyMatchFailure(
-                target, "getDistributedImplementation failed");
+        }
+        // Build result info: map each result to its readwrite sref via the
+        // DPS init operand, not via result index directly.
+        SmallVector<DistributedResultInfo> resultInfo;
+        if (dpsOp) {
+          for (auto [i, init] :
+               llvm::enumerate(dpsOp.getDpsInitsMutable())) {
+            int64_t rwIdx =
+                operandToReadwriteIdx[init.getOperandNumber()];
+            assert(rwIdx >= 0 &&
+                   "DPS init should have been mapped to readwrite sref");
+            resultInfo.push_back({sgReadwriteRefs[rwIdx]});
           }
-          loopResults = llvm::to_vector(tiledResult->tiledValues);
+        } else {
+          for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
+            resultInfo.push_back({sgReadwriteRefs[i]});
+          }
         }
-
-        // === Emit writeback ===
-        if (!reductionDims.empty()) {
-          target.emitReductionWriteback(rewriter, loopResults, sgReadwriteRefs,
-                                        laneOffsets, laneSizes, params);
+        FailureOr<TilingResult> tiledResult =
+            target.getDistributedImplementation(
+                rewriter, laneOffsets, laneSizes, operandInfo, resultInfo);
+        if (failed(tiledResult)) {
+          return rewriter.notifyMatchFailure(
+              target, "getDistributedImplementation failed");
         }
+      }
 
-        // Create pcf.return for inner generic.
-        ReturnOp::create(rewriter, loc);
-      } // end else (regular path)
+      // Create pcf.return for inner generic.
+      ReturnOp::create(rewriter, loc);
     }
 
     // Create pcf.return for outer generic.

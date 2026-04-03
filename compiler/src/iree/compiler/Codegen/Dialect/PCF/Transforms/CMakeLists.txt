@@ -44,6 +44,7 @@ iree_cc_library(
     "MultiLevelTiling.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"
+    "ScopedOpHelpers.cpp"
     "TestDistributedFuseConsumers.cpp"
     "TestDistributedFuseProducers.cpp"
     "TestEquivalenceAnalysis.cpp"

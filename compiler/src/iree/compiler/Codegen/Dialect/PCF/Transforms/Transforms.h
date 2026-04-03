@@ -211,9 +211,46 @@ void fuseDistributedProducer(RewriterBase &rewriter, PCF::GenericOp genericOp,
 void fuseDistributedProducer(RewriterBase &rewriter, PCF::LoopOp loopOp,
                              const DistributedProducerFusionParams &params);
 
-// TODO(shared-exec): Extract shared addReadonly{AndReadwrite}Args helpers
-// from DistributedFuseConsumers.cpp and DistributedFuseProducers.cpp into a
-// shared utility. Currently both files have local copies that will diverge.
+/// Creates a new scoped op (LoopOp or GenericOp) with additional readonly and
+/// readwrite sref args. Moves the body from the old op to the new one, inserts
+/// new block args at the correct positions, and replaces the old op's results
+/// with the new op's original results.
+///
+/// Returns the new op and populates |newReadonlyRefs| and |newReadwriteRefs|
+/// with the newly inserted block arguments.
+template <typename OpTy>
+OpTy addReadonlyAndReadwriteArgs(
+    RewriterBase &rewriter, OpTy op, ValueRange newReadonlyInits,
+    ValueRange newReadwriteInits, ArrayRef<bool> newIsTied,
+    ArrayRef<Value> newDynamicSizes, TypeRange newResultTypes,
+    SmallVectorImpl<BlockArgument> &newReadonlyRefs,
+    SmallVectorImpl<BlockArgument> &newReadwriteRefs);
+
+/// Convenience wrapper that adds only readonly sref args (no new results or
+/// readwrite args). Delegates to addReadonlyAndReadwriteArgs with empty
+/// readwrite parameters.
+template <typename OpTy>
+OpTy addReadonlyArgs(RewriterBase &rewriter, OpTy op,
+                     ValueRange newReadonlyInits,
+                     SmallVectorImpl<BlockArgument> &newReadonlyRefs);
+
+// Explicit specialization declarations for LoopOp and GenericOp.
+template <>
+LoopOp addReadonlyAndReadwriteArgs<LoopOp>(
+    RewriterBase &, LoopOp, ValueRange, ValueRange, ArrayRef<bool>,
+    ArrayRef<Value>, TypeRange, SmallVectorImpl<BlockArgument> &,
+    SmallVectorImpl<BlockArgument> &);
+template <>
+GenericOp addReadonlyAndReadwriteArgs<GenericOp>(
+    RewriterBase &, GenericOp, ValueRange, ValueRange, ArrayRef<bool>,
+    ArrayRef<Value>, TypeRange, SmallVectorImpl<BlockArgument> &,
+    SmallVectorImpl<BlockArgument> &);
+template <>
+LoopOp addReadonlyArgs<LoopOp>(RewriterBase &, LoopOp, ValueRange,
+                                SmallVectorImpl<BlockArgument> &);
+template <>
+GenericOp addReadonlyArgs<GenericOp>(RewriterBase &, GenericOp, ValueRange,
+                                     SmallVectorImpl<BlockArgument> &);
 
 // Pattern set for dropping unused results from scoped ops. Due to memory
 // effects this requires cascading operation erasure and is unsuitable for
