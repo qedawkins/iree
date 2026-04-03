@@ -66,10 +66,10 @@ func.func @matmul_promoted(%lhs: tensor<256x512xf16>, %rhs: tensor<512x256xf16>,
 // CHECK: pcf.loop
 // Symbols for promoted operand tile sizes defined in initializer.
 // CHECK:   pcf.generic scope(#iree_gpu.subgroup_scope) initialize {
-// CHECK:     pcf.index_symbol "operand_0_dim_0"
-// CHECK:     pcf.index_symbol "operand_0_dim_1"
-// CHECK:     pcf.index_symbol "operand_1_dim_0"
-// CHECK:     pcf.index_symbol "operand_1_dim_1"
+// CHECK:     pcf.index_symbol "n0.d0"
+// CHECK:     pcf.index_symbol "n0.d1"
+// CHECK:     pcf.index_symbol "n1.d0"
+// CHECK:     pcf.index_symbol "n1.d1"
 // CHECK:     pcf.yield
 // CHECK:   }
 // CHECK:     pcf.generic scope(#iree_gpu.lane_scope)
