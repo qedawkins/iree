@@ -150,6 +150,20 @@ PCF::GenericOp cloneWithNewResultTypes(RewriterBase &rewriter,
   newGenericOp.getRegion().takeBody(genericOp.getRegion());
   newGenericOp.getInitializer().takeBody(genericOp.getInitializer());
   newGenericOp.setNumLeadingArgs(genericOp.getNumLeadingArgs());
+
+  // Preserve readonly inits from the original op. The builder used above
+  // sets readonlyInits=0, so we must insert them and update metadata.
+  ValueRange readonlyInits = genericOp.getReadonlyInits();
+  if (!readonlyInits.empty()) {
+    newGenericOp->insertOperands(0, readonlyInits);
+    auto &props = newGenericOp.getProperties();
+    props.setOperandSegmentSizes(
+        {static_cast<int32_t>(readonlyInits.size()),
+         static_cast<int32_t>(newTiedArgs.size()),
+         static_cast<int32_t>(newDynamicSizes.size())});
+    newGenericOp.setNumReadonlyRefs(genericOp.getNumReadonlyRefs());
+  }
+
   return newGenericOp;
 }
 
@@ -158,10 +172,11 @@ PCF::LoopOp cloneWithNewResultTypes(RewriterBase &rewriter, PCF::LoopOp loopOp,
                                     ArrayRef<Value> newTiedArgs,
                                     ArrayRef<Value> newDynamicSizes,
                                     ArrayRef<bool> newIsTied) {
-  auto newLoopOp =
-      PCF::LoopOp::create(rewriter, loopOp.getLoc(), newResultTypes,
-                          loopOp.getScope(), loopOp.getCount(), newTiedArgs,
-                          newDynamicSizes, newIsTied, loopOp.getSyncOnReturn());
+  // Use the builder that supports readonly inits to preserve them.
+  auto newLoopOp = PCF::LoopOp::create(
+      rewriter, loopOp.getLoc(), newResultTypes, loopOp.getScope(),
+      loopOp.getCount(), loopOp.getReadonlyInits(), newTiedArgs,
+      newDynamicSizes, newIsTied, loopOp.getSyncOnReturn());
   newLoopOp.getRegion().takeBody(loopOp.getRegion());
   return newLoopOp;
 }
