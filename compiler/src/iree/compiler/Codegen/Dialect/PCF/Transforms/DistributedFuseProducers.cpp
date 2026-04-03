@@ -58,7 +58,7 @@ lookupConsumerSlices(OpResult result,
     return failure();
   }
 
-  slices.append(reads.begin(), reads.end());
+  llvm::append_range(slices, reads);
   return success();
 }
 

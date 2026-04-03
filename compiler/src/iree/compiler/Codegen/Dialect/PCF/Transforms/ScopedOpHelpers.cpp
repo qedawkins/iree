@@ -79,12 +79,12 @@ LoopOp addReadonlyAndReadwriteArgs<LoopOp>(
   // Insert new readwrite sref args before id args.
   int64_t numIdArgs = loopOp.getCount().size();
   int64_t readwriteInsertIdx = body->getNumArguments() - numIdArgs;
-  Attribute syncScope = SyncOnReturnAttr::get(context);
+  Attribute syncOnReturn = SyncOnReturnAttr::get(context);
   for (Type resultType : newResultTypes) {
     ShapedType shapedType = cast<ShapedType>(resultType);
     ShapedRefType srefType = ShapedRefType::get(context, shapedType.getShape(),
                                                 shapedType.getElementType(),
-                                                loopOp.getScope(), syncScope);
+                                                loopOp.getScope(), syncOnReturn);
     BlockArgument arg = body->insertArgument(readwriteInsertIdx, srefType, loc);
     newReadwriteRefs.push_back(arg);
     ++readwriteInsertIdx;
@@ -178,12 +178,12 @@ GenericOp addReadonlyAndReadwriteArgs<GenericOp>(
   // Insert new readwrite sref args before index args.
   int64_t numIndexArgs = 2 * genericOp.getNumIterators();
   int64_t readwriteInsertIdx = body->getNumArguments() - numIndexArgs;
-  Attribute syncScope = SyncOnReturnAttr::get(context);
+  Attribute syncOnReturn = SyncOnReturnAttr::get(context);
   for (Type resultType : newResultTypes) {
     ShapedType shapedType = cast<ShapedType>(resultType);
     ShapedRefType srefType = ShapedRefType::get(
         context, shapedType.getShape(), shapedType.getElementType(),
-        genericOp.getScope(), syncScope);
+        genericOp.getScope(), syncOnReturn);
     BlockArgument arg = body->insertArgument(readwriteInsertIdx, srefType, loc);
     newReadwriteRefs.push_back(arg);
     ++readwriteInsertIdx;

@@ -82,7 +82,7 @@ static LogicalResult replaceReadSliceOps(RewriterBase &rewriter, OpTy op,
     } else {
       auto tensorType = cast<RankedTensorType>(readOp.getResultType());
 
-      // Collect dynamic sizes from the read op's sizes
+      // Collect dynamic sizes from the read op's sizes.
       SmallVector<Value> dynamicSizes;
       for (auto [idx, size] : llvm::enumerate(readOp.getMixedSizes())) {
         if (tensorType.isDynamicDim(idx)) {
@@ -214,8 +214,7 @@ static LogicalResult dropUnusedResults(RewriterBase &rewriter, OpTy op) {
             cast<ShapedType>(result.getType()).getNumDynamicDims();
         ValueRange currDynamicSizes =
             op.getDynamicSizes().slice(currSizesIndex, numDynamicDims);
-        newDynamicSizes.append(currDynamicSizes.begin(),
-                               currDynamicSizes.end());
+        llvm::append_range(newDynamicSizes, currDynamicSizes);
         currSizesIndex += numDynamicDims;
       }
       continue;
@@ -229,8 +228,8 @@ static LogicalResult dropUnusedResults(RewriterBase &rewriter, OpTy op) {
 
     // Iterate the ops to erase in reverse to make sure ops without users are
     // erased first.
-    for (auto op : llvm::reverse(opsToErase)) {
-      rewriter.eraseOp(op);
+    for (auto opToErase : llvm::reverse(opsToErase)) {
+      rewriter.eraseOp(opToErase);
     }
 
     blockArgsToDrop.push_back(regionArg.getArgNumber());
