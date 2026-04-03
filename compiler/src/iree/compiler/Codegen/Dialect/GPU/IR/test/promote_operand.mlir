@@ -24,3 +24,37 @@ func.func @promote_wrong_symbols(
       -> !pcf.sref<64x128xf16, #pcf.sequential>
   return %promoted : !pcf.sref<64x128xf16, #pcf.sequential>
 }
+
+// -----
+
+// Dynamic-shaped sref: promote an operand with unknown dimensions.
+// CHECK-LABEL: @promote_dynamic
+func.func @promote_dynamic(
+    %src: !pcf.sref<?x?xf16, #pcf.test_scope>) -> !pcf.sref<?x?xf16, #pcf.sequential> {
+  %promoted = iree_gpu.promote_operand
+      #iree_gpu.promote_with_cache_swizzle<#iree_gpu.derived_thread_config>
+      %src ["dim0", "dim1"]
+      : !pcf.sref<?x?xf16, #pcf.test_scope>
+      -> !pcf.sref<?x?xf16, #pcf.sequential>
+  // CHECK: iree_gpu.promote_operand
+  // CHECK-SAME: !pcf.sref<?x?xf16, #pcf.test_scope>
+  // CHECK-SAME: -> !pcf.sref<?x?xf16, #pcf.sequential>
+  return %promoted : !pcf.sref<?x?xf16, #pcf.sequential>
+}
+
+// -----
+
+// Rank-1 operand: promote a 1D sref.
+// CHECK-LABEL: @promote_rank1
+func.func @promote_rank1(
+    %src: !pcf.sref<128xf16, #pcf.test_scope>) -> !pcf.sref<128xf16, #pcf.sequential> {
+  %promoted = iree_gpu.promote_operand
+      #iree_gpu.promote_with_cache_swizzle<#iree_gpu.derived_thread_config>
+      %src ["dim0"]
+      : !pcf.sref<128xf16, #pcf.test_scope>
+      -> !pcf.sref<128xf16, #pcf.sequential>
+  // CHECK: iree_gpu.promote_operand
+  // CHECK-SAME: !pcf.sref<128xf16, #pcf.test_scope>
+  // CHECK-SAME: -> !pcf.sref<128xf16, #pcf.sequential>
+  return %promoted : !pcf.sref<128xf16, #pcf.sequential>
+}

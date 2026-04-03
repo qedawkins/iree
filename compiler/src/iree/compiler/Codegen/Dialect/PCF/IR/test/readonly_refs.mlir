@@ -195,3 +195,35 @@ util.func private @loop_multi_readonly_multi_dim(
 //  CHECK-SAME:             !pcf.sref<8xf16, #pcf.test_scope>,
 //  CHECK-SAME:             !pcf.sref<4xf32, #pcf.test_scope>)
 //  CHECK-NEXT:         -> (tensor<4xf32>) {
+
+// -----
+
+// Dynamic-shaped tensors: readonly and readwrite operands with unknown dims.
+// Verifies that sref types correctly reflect dynamic shapes.
+util.func private @generic_readonly_dynamic(
+    %input: tensor<?x?xf32>, %output: tensor<?x?xf32>) {
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%in_ref <- %input, %out_ref = %output)[%id: index, %count: index]
+         : (!pcf.sref<?x?xf32, #pcf.test_scope>,
+            !pcf.sref<?x?xf32, #pcf.test_scope>)
+        -> (tensor<?x?xf32>) {
+    util.optimization_barrier %in_ref, %out_ref : !pcf.sref<?x?xf32, #pcf.test_scope>, !pcf.sref<?x?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.optimization_barrier %0 : tensor<?x?xf32>
+  util.return
+}
+
+// CHECK-LABEL: @generic_readonly_dynamic
+//  CHECK-SAME:   %[[INPUT:[A-Za-z0-9]+]]: tensor<?x?xf32>
+//  CHECK-SAME:   %[[OUTPUT:[A-Za-z0-9]+]]: tensor<?x?xf32>
+//       CHECK:   pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute(%[[IN_REF:[A-Za-z0-9_]+]] <- %[[INPUT]],
+//  CHECK-SAME:             %[[OUT_REF:[A-Za-z0-9_]+]] = %[[OUTPUT]])
+//  CHECK-SAME:             [%[[ID:.+]]: index, %[[COUNT:.+]]: index]
+//  CHECK-NEXT:          : (!pcf.sref<?x?xf32, #pcf.test_scope>,
+//  CHECK-SAME:             !pcf.sref<?x?xf32, #pcf.test_scope>)
+//  CHECK-NEXT:         -> (tensor<?x?xf32>) {
+//  CHECK-NEXT:       util.optimization_barrier %[[IN_REF]], %[[OUT_REF]]
+//  CHECK-NEXT:       pcf.return
+//  CHECK-NEXT:     }

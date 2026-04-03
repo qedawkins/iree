@@ -1,5 +1,6 @@
 // RUN: iree-opt %s --pass-pipeline="builtin.module(iree-pcf-test-tile-to-pcf{tile-sizes=4,8})" --split-input-file | FileCheck %s
 // RUN: iree-opt %s --pass-pipeline="builtin.module(iree-pcf-test-tile-to-pcf{tile-sizes=4,8,0})" --split-input-file | FileCheck %s --check-prefix=CHECK3D
+// RUN: iree-opt %s --pass-pipeline="builtin.module(iree-pcf-test-tile-to-pcf{tile-sizes=8})" --split-input-file | FileCheck %s --check-prefix=CHECK1D
 
 // Basic: tile a linalg.fill into a pcf.loop. The scalar input is passed through
 // directly (not an sref arg), while the DPS init becomes a readwrite sref.
@@ -139,3 +140,69 @@ func.func @tile_matmul(%lhs: tensor<16x32xf32>, %rhs: tensor<32x16xf32>,
 //      CHECK3D:      linalg.matmul
 //      CHECK3D:      pcf.write_slice
 //      CHECK3D:      pcf.return
+
+// -----
+
+// Rank-1 tensor: tile a linalg.fill on a 1D tensor. Uses CHECK1D prefix
+// (third RUN line with tile-sizes=8). The scalar input is passed through
+// directly, and the 1D DPS init becomes a readwrite sref.
+func.func @tile_rank1(%dest: tensor<32xf32>) -> tensor<32xf32> {
+  %cst = arith.constant 0.0 : f32
+  %fill = linalg.fill ins(%cst : f32) outs(%dest : tensor<32xf32>) -> tensor<32xf32>
+  return %fill : tensor<32xf32>
+}
+
+// CHECK1D-LABEL: @tile_rank1
+//  CHECK1D-SAME:   %[[DEST:[A-Za-z0-9_]+]]: tensor<32xf32>
+//       CHECK1D:  %[[CST:.+]] = arith.constant 0.000000e+00 : f32
+//       CHECK1D:  %[[LOOP:.+]] = pcf.loop scope(#pcf.sequential)
+//       CHECK1D:    execute(%[[REF:.+]] = %[[DEST]])[%[[ID:[A-Za-z0-9_]+]]: index]
+//       CHECK1D:         : (!pcf.sref<32xf32, sync(#pcf.sequential)>)
+//       CHECK1D:        -> (tensor<32xf32>) {
+//       CHECK1D:      pcf.read_slice %[[REF]]
+//       CHECK1D:      linalg.fill ins(%[[CST]]
+//       CHECK1D:      pcf.write_slice
+//       CHECK1D:      pcf.return
+//       CHECK1D:  return %[[LOOP]]
+
+// -----
+
+// Multiple-result op: tile a linalg.generic with two outputs. Both outputs
+// become readwrite sref args, and the input becomes a readonly sref. Each
+// result gets its own pcf.write_slice.
+#map_mr = affine_map<(d0, d1) -> (d0, d1)>
+func.func @tile_multi_result(%src: tensor<16x32xf32>,
+                              %dest0: tensor<16x32xf32>,
+                              %dest1: tensor<16x32xf32>)
+    -> (tensor<16x32xf32>, tensor<16x32xf32>) {
+  %0:2 = linalg.generic {
+    indexing_maps = [#map_mr, #map_mr, #map_mr],
+    iterator_types = ["parallel", "parallel"]
+  } ins(%src : tensor<16x32xf32>)
+    outs(%dest0, %dest1 : tensor<16x32xf32>, tensor<16x32xf32>) {
+  ^bb0(%in: f32, %out0: f32, %out1: f32):
+    %neg = arith.negf %in : f32
+    %abs = math.absf %in : f32
+    linalg.yield %neg, %abs : f32, f32
+  } -> (tensor<16x32xf32>, tensor<16x32xf32>)
+  return %0#0, %0#1 : tensor<16x32xf32>, tensor<16x32xf32>
+}
+
+// CHECK-LABEL: @tile_multi_result
+//  CHECK-SAME:   %[[SRC:[A-Za-z0-9_]+]]: tensor<16x32xf32>
+//  CHECK-SAME:   %[[DEST0:[A-Za-z0-9_]+]]: tensor<16x32xf32>
+//  CHECK-SAME:   %[[DEST1:[A-Za-z0-9_]+]]: tensor<16x32xf32>
+//       CHECK:  %[[LOOP:.+]]:2 = pcf.loop scope(#pcf.sequential)
+//       CHECK:    execute(%{{.+}} <- %[[SRC]], %{{.+}} = %[[DEST0]], %{{.+}} = %[[DEST1]])
+//       CHECK:         : (!pcf.sref<16x32xf32, #pcf.sequential>,
+//  CHECK-SAME:            !pcf.sref<16x32xf32, sync(#pcf.sequential)>,
+//  CHECK-SAME:            !pcf.sref<16x32xf32, sync(#pcf.sequential)>)
+//       CHECK:        -> (tensor<16x32xf32>, tensor<16x32xf32>) {
+//       CHECK:      pcf.read_slice
+//       CHECK:      pcf.read_slice
+//       CHECK:      pcf.read_slice
+//       CHECK:      linalg.generic
+//       CHECK:      pcf.write_slice
+//       CHECK:      pcf.write_slice
+//       CHECK:      pcf.return
+//       CHECK:  return %[[LOOP]]#0, %[[LOOP]]#1
