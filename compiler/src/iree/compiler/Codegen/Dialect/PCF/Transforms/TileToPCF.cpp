@@ -231,14 +231,20 @@ tileToPCFImpl(RewriterBase &rewriter, PCFTilingOpInterface target,
       }
     }
 
-    // Step 9: Call getDistributedImplementation.
+    // Step 9: Check feasibility, then call getDistributedImplementation.
+    if (failed(target.canDistribute(offsets, sizes, operandInfo, resultInfo))) {
+      // Clean up the loop op on failure.
+      rewriter.eraseOp(loopOp);
+      return rewriter.notifyMatchFailure(
+          target, "canDistribute check failed");
+    }
     FailureOr<TilingResult> tilingResult = target.getDistributedImplementation(
         rewriter, offsets, sizes, operandInfo, resultInfo);
     if (failed(tilingResult)) {
       // Clean up the loop op on failure.
       rewriter.eraseOp(loopOp);
       return rewriter.notifyMatchFailure(
-          target, "failed to get distributed implementation");
+          target, "getDistributedImplementation failed unexpectedly");
     }
 
     // Step 10: Handle returned tiled values. For results where destSref is

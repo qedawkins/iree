@@ -234,6 +234,11 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
           resultInfo.push_back({Value()});
         }
 
+        if (failed(target.canDistribute(tileOffsets, tileSizes, operandInfo,
+                                        resultInfo))) {
+          innerFailed = true;
+          return scf::ValueVector(iterArgs.begin(), iterArgs.end());
+        }
         FailureOr<TilingResult> tiledResult =
             target.getDistributedImplementation(b, tileOffsets, tileSizes,
                                                 operandInfo, resultInfo);
@@ -532,12 +537,17 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             resultInfo.push_back({sgReadwriteRefs[i]});
           }
         }
+        if (failed(target.canDistribute(laneOffsets, laneSizes, operandInfo,
+                                        resultInfo))) {
+          return rewriter.notifyMatchFailure(
+              target, "canDistribute check failed");
+        }
         FailureOr<TilingResult> tiledResult =
             target.getDistributedImplementation(
                 rewriter, laneOffsets, laneSizes, operandInfo, resultInfo);
         if (failed(tiledResult)) {
           return rewriter.notifyMatchFailure(
-              target, "getDistributedImplementation failed");
+              target, "getDistributedImplementation failed unexpectedly");
         }
       }
 
