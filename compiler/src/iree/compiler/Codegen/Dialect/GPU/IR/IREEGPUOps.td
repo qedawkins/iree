@@ -432,7 +432,8 @@ def IREEGPU_PromoteOperandOp : Op<IREEGPU_Dialect, "promote_operand", [
 //===----------------------------------------------------------------------===//
 
 def IREEGPU_DmaCopyOp : Op<IREEGPU_Dialect, "dma_copy", [
-    AttrSizedOperandSegments]> {
+    AttrSizedOperandSegments,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = [{DMA copy between srefs at different scopes.}];
   let description = [{
     Copies data from a source sref to a destination sref using DMA.
@@ -488,6 +489,8 @@ def IREEGPU_DmaCopyOp : Op<IREEGPU_Dialect, "dma_copy", [
     custom<DynamicIndexList>($dest_strides, $static_dest_strides)
     attr-dict `:` type($source) `->` type($dest)
   }];
+
+  let hasVerifier = 1;
 }
 
 #endif // IREE_CODEGEN_DIALECT_IREEGPUOPS

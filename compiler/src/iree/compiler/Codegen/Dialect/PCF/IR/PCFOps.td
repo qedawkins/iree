@@ -1003,6 +1003,7 @@ let opDocGroup = OpGroupReadOps in {
 
 def PCF_ReadSliceOp : PCF_Op<"read_slice", [
        AttrSizedOperandSegments,
+       DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
        OffsetSizeAndStrideOpInterface,
        AllRanksMatch<["source", "result"]>,
        AllElementTypesMatch<["source", "result"]>,
@@ -1364,7 +1365,7 @@ def InitSubscopeOp : PCF_Op<"init_subscope", [
 // TelescopeOp
 //===----------------------------------------------------------------------===//
 
-def TelescopeOp : PCF_Op<"telescope", [Pure]> {
+def TelescopeOp : PCF_Op<"telescope", [NoMemoryEffect]> {
   let summary = [{Convert a threadgroup identity from parent to child scope.}];
   let description = [{
     A pure type conversion op that takes a threadgroup with optional

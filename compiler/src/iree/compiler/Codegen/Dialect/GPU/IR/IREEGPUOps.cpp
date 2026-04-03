@@ -430,4 +430,34 @@ LogicalResult PromoteOperandOp::verify() {
   return success();
 }
 
+//===----------------------------------------------------------------------===//
+// DmaCopyOp
+//===----------------------------------------------------------------------===//
+
+void DmaCopyOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // The source sref is read from.
+  effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable(),
+                       SideEffects::DefaultResource::get());
+  // The dest sref is written to.
+  effects.emplace_back(MemoryEffects::Write::get(), &getDestMutable(),
+                       SideEffects::DefaultResource::get());
+}
+
+LogicalResult DmaCopyOp::verify() {
+  auto sourceType = dyn_cast<PCF::ShapedRefType>(getSource().getType());
+  auto destType = dyn_cast<PCF::ShapedRefType>(getDest().getType());
+  if (!sourceType || !destType) {
+    return emitOpError("source and dest must be pcf.sref types");
+  }
+  if (sourceType.getElementType() != destType.getElementType()) {
+    return emitOpError("source element type ")
+           << sourceType.getElementType()
+           << " does not match dest element type "
+           << destType.getElementType();
+  }
+  return success();
+}
+
 } // namespace mlir::iree_compiler::IREE::GPU

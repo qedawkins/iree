@@ -27,6 +27,25 @@ LogicalResult AllocOp::verify() {
         "dimension operand count does not equal sref dynamic dimension count");
   }
 
+  // AllocOp must be inside an initializer-like region: either the symbol
+  // region of a NamespaceOpInterface op, or the body of an InitSubscopeOp.
+  Region *parentRegion = getOperation()->getParentRegion();
+  if (!parentRegion) {
+    return emitOpError("must be inside a region");
+  }
+  Operation *parentOp = parentRegion->getParentOp();
+  if (isa<InitSubscopeOp>(parentOp)) {
+    // InitSubscopeOp's body is a valid allocation context.
+  } else if (auto nsOp =
+                 dyn_cast_if_present<NamespaceOpInterface>(parentOp)) {
+    if (parentRegion != &nsOp.getSymbolRegion()) {
+      return emitOpError(
+          "must be in the initializer region of the enclosing namespace op");
+    }
+  } else {
+    return emitOpError("must be inside an initializer or init_subscope region");
+  }
+
   return success();
 }
 
@@ -535,18 +554,31 @@ ParseResult GenericOp::parse(OpAsmParser &parser, OperationState &result) {
     return failure();
   }
 
-  // Resolve readonly init operands. Types inferred from sref types.
-  SmallVector<Type> readonlyInitTypes;
+  // Resolve readonly init operands. Shape and element type are inferred from
+  // sref types; the init may be either a tensor or a memref (after
+  // bufferization), so try tensor first and fall back to memref. We use a
+  // ScopedDiagnosticHandler to suppress the error from the tensor attempt.
   ArrayRef<BlockArgument> readonlyArgs =
       body->getArguments().slice(numLeadingArgs, numReadonlyRefs);
   for (int64_t i = 0, e = numReadonlyRefs; i < e; ++i) {
     ShapedRefType srefType = cast<ShapedRefType>(readonlyArgs[i].getType());
-    readonlyInitTypes.push_back(
-        RankedTensorType::get(srefType.getShape(), srefType.getElementType()));
-  }
-  if (parser.resolveOperands(readonlyInits, readonlyInitTypes,
-                             parser.getCurrentLocation(), result.operands)) {
-    return failure();
+    Type tensorType =
+        RankedTensorType::get(srefType.getShape(), srefType.getElementType());
+    {
+      // Suppress the diagnostic if tensor resolution fails.
+      ScopedDiagnosticHandler diagHandler(parser.getContext(),
+                                          [](Diagnostic &) { return success(); });
+      if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
+                                          result.operands))) {
+        continue;
+      }
+    }
+    Type memrefType =
+        MemRefType::get(srefType.getShape(), srefType.getElementType());
+    if (parser.resolveOperand(readonlyInits[i], memrefType,
+                              result.operands)) {
+      return failure();
+    }
   }
 
   // Resolve readwrite init operands.
@@ -889,18 +921,25 @@ ParseResult LoopOp::parse(OpAsmParser &parser, OperationState &result) {
     return failure();
   }
 
-  // Resolve readonly init operands. Types inferred from sref types.
-  SmallVector<Type> readonlyInitTypes;
+  // Resolve readonly init operands. Shape and element type are inferred from
+  // sref types; the init may be either a tensor or a memref (after
+  // bufferization), so try tensor first and fall back to memref.
   ArrayRef<BlockArgument> readonlyArgs =
       body->getArguments().take_front(numReadonlyRefs);
   for (int64_t i = 0, e = numReadonlyRefs; i < e; ++i) {
     ShapedRefType srefType = cast<ShapedRefType>(readonlyArgs[i].getType());
-    readonlyInitTypes.push_back(
-        RankedTensorType::get(srefType.getShape(), srefType.getElementType()));
-  }
-  if (parser.resolveOperands(readonlyInits, readonlyInitTypes,
-                             parser.getCurrentLocation(), result.operands)) {
-    return failure();
+    Type tensorType =
+        RankedTensorType::get(srefType.getShape(), srefType.getElementType());
+    if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
+                                        result.operands))) {
+      continue;
+    }
+    Type memrefType =
+        MemRefType::get(srefType.getShape(), srefType.getElementType());
+    if (parser.resolveOperand(readonlyInits[i], memrefType,
+                              result.operands)) {
+      return failure();
+    }
   }
 
   // Resolve readwrite init operands.
@@ -1367,17 +1406,23 @@ ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
     return failure();
   }
 
-  // Resolve operands. Readonly init types are inferred from the corresponding
-  // sref types (as RankedTensorType). Readwrite init types equal result types.
-  SmallVector<Type> readonlyInitTypes;
+  // Resolve readonly init operands. Shape and element type are inferred from
+  // sref types; the init may be either a tensor or a memref (after
+  // bufferization), so try tensor first and fall back to memref.
   for (int64_t i = 0, e = readonlyRefArgs.size(); i < e; ++i) {
     ShapedRefType srefType = cast<ShapedRefType>(srefTypes[i]);
-    readonlyInitTypes.push_back(
-        RankedTensorType::get(srefType.getShape(), srefType.getElementType()));
-  }
-  if (parser.resolveOperands(readonlyInits, readonlyInitTypes,
-                             parser.getCurrentLocation(), result.operands)) {
-    return failure();
+    Type tensorType =
+        RankedTensorType::get(srefType.getShape(), srefType.getElementType());
+    if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
+                                        result.operands))) {
+      continue;
+    }
+    Type memrefType =
+        MemRefType::get(srefType.getShape(), srefType.getElementType());
+    if (parser.resolveOperand(readonlyInits[i], memrefType,
+                              result.operands)) {
+      return failure();
+    }
   }
   if (parser.resolveOperands(readwriteInits, resultTypes,
                              parser.getCurrentLocation(), result.operands)) {
@@ -2551,6 +2596,16 @@ void ReadSliceOp::build(OpBuilder &b, OperationState &result, Type resultType,
   auto strideValues =
       llvm::map_to_vector(strides, llvm::StaticCastTo<OpFoldResult>);
   build(b, result, resultType, source, offsetValues, sizeValues, strideValues);
+}
+
+void ReadSliceOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Reading from an sref is a memory read.
+  if (!isa<RankedTensorType>(getSource().getType())) {
+    effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable(),
+                         SideEffects::DefaultResource::get());
+  }
 }
 
 //===----------------------------------------------------------------------===//
