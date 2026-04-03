@@ -139,9 +139,11 @@ buildOperandInfo(RewriterBase &rewriter, Location loc, Operation *op,
           ShapedRefType srefType = cast<ShapedRefType>(sref.getType());
           int64_t rank = srefType.getRank();
           SmallVector<Attribute> symbolNames;
+          std::string nsPrefix =
+              "n" + std::to_string(i) + ".";
           for (int64_t d = 0; d < rank; ++d) {
             symbolNames.push_back(rewriter.getStringAttr(
-                "operand_" + std::to_string(i) + "_dim_" + std::to_string(d)));
+                nsPrefix + "d" + std::to_string(d)));
           }
           ShapedRefType promotedType = ShapedRefType::get(
               rewriter.getContext(), srefType.getShape(),
@@ -169,12 +171,14 @@ buildOperandInfo(RewriterBase &rewriter, Location loc, Operation *op,
 using PostTilingCallback =
     function_ref<void(RewriterBase &rewriter, TilingResult &tiledResult)>;
 
-/// Builds a reduction loop (scf.for) over the first reduction dimension,
-/// calling getDistributedImplementation inside the loop body. The
-/// |postTilingCb| callback is invoked on the tiled result before yielding.
+/// Builds a nested reduction loop (one scf.for per reduction dimension),
+/// calling getDistributedImplementation inside the innermost loop body.
+/// The |postTilingCb| callback is invoked on the tiled result before
+/// yielding.
 ///
-/// Populates |loopResults| with the scf.for results. Emits
-/// emitReductionWriteback after the loop if |reductionDims| is non-empty.
+/// Uses scf::buildLoopNest to create a perfect nest over all reduction
+/// dimensions in |reductionDims|. Emits emitResultTileStore after the
+/// outermost loop.
 ///
 /// Returns failure if getDistributedImplementation fails.
 static FailureOr<SmallVector<Value>> buildReductionLoop(
@@ -190,61 +194,74 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
     ArrayRef<BlockArgument> sgReadonlyRefs,
     ArrayRef<BlockArgument> sgReadwriteRefs, ValueRange initValues,
     const MultiLevelTilingParams &params, PostTilingCallback postTilingCb) {
-  int64_t redDim = reductionDims.front();
-  Value lb =
-      getValueOrCreateConstantIndexOp(rewriter, loc, rewriter.getIndexAttr(0));
-  Value ub =
-      getValueOrCreateConstantIndexOp(rewriter, loc, iterDomain[redDim].size);
-  Value step =
-      getValueOrCreateConstantIndexOp(rewriter, loc, redTileSizes[redDim]);
-
-  auto forOp = scf::ForOp::create(rewriter, loc, lb, ub, step, initValues);
-  {
-    OpBuilder::InsertionGuard forGuard(rewriter);
-    rewriter.setInsertionPointToStart(forOp.getBody());
-
-    Value iv = forOp.getInductionVar();
-    ValueRange iterArgs = forOp.getRegionIterArgs();
-
-    // Compute tile offsets including reduction.
-    SmallVector<OpFoldResult> tileOffsets(laneOffsets);
-    SmallVector<OpFoldResult> tileSizes(laneSizes);
-    tileOffsets[redDim] = iv;
-    tileSizes[redDim] = redTileSizes[redDim];
-
-    // Build operand info using shared helper.
-    SmallVector<DistributedOperandInfo> operandInfo = buildOperandInfo(
-        rewriter, loc, op, tileableSet, dpsInitIndices, operandToReadonlyIdx,
-        operandToReadwriteIdx, sgReadonlyRefs, iterArgs, params);
-
-    // Inside the reduction loop, results are returned as tiles (not written
-    // to srefs) since they become iter_args.
-    SmallVector<DistributedResultInfo> resultInfo;
-    for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
-      resultInfo.push_back({Value()});
-    }
-
-    FailureOr<TilingResult> tiledResult = target.getDistributedImplementation(
-        rewriter, tileOffsets, tileSizes, operandInfo, resultInfo);
-    if (failed(tiledResult)) {
-      return rewriter.notifyMatchFailure(target,
-                                         "getDistributedImplementation failed");
-    }
-
-    // Apply post-tiling modifications (e.g., attaching mma_kind attribute).
-    if (postTilingCb) {
-      postTilingCb(rewriter, *tiledResult);
-    }
-
-    scf::YieldOp::create(rewriter, loc, tiledResult->tiledValues);
+  // Build lower bounds, upper bounds, and steps for each reduction dim.
+  SmallVector<Value> lbs, ubs, steps;
+  for (int64_t redDim : reductionDims) {
+    lbs.push_back(getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                  rewriter.getIndexAttr(0)));
+    ubs.push_back(getValueOrCreateConstantIndexOp(rewriter, loc,
+                                                  iterDomain[redDim].size));
+    steps.push_back(
+        getValueOrCreateConstantIndexOp(rewriter, loc, redTileSizes[redDim]));
   }
 
-  SmallVector<Value> loopResults(forOp.getResults().begin(),
-                                 forOp.getResults().end());
+  // Track whether the inner body failed. The buildLoopNest callback
+  // cannot return failure, so we capture it and check afterwards.
+  bool innerFailed = false;
 
-  // Emit writeback after the reduction loop.
-  target.emitReductionWriteback(rewriter, loopResults, sgReadwriteRefs,
-                                laneOffsets, laneSizes, params);
+  scf::LoopNest loopNest = scf::buildLoopNest(
+      rewriter, loc, lbs, ubs, steps, initValues,
+      [&](OpBuilder &b, Location nestLoc, ValueRange ivs,
+          ValueRange iterArgs) -> scf::ValueVector {
+        // Compute tile offsets including all reduction dimensions.
+        SmallVector<OpFoldResult> tileOffsets(laneOffsets);
+        SmallVector<OpFoldResult> tileSizes(laneSizes);
+        for (auto [idx, redDim] : llvm::enumerate(reductionDims)) {
+          tileOffsets[redDim] = ivs[idx];
+          tileSizes[redDim] = redTileSizes[redDim];
+        }
+
+        // Build operand info using shared helper.
+        SmallVector<DistributedOperandInfo> operandInfo = buildOperandInfo(
+            rewriter, nestLoc, op, tileableSet, dpsInitIndices,
+            operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
+            iterArgs, params);
+
+        // Inside the reduction loop, results are returned as tiles (not
+        // written to srefs) since they become iter_args.
+        SmallVector<DistributedResultInfo> resultInfo;
+        for (int64_t i = 0, e = op->getNumResults(); i < e; ++i) {
+          resultInfo.push_back({Value()});
+        }
+
+        FailureOr<TilingResult> tiledResult =
+            target.getDistributedImplementation(b, tileOffsets, tileSizes,
+                                                operandInfo, resultInfo);
+        if (failed(tiledResult)) {
+          innerFailed = true;
+          return scf::ValueVector(iterArgs.begin(), iterArgs.end());
+        }
+
+        // Apply post-tiling modifications (e.g., attaching mma_kind).
+        if (postTilingCb) {
+          postTilingCb(rewriter, *tiledResult);
+        }
+
+        return scf::ValueVector(tiledResult->tiledValues.begin(),
+                                tiledResult->tiledValues.end());
+      });
+
+  if (innerFailed) {
+    return rewriter.notifyMatchFailure(
+        target, "getDistributedImplementation failed");
+  }
+
+  SmallVector<Value> loopResults(loopNest.results.begin(),
+                                 loopNest.results.end());
+
+  // Emit writeback after the reduction loop nest.
+  target.emitResultTileStore(rewriter, loopResults, sgReadwriteRefs,
+                             laneOffsets, laneSizes, params);
 
   return loopResults;
 }
@@ -352,9 +369,10 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
       OpOperand &opOperand = op->getOpOperand(promIdx);
       AffineMap indexingMap = linalgOp.getMatchingIndexingMap(&opOperand);
 
+      std::string initNsPrefix =
+          "n" + std::to_string(promIdx) + ".";
       for (auto [d, expr] : llvm::enumerate(indexingMap.getResults())) {
-        std::string symName =
-            "operand_" + std::to_string(promIdx) + "_dim_" + std::to_string(d);
+        std::string symName = initNsPrefix + "d" + std::to_string(d);
         auto dimExpr = dyn_cast<AffineDimExpr>(expr);
         OpFoldResult tileSize;
         if (dimExpr) {
@@ -432,7 +450,7 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
 
       // Emit reduction init and determine reduction dimensions. Both MMA
       // and regular paths share the same reduction loop structure.
-      SmallVector<Value> initValues = target.emitReductionInit(
+      SmallVector<Value> initValues = target.emitInitTileLoad(
           rewriter, sgReadwriteRefs, laneOffsets, laneSizes, params);
 
       SmallVector<int64_t> reductionDims;
@@ -444,11 +462,6 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
       }
 
       if (!reductionDims.empty()) {
-        if (!params.mmaKind && reductionDims.size() > 1) {
-          return rewriter.notifyMatchFailure(
-              target, "multiple reduction dimensions not yet supported");
-        }
-
         // Post-tiling callback: attach mma_kind attribute for MMA path.
         // The lambda must outlive the function_ref, so declare it in the
         // same scope where buildReductionLoop is called.

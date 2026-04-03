@@ -223,8 +223,8 @@ struct LinalgOpDistributedTilingModel
   }
 
   SmallVector<Type>
-  getReductionIterArgTypes(Operation *op, OpBuilder &b,
-                           const MultiLevelTilingParams &params) const {
+  getIterArgTypes(Operation *op, OpBuilder &b,
+                  const MultiLevelTilingParams &params) const {
     linalg::LinalgOp linalgOp = cast<linalg::LinalgOp>(op);
     SmallVector<Type> types;
     // For each DPS init, compute the tiled type from the lane tile sizes.
@@ -264,10 +264,10 @@ struct LinalgOpDistributedTilingModel
   }
 
   SmallVector<Value>
-  emitReductionInit(Operation *op, OpBuilder &b, ValueRange resultSrefs,
-                    ArrayRef<OpFoldResult> offsets,
-                    ArrayRef<OpFoldResult> sizes,
-                    const MultiLevelTilingParams &params) const {
+  emitInitTileLoad(Operation *op, OpBuilder &b, ValueRange resultSrefs,
+                   ArrayRef<OpFoldResult> offsets,
+                   ArrayRef<OpFoldResult> sizes,
+                   const MultiLevelTilingParams &params) const {
     Location loc = op->getLoc();
     linalg::LinalgOp linalgOp = cast<linalg::LinalgOp>(op);
     SmallVector<Value> inits;
@@ -310,12 +310,12 @@ struct LinalgOpDistributedTilingModel
     return inits;
   }
 
-  void emitReductionWriteback(Operation *op, OpBuilder &b,
-                              ValueRange reductionResults,
-                              ValueRange resultSrefs,
-                              ArrayRef<OpFoldResult> offsets,
-                              ArrayRef<OpFoldResult> sizes,
-                              const MultiLevelTilingParams &params) const {
+  void emitResultTileStore(Operation *op, OpBuilder &b,
+                           ValueRange reductionResults,
+                           ValueRange resultSrefs,
+                           ArrayRef<OpFoldResult> offsets,
+                           ArrayRef<OpFoldResult> sizes,
+                           const MultiLevelTilingParams &params) const {
     Location loc = op->getLoc();
     linalg::LinalgOp linalgOp = cast<linalg::LinalgOp>(op);
     for (auto [i, init] : llvm::enumerate(linalgOp.getDpsInitsMutable())) {

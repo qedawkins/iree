@@ -73,25 +73,25 @@ struct PadOpDistributedTilingModel
     return tiledResult;
   }
 
-  // Reduction methods not applicable to pad ops.
+  // Iter arg / tile load / tile store methods not applicable to pad ops.
   SmallVector<Type>
-  getReductionIterArgTypes(Operation *op, OpBuilder &b,
-                           const MultiLevelTilingParams &params) const {
+  getIterArgTypes(Operation *op, OpBuilder &b,
+                  const MultiLevelTilingParams &params) const {
     return {};
   }
   SmallVector<Value>
-  emitReductionInit(Operation *op, OpBuilder &b, ValueRange resultSrefs,
-                    ArrayRef<OpFoldResult> offsets,
-                    ArrayRef<OpFoldResult> sizes,
-                    const MultiLevelTilingParams &params) const {
+  emitInitTileLoad(Operation *op, OpBuilder &b, ValueRange resultSrefs,
+                   ArrayRef<OpFoldResult> offsets,
+                   ArrayRef<OpFoldResult> sizes,
+                   const MultiLevelTilingParams &params) const {
     return {};
   }
-  void emitReductionWriteback(Operation *op, OpBuilder &b,
-                              ValueRange reductionResults,
-                              ValueRange resultSrefs,
-                              ArrayRef<OpFoldResult> offsets,
-                              ArrayRef<OpFoldResult> sizes,
-                              const MultiLevelTilingParams &params) const {}
+  void emitResultTileStore(Operation *op, OpBuilder &b,
+                           ValueRange reductionResults,
+                           ValueRange resultSrefs,
+                           ArrayRef<OpFoldResult> offsets,
+                           ArrayRef<OpFoldResult> sizes,
+                           const MultiLevelTilingParams &params) const {}
 };
 
 } // namespace
