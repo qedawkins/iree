@@ -98,14 +98,5 @@ func.func @convert_write_slice(%arg0: memref<3x4xi32>, %ref: !pcf.sref<?x?xi32, 
 //       CHECK:   pcf.write_slice %[[ARG0]] into %[[ARG1]][1, 2] [3, 4] [1, 1]
 //  CHECK-SAME:    : memref<3x4xi32> into !pcf.sref<?x?xi32, #pcf.test_scope>
 
-// -----
-
-func.func @convert_alloc(%d0: index) -> !pcf.sref<?x5xi32, sync(#pcf.test_scope)> {
-  %0 = pcf.alloc(%d0) : !pcf.sref<?x5xi32, sync(#pcf.test_scope)>
-  return %0 : !pcf.sref<?x5xi32, sync(#pcf.test_scope)>
-}
-
-// CHECK-LABEL: @convert_alloc
-//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
-//       CHECK:   %[[ALLOC:.+]] = pcf.alloc(%[[D0]]) : !pcf.sref<?x5xi32, #pcf.test_scope>
-//       CHECK:   return %[[ALLOC]] : !pcf.sref<?x5xi32, #pcf.test_scope>
+// NOTE: pcf.alloc with sync tokens is tested in convert_sref_to_memref.mlir
+// within a pcf.generic initializer context.
