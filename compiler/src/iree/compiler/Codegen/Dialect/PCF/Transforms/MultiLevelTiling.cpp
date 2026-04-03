@@ -79,13 +79,8 @@ static void computeTileOffsetsAndSizes(OpBuilder &b, Location loc,
 
 /// Counts the number of non-zero tile sizes.
 static int64_t countTiledDims(ArrayRef<OpFoldResult> tileSizes) {
-  int64_t count = 0;
-  for (OpFoldResult ts : tileSizes) {
-    if (!isZeroTileSize(ts)) {
-      ++count;
-    }
-  }
-  return count;
+  return llvm::count_if(tileSizes,
+                        [](OpFoldResult ts) { return !isZeroTileSize(ts); });
 }
 
 /// Returns the promotion attribute for the given operand index.

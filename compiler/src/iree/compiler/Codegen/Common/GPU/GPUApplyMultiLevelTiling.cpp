@@ -15,6 +15,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -141,8 +142,8 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     FailureOr<IREE::PCF::GenericOp> result =
         IREE::PCF::applyMultiLevelTiling(rewriter, pcfTilingOp, params);
     if (failed(result)) {
-      LLVM_DEBUG(llvm::dbgs() << "multi-level tiling failed for op at "
-                              << op->getLoc() << "; leaving op untiled\n");
+      LDBG() << "multi-level tiling failed for op at " << op->getLoc()
+             << "; leaving op untiled";
     }
   }
 }
