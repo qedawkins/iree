@@ -343,3 +343,89 @@ func.func @no_fuse_no_reads(%dest: tensor<8x16xf32>) -> tensor<8x16xf32> {
 //       CHECK:  %[[GENERIC:.+]] = pcf.generic
 //  CHECK-NEXT:    execute(%{{.+}} = %[[FILL]])
 //       CHECK:  return %[[GENERIC]]
+
+// -----
+
+// Negative: producer feeds a readonly (`<-`) operand. The pass only fuses
+// producers into readwrite (`=`) operands with sync(scope) semantics, so the
+// producer must remain unfused.
+func.func @no_fuse_readonly_operand(%src: tensor<8x16xf32>,
+                                     %dest: tensor<8x16xf32>) -> tensor<8x16xf32> {
+  %neg = linalg.negf ins(%src : tensor<8x16xf32>) outs(%dest : tensor<8x16xf32>) -> tensor<8x16xf32>
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%ref <- %neg, %out_ref = %dest)[%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<8x16xf32, #pcf.test_scope>,
+            !pcf.sref<8x16xf32, sync(#pcf.test_scope)>)
+        -> (tensor<8x16xf32>) {
+    %slice = pcf.read_slice %ref[%id0, %id1] [4, 8] [1, 1]
+        : !pcf.sref<8x16xf32, #pcf.test_scope> to tensor<4x8xf32>
+    %out_slice = pcf.read_slice %out_ref[%id0, %id1] [4, 8] [1, 1]
+        : !pcf.sref<8x16xf32, sync(#pcf.test_scope)> to tensor<4x8xf32>
+    %result = linalg.add ins(%slice, %out_slice : tensor<4x8xf32>, tensor<4x8xf32>)
+                          outs(%out_slice : tensor<4x8xf32>) -> tensor<4x8xf32>
+    pcf.write_slice %result into %out_ref[%id0, %id1] [4, 8] [1, 1]
+        : tensor<4x8xf32> into !pcf.sref<8x16xf32, sync(#pcf.test_scope)>
+    pcf.return
+  }
+  return %0 : tensor<8x16xf32>
+}
+
+// CHECK-LABEL: @no_fuse_readonly_operand
+//       CHECK:  %[[NEG:.+]] = linalg.negf
+//       CHECK:  %[[GENERIC:.+]] = pcf.generic
+//  CHECK-NEXT:    execute(%{{.+}} <- %[[NEG]], %{{.+}} = %{{.+}})
+//       CHECK:    pcf.read_slice
+//       CHECK:  return %[[GENERIC]]
+
+// -----
+
+// Producer chain: fill -> generic -> pcf.generic. The immediate producer
+// (generic) is fused, but the fill stays outside because it is consumed as
+// the init of the fused generic (via tensor.extract_slice).
+#map_chain = affine_map<(d0, d1) -> (d0, d1)>
+func.func @fuse_producer_chain(%src: tensor<8x16xf32>,
+                                %dest: tensor<8x16xf32>) -> tensor<8x16xf32> {
+  %cst = arith.constant 0.0 : f32
+  %fill = linalg.fill ins(%cst : f32) outs(%dest : tensor<8x16xf32>) -> tensor<8x16xf32>
+  %neg = linalg.generic {
+    indexing_maps = [#map_chain, #map_chain],
+    iterator_types = ["parallel", "parallel"]
+  } ins(%src : tensor<8x16xf32>) outs(%fill : tensor<8x16xf32>) {
+  ^bb0(%in: f32, %out: f32):
+    %0 = arith.negf %in : f32
+    linalg.yield %0 : f32
+  } -> tensor<8x16xf32>
+  %1 = pcf.generic scope(#pcf.test_scope)
+    execute(%ref = %neg)[%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<8x16xf32, sync(#pcf.test_scope)>)
+        -> (tensor<8x16xf32>) {
+    %slice = pcf.read_slice %ref[%id0, %id1] [4, 8] [1, 1]
+        : !pcf.sref<8x16xf32, sync(#pcf.test_scope)> to tensor<4x8xf32>
+    %result = linalg.exp ins(%slice : tensor<4x8xf32>)
+                          outs(%slice : tensor<4x8xf32>) -> tensor<4x8xf32>
+    pcf.write_slice %result into %ref[%id0, %id1] [4, 8] [1, 1]
+        : tensor<4x8xf32> into !pcf.sref<8x16xf32, sync(#pcf.test_scope)>
+    pcf.return
+  }
+  return %1 : tensor<8x16xf32>
+}
+
+// The immediate producer (negf generic) is fused into the body. The fill
+// remains outside as the init value, since after one round of fusion the
+// fill's result is referenced by both the pcf.generic init operand and the
+// tensor.extract_slice inside the body.
+// CHECK-LABEL: @fuse_producer_chain
+//  CHECK-SAME:   %[[SRC:[A-Za-z0-9_]+]]: tensor<8x16xf32>
+//  CHECK-SAME:   %[[DEST:[A-Za-z0-9_]+]]: tensor<8x16xf32>
+//       CHECK:  %[[CST:.+]] = arith.constant 0.000000e+00 : f32
+//       CHECK:  %[[FILL:.+]] = linalg.fill ins(%[[CST]]{{.*}} outs(%[[DEST]]
+//   CHECK-NOT:  linalg.generic {{.*}} arith.negf
+//       CHECK:  pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:    execute(%[[REF:.+]] = %[[FILL]])[%[[ID0:[A-Za-z0-9_]+]]: index, %[[ID1:[A-Za-z0-9_]+]]: index
+//       CHECK:    tensor.extract_slice %[[SRC]][%[[ID0]], %[[ID1]]] [4, 8] [1, 1]
+//       CHECK:    tensor.extract_slice %[[FILL]][%[[ID0]], %[[ID1]]] [4, 8] [1, 1]
+//       CHECK:    linalg.generic
+//       CHECK:      arith.negf
+//       CHECK:    linalg.exp
+//       CHECK:    pcf.write_slice
+//       CHECK:    pcf.return
