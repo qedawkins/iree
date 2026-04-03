@@ -29,6 +29,12 @@ The no-sync semantics on readonly are safe **only if** the source tensor is immu
 
 **Decision needed**: Is the contract that readonly srefs always alias immutable data (guaranteed by the value-semantic tensor origin), and that bufferization must preserve this property (e.g., via aliasing analysis ensuring no concurrent write)? If so, this invariant needs to be documented. If not, readonly srefs need at least a read-fence on scope exit.
 
+**ANSWER**:
+
+Readonly is a contract with the body of the pcf.generic stating that we will never write to that memory. For bufferization, this just means setting read effects on the readonly inputs and readwrite side effects on the tied outs.
+
+You are correct though, technically there does need to be a read fence on scope exit. Right now there is no suitable way to do this and we don't worry about read fencing anywhere else (typically reads are fenced if they need to wherever their results are used so we in practice never really have to). So in short, no need for the read fence nor anything special from bufferization.
+
 ### Q2: SyncOnReturn semantics are described but underspecified for nested scopes
 
 **Observed**: `SyncOnReturnAttr` description says "fenced when the parent of the same scope returns. This is akin to memory order acquire on scope entry and __syncthreads followed by a memory order release fence on scope exit" (`PCFBase.td:346-354`). The `enqueueWrite` method is a no-op. The `getConcreteTypes` returns `TypeRange()`, meaning expansion drops the sync scope entirely.
@@ -50,6 +56,10 @@ The SyncOnReturn is tied to "the parent of the **same** scope." But the inner ge
 
 **Decision needed**: Clarify the interaction between SyncOnReturn at different scope levels. Specifically: when an inner-scope pcf.generic returns, does its SyncOnReturn guarantee visibility to the enclosing outer-scope body? Or must explicit sync be added between nesting levels?
 
+**ANSWER**:
+
+The lowering is responsible for inserting the barriers. There is nothing underspecified about nested scopes. In your example if %rw_inner has SyncOnReturn then when the lane generic returns all lanes in the subgroup have access to the value. %rw_outer and %rw_inner have absolutely nothing to do with one another in your example so I don't understand why you're talking about them both. Also %rw_inner is a block argument to the inner generic so the outer generic can't actually access it directly. You are missing the value that the nested pcf.generic returns that represents the collective value written to %rw_inner. TLDR; your question is ill formed.
+
 ### Q3: pcf.generic is not IsolatedFromAbove -- implicit capture of srefs across scope boundaries
 
 **Observed**: `pcf.generic` does **not** have the `IsolatedFromAbove` trait. The code explicitly relies on this: inner generics "capture outer srefs directly" (`MultiLevelTiling.cpp:411`). The `DistributeAndLower.cpp:611` comment confirms this is intentional.
@@ -63,6 +73,16 @@ The SyncOnReturn is tied to "the parent of the **same** scope." But the inner ge
 3. How does the sref-to-memref conversion track the lifetime of an sref that is defined in an outer scope but used in an inner scope?
 
 **Decision needed**: Should there be verifier constraints on cross-scope sref capture? Should captured srefs be required to appear as explicit operands (perhaps with a "capture" keyword) to make the data flow visible for analysis passes?
+
+**ANSWER**:
+
+Obviously it's valid for inner generics to access the srefs from outer ones???? An sref is just memory. There absolutely 1000% should not be any restrictions of cross-scope stuff.
+
+So for 1 just completely forget you ever thought this. There is absolutely 0 verification of captures and never will be.
+
+For 2 if I'm understanding your question, bufferization might be missing handling of readonly inputs. This is a big problem if so. Otherwise bufferization doesn't need to know anything special about captured values.
+
+For 3 there is never lifetime tracking. Bad question.
 
 ---
 
@@ -82,6 +102,10 @@ The SyncOnReturn is tied to "the parent of the **same** scope." But the inner ge
 
 **Decision needed**: What is the intended use case for `pcf.loop` vs `pcf.generic`? Is `pcf.loop` for cases where the iteration count differs from the hardware parallelism (oversubscription / undersubscription)? If so, should `pcf.generic` be thought of as syntactic sugar for `pcf.loop count(scope.nproc)`? Clarify the design intent.
 
+**ANSWER**:
+
+Totally backwards. pcf.loop is the syntactic sugar for pcf.generic(scf.forall <spillover iterations>). The fundamental ops are `pcf.generic` and `pcf.shared_executor`.
+
 ### Q5: shared_executor has a threadgroup type but generic/loop do not
 
 **Observed**: `pcf.shared_executor` introduces `!pcf.threadgroup<#scope>` as a block argument, giving the body a handle to the collective worker group. `pcf.generic` and `pcf.loop` do not have threadgroup arguments; they expose raw index IDs instead.
@@ -93,6 +117,10 @@ Questions:
 2. If pcf.shared_executor is the "real" target for GPU codegen, why does MultiLevelTiling generate pcf.generic instead?
 
 **Decision needed**: Clarify the relationship between the two abstraction levels. Is pcf.generic an intermediate IR that gets lowered to pcf.shared_executor? Or do they coexist for different use cases?
+
+**ANSWER**:
+
+Wrong ordering. pcf.shared_executor converts to pcf.generic. MultiLevelTiling is a shortcut that skips shared_executor. This is a result of the way that TileAndFuse works with the way it uses tiling (and thus local transforms) as a way to distribute.
 
 ---
 
@@ -109,6 +137,18 @@ Questions:
 
 **Decision needed**: Specify the symbol resolution algorithm formally. In particular: shadowing rules, error behavior for unresolved symbols, and whether resolution is purely syntactic (name matching) or has scope/type constraints.
 
+**ANSWER**:
+
+1 is a great question. If this is not properly documented let's make sure to do so. Symbol resolution happens via first match from inner namespace to outer. So if two namespaces define the same symbol then it will match with the inner namespace.
+The way that symbols can further specify which definition they are using is by adding namespace qualifiers the same way we do in C++. So if the inner namespace's name is "foo" and the outer is "bar", we can reference the overloaded symbol of
+specifically the outer namespace with "bar::<sym_name>".
+
+2 yes, no reason why not.
+
+3 I hope they aren't string attributes. We need a formal symbol attribute type complete with definition lookup infrastructure separate from any specific op implementations. Resolution failure is a compiler failure. That means the IR was ill formed.
+They are resolved using the standard algorithm for finding namespace symbol definitions. The scope/type constraints can be imposed by the PromoteOperandOp which requires that its symbol definitions come from a parent with a scope matching the
+input sref.
+
 ### Q7: Symbol names in MultiLevelTiling are generated mechanically with no collision avoidance
 
 **Observed**: `MultiLevelTiling.cpp:144-146` generates symbol names like `"operand_" + std::to_string(i) + "_dim_" + std::to_string(d)`. The same naming scheme is used in `PromoteOperandOp` creation (`MultiLevelTiling.cpp:147`).
@@ -116,6 +156,10 @@ Questions:
 **Issue**: If multiple tiling levels or multiple promote ops use the same naming scheme, there could be collisions. The code does not check for uniqueness. Also, the names are human-readable but brittle -- they encode operand indices that may change after fusion or other transforms.
 
 **Decision needed**: Should symbol names be gensym'd (guaranteed unique) or is the current scheme intentionally stable for debugging? If stable, what happens when operand indices change after fusion?
+
+**ANSWER**:
+
+Yes, on creation we should be taking steps to avoid collisions. Instead of `operand_i_dim_d` just do `d0`, `d1`, ..., `dn` incrementing dims. The easiest way to avoid collisions is to fully qualify the parent namespace scope and then add new symbols to the parent uniqued. Then when creating a new child scope ensure that you pick a different namespace name (for that we can just use incrementing `n0`, `n1`, ..., `nn`).
 
 ---
 
@@ -134,7 +178,12 @@ This matters because `MultiLevelTiling.cpp:230-235` calls `getDistributedImpleme
 
 **Decision needed**: Is the current design acceptable given that MLIR rewriters handle rollback? Or should getDistributedImplementation be split into a query phase (returns a plan) and an apply phase?
 
-### Q9: getReductionIterArgTypes / emitReductionInit / emitReductionWriteback are tightly coupled to MultiLevelTiling
+**ANSWER**:
+
+Uh oh, that is a very good catch. Mutating IR then returning failure is an extremely egregious implementation mistake. MLIR rewriters do NOT handle rollback. That is only in a legacy implementation of dialect conversion. So yes, we need to
+split into a match + rewrite.
+
+### Q9: getIterArgTypes / emitInitTileLoad / emitResultTileStore are tightly coupled to MultiLevelTiling
 
 **Observed**: These three interface methods (`PCFInterfaces.td:363-412`) exist specifically to support the reduction loop pattern in `MultiLevelTiling.cpp`. They take `MultiLevelTilingParams` as arguments.
 
@@ -143,9 +192,14 @@ This matters because `MultiLevelTiling.cpp:230-235` calls `getDistributedImpleme
 2. Alternative tiling strategies (e.g., wavefront tiling, software pipelining)
 3. Ops that have non-standard reduction patterns (e.g., prefix sum)
 
-The interface is supposed to be generic ("Interface for distributing ops into PCF parallel constructs"), but the reduction methods leak the multi-level tiling strategy into the interface.
+The interface is supposed to be generic ("Interface for distributing ops into PCF parallel constructs"), but the methods leak the multi-level tiling strategy into the interface.
 
-**Decision needed**: Should the reduction methods be moved out of PCFTilingOpInterface into a separate `MultiLevelTilingInterface`? Or is the current design acceptable because multi-level tiling is the only intended consumer?
+**Decision needed**: Should the methods be moved out of PCFTilingOpInterface into a separate `MultiLevelTilingInterface`? Or is the current design acceptable because multi-level tiling is the only intended consumer?
+
+**ANSWER**:
+
+This is a good question and you're example alternative paths is a good list. This might mostly be a naming thing, instead of saying `emitReductionWriteback` we can remove the notion of reductions from the names and just call them `emitInitTileLoad` and `emitResultTileStore`. Note that these methods could do a lot more than just write data back, they can do post-loop cleanup too if they want. For non-standard reduction patterns, implementations are always free to not have a loop carried
+variable and do the reduction in-place (so `getIterArgTypes` would return empty). And for 1 and 2 the interface still functions perfectly fine for those.
 
 ### Q10: DistributedOperandInfo.isTile semantics when value is an sref
 
@@ -159,6 +213,10 @@ The interface is supposed to be generic ("Interface for distributing ops into PC
 - `isTile=true, value=sref` means... what? Never happens currently?
 
 **Decision needed**: Should `DistributedOperandInfo` use an enum instead of a bool to disambiguate these cases? E.g., `{FullValue, TensorTile, SrefToSlice, SrefDirect}`.
+
+**ANSWER**:
+
+`isTile=true` and `value=sref` shouldn't happen at the moment. We can assume this never happens (with an assert if implementers want) for the time being.
 
 ---
 
@@ -174,6 +232,12 @@ The interface is supposed to be generic ("Interface for distributing ops into PC
 3. How does the lowering pipeline know to invoke `emitDistributedCopy`? Is there a separate pass?
 
 **Decision needed**: Document the complete lifecycle of `PromoteOperandOp`: when is it created, when is it lowered (who calls `emitDistributedCopy`), and what IR does it produce. Is there a separate "LowerPromotion" pass, or is it folded into DistributeAndLower?
+
+**ANSWER**:
+
+We should not be documenting lifecycle in terms of specific patterns and passes on the ops. That is lazy documentation. The semantics of an operation should stand on its own without any reference to code.
+
+To answer your question, yes, there is a pass for lowering promotions (or at least there should be. Maybe the agent responsible for that task took a massive shortcut).
 
 ### Q12: PromotionAttr interface only has promoteOperand and emitDistributedCopy -- missing analysis methods
 
@@ -191,6 +255,12 @@ This means the MultiLevelTiling pass cannot reason about whether promotion will 
 
 **Decision needed**: Should `PromotionAttr` have analysis methods (`getAllocationSize`, `getTargetMemorySpace`, `isLegalForShape`)? Or is the intent that these checks happen before `MultiLevelTilingParams` is constructed?
 
+**ANSWER**:
+
+Yeah none of that is the responsibility of the promotion attr. If you tile with a tile size that doesn't fit within the resource constraints you're going to get a failure.
+
+`getTargetMemorySpace` maybe but not needed yet.
+
 ---
 
 ## 6. Type System and Memory Model
@@ -206,6 +276,10 @@ This means the MultiLevelTiling pass cannot reason about whether promotion will 
 
 **Decision needed**: Should scope compatibility be verified structurally (verifier checks that all sref ops inside a scope match that scope) or is it left to the analysis passes (ConvertSRefToMemRef)?
 
+**ANSWER**:
+
+Nope. In a few of these questions you seem to have the idea that ops can verify things about their contents. That's wrong. `read_slice` and `write_slice` are completely allowed to to access coarser or finer grain scopes. Verification of only the parent would be totally wrong. At most we could have a verifier on the alloc that the parent is the initializer (probably should add that actually) and has the same scope.
+
 ### Q14: ClusterType bounds use AffineMap but scope sizes are runtime values
 
 **Observed**: `!pcf.cluster` bounds use `AffineExpr` with `s0, s1, ...` as "scope size symbols, implicit from the scope's getWorkerCounts" (`PCFBase.td:230-231`). The `d0, d1, ...` are "dependent variables" that add SSA index operand requirements.
@@ -215,6 +289,12 @@ This means the MultiLevelTiling pass cannot reason about whether promotion will 
 2. What happens if `s0` changes between two uses of the same cluster type? (It shouldn't, but the type system doesn't enforce this.)
 
 **Decision needed**: Are scope size symbols always statically known at compile time (constant-folded)? If so, should they be encoded as integer parameters instead of symbolic affine expressions? If they can be dynamic, how does static analysis handle them?
+
+**ANSWER**:
+
+Not sure I follow what you mean by "how does static analysis handle them" but this sounds like you are imposing the logic of tiling onto clusters when they are separate concepts. The fact that tile sizes are static everywhere is a bug, there is
+no reason they can't be dynamic and depend on the value of `s0`. Also `s0`'s value is enforced by the type system. The type carries the scope and the scope defines the value of `s0` so it is fully defined by the type itself. If there is an
+implementation detail differing from what I'm saying that probably needs updating.
 
 ### Q15: pcf.get_memref breaks the sref abstraction
 
@@ -226,6 +306,10 @@ This means the MultiLevelTiling pass cannot reason about whether promotion will 
 3. The returned memref has "maximally dynamic layout (all strides and offset dynamic) and no memory space." This means every subsequent memref operation must handle dynamic strides. Is this intentional for generality, or should the memref carry the layout determined by the sref's scope?
 
 **Decision needed**: Is `pcf.get_memref` intended as a lowering-only op (used by ConvertSRefToMemRef) or as a user-facing escape hatch? If lowering-only, should it be restricted to appear only in the ConvertSRefToMemRef pass?
+
+**ANSWER**:
+
+It shows up during bufferization too if read_slice doesn't vectorize. No need to restrict it to one pass.
 
 ---
 
@@ -245,6 +329,12 @@ if (!params.mmaKind && reductionDims.size() > 1) {
 
 **Decision needed**: Is multi-reduction-dimension support planned? If so, what is the tiling strategy -- nested `scf.for` loops? Or is this deliberately excluded because multi-reduction ops should be decomposed first?
 
+**ANSWER**:
+
+Oh, the implementer only supporting a single reduction dim is taking a massive shortcut. We absolutely need multi-dim support. There are helpers for creating scf.for loop nests, you should use that.
+
+To test it we can test tiling of conv. We should include an mma test for conv where we tile the filter dims down to unit dims.
+
 ### Q17: Inner pcf.generic is created with 1 iterator even when numLaneIterators is 0
 
 **Observed**: `MultiLevelTiling.cpp:416-418`:
@@ -261,6 +351,15 @@ When there are no lane-tiled dimensions, it still creates a generic with 1 itera
 
 **Decision needed**: Is this intentional (every lane does the same work, which is correct for SIMD semantics)? Or should the inner generic be omitted entirely when `numLaneIterators == 0`? If intentional, this needs a comment explaining why redundant execution is acceptable.
 
+**ANSWER**:
+
+Few things going on here. So first if there is subgroup tiling specified and no mechanism for lane tiling specified (either lane tile sizes or an mma_kind) we should just fail. That's an ill formed lowering config.
+
+Second if we do for some reason need to create the lane scoped generic but it's doing redundant work, what this line looks like it's doing is wrong. We must mask off (via scf.if) the lanes not active rather than repeating work. Repeating work like
+this indicates whoever implemented this code can't be trusted to have actually understood parallel executions semantics properly, well done asking the question.
+
+Most likely what's missing is an `scf.forall` inside the pcf.generic + pcf.lane nest that handles spillover and masking automatically by mapping the native parallelism to the tile count. This should be generated in all cases.
+
 ### Q18: MMA path attaches mma_kind as a raw string attribute, not a verified type
 
 **Observed**: `MultiLevelTiling.cpp:462-463`:
@@ -276,6 +375,12 @@ The `mmaKind` attribute is set directly on the tiled op using `setAttr`.
 3. The attribute survives canonicalization or other transforms that clone the op.
 
 **Decision needed**: Should `mma_kind` be a defined attribute on the tiled op (e.g., via an interface), rather than a duck-typed attribute? Or is this a temporary mechanism that gets consumed immediately by the next pass?
+
+**ANSWER**:
+
+Oh, looks like the agent implementing this took a shortcut. Not ok. Handling of `mma_kind` is NOT tiling. Let me repeat. It is NOT tiling. It is a completely different class of conversion, but it still MUST happen in one shot. Setting discardable attributes to do it in a separate step is wrong. Instead there should be separate handling for inner_tiled attribute descriptors. It has to compose between the type derived from the subgroup level though. No hard coding.
+
+Also the fact that this file is in PCF/Transforms is insanely wrong. This logic is all GPU specific. Should be in Common/GPU like I originally said. No idea how it ever ended up where it is.
 
 ---
 
@@ -300,6 +405,12 @@ This means there's a semantic gap: the operand is a memref, the block argument i
 
 **Decision needed**: Is the interaction between bufferization and ConvertSRefToMemRef fully specified? In particular: does bufferization update the block argument types, or does it leave them as srefs? If it leaves them, how does ConvertSRefToMemRef know the backing memref for each sref?
 
+**ANSWER**:
+
+Bufferization is only concerned with tensors. I don't understand how you are confused about this if the operand is a memref and the block arg is an sref. Those two are obviously tied together so ConvertSRefToMemRef can easily tie them together?
+
+You seem fixated on bufferization doing everything. It just handles tensor -> memref. Plain and simple, nothing super fancy going on there.
+
 ### Q20: pcf.write_slice has MemoryEffectsOpInterface but pcf.read_slice does not
 
 **Observed**: `pcf.write_slice` declares `DeclareOpInterfaceMethods<MemoryEffectsOpInterface>` (`PCFOps.td:914`). `pcf.read_slice` does **not** declare any memory effects interface (`PCFOps.td:1004`).
@@ -310,6 +421,10 @@ This means there's a semantic gap: the operand is a memref, the block argument i
 3. Delete a "dead" read that actually has ordering significance.
 
 **Decision needed**: Should `pcf.read_slice` declare memory read effects? If reads from srefs are intentionally pure (because srefs at the tensor level are value-semantic), this needs to be documented. If not, add the interface.
+
+**ANSWER**:
+
+Yes, it should declare memory read effects, good catch!
 
 ---
 
@@ -326,6 +441,10 @@ This means there's a semantic gap: the operand is a memref, the block argument i
 
 **Decision needed**: Can a cluster ever have both private and shared elements simultaneously? If yes, what op creates it? If no, should the type system enforce this (separate types for private-only and shared-only clusters)?
 
+**ANSWER**:
+
+They cannot have both. I specified in an earlier discussion that they should be mutually exclusive so we can reduce it to a single `structTypes` and a flag for if they have private or shared semantics.
+
 ### Q22: TileGroupOp requires source to have no struct elements
 
 **Observed**: `pcf.shared_executor.tile_group` description states: "The source must not have struct elements (destructuring with struct is currently illegal)" (`PCFOps.td:585-586`).
@@ -335,6 +454,10 @@ This means there's a semantic gap: the operand is a memref, the block argument i
 This seems like a chicken-and-egg problem: you need struct elements on clusters, but you can only add struct elements to threadgroups, and you can only tile threadgroups without struct elements.
 
 **Decision needed**: How does shared state get attached to individual clusters? Is there an equivalent of `init_subscope` for clusters, or is the intended pattern different?
+
+**ANSWER**:
+
+You got the wrong idea about `init_subscope`. That has a different purpose than this. To get a struct element on a cluster you just do `run_thread` or `run_cluster` on the cluster and return the new struct elements. Then the `run_cluster` and `run_thread` ops return new cluster types.
 
 ### Q23: TelescopeOp is "pure type conversion" but has semantic implications
 
@@ -348,6 +471,10 @@ The `Pure` trait is correct only if the threadId is guaranteed to be the same SS
 
 **Decision needed**: Should `pcf.telescope` be `Pure`? It seems like it should have a weaker purity guarantee (e.g., `NoMemoryEffect` but not `Speculatable`), or the UB clause should be removed and replaced with a verifier check.
 
+**ANSWER**:
+
+Yes, removing speculatable is correct, can go ahead and do that.
+
 ---
 
 ## 10. Integration and Coexistence
@@ -360,6 +487,10 @@ The `Pure` trait is correct only if the threadId is guaranteed to be the same SS
 
 **Decision needed**: Is mixed PCF/forall in the same dispatch supported? If not, what enforces homogeneity?
 
+**ANSWER**:
+
+The choice of lowering to use is determined by the pipeline. If the input includes an scf.forall then we can just handle it like normal, nothing crazy.
+
 ### Q25: DmaCopyOp has no verifier and no memory effects
 
 **Observed**: `iree_gpu.dma_copy` (`IREEGPUOps.td:434-491`) has no `hasVerifier = 1` and does not declare `MemoryEffectsOpInterface`. It copies between srefs.
@@ -371,6 +502,10 @@ The `Pure` trait is correct only if the threadId is guaranteed to be the same SS
 Also, without a verifier, there's no check that source and dest have compatible element types, or that the offsets/sizes/strides are within bounds.
 
 **Decision needed**: Should `dma_copy` have a verifier and memory effects? At minimum, it should declare write effects on the destination sref.
+
+**ANSWER**:
+
+Yes, definitely needs read and write memory effects.
 
 ---
 

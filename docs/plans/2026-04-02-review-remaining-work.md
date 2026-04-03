@@ -64,7 +64,7 @@
 - Assessed as correct for standard cases
 - **Action**: None needed
 
-### Finding 13 (Minor): getReductionIterArgTypes uses tiledShape.size() as index
+### Finding 13 (Minor): getIterArgTypes uses tiledShape.size() as index
 - Correct but confusing; should use enumeration index
 - **Action**: Change to llvm::enumerate
 

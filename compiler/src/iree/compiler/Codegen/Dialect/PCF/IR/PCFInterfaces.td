@@ -362,12 +362,11 @@ def PCF_TilingOpInterface : OpInterface<"PCFTilingOpInterface",
     >,
     InterfaceMethod<
       /*desc=*/[{
-        Returns the types of loop-carried values for reduction tiling.
-        The returned types are used as iter_arg types for the scf.for
-        reduction loop.
+        Returns the types of loop-carried values for the tiling loop.
+        The returned types are used as iter_arg types for the scf.for loop.
       }],
       /*retTy=*/"SmallVector<Type>",
-      /*methodName=*/"getReductionIterArgTypes",
+      /*methodName=*/"getIterArgTypes",
       /*args=*/(ins
         "OpBuilder &":$b,
         "const ::mlir::iree_compiler::IREE::PCF::MultiLevelTilingParams &":$params),
@@ -376,13 +375,13 @@ def PCF_TilingOpInterface : OpInterface<"PCFTilingOpInterface",
     >,
     InterfaceMethod<
       /*desc=*/[{
-        Emits the init load for reduction at the current insertion point.
+        Emits the initial tile load at the current insertion point.
         Returns initial values for scf.for iter_args.
         `resultSrefs` are the readwrite sref block args corresponding to
         the op's results.
       }],
       /*retTy=*/"SmallVector<Value>",
-      /*methodName=*/"emitReductionInit",
+      /*methodName=*/"emitInitTileLoad",
       /*args=*/(ins
         "OpBuilder &":$b,
         "ValueRange":$resultSrefs,
@@ -394,12 +393,12 @@ def PCF_TilingOpInterface : OpInterface<"PCFTilingOpInterface",
     >,
     InterfaceMethod<
       /*desc=*/[{
-        Emits the writeback of reduction results at the current insertion
-        point. `reductionResults` are the final values from the scf.for
-        loop. `resultSrefs` are the readwrite sref block args.
+        Emits the result tile store at the current insertion point.
+        `reductionResults` are the final values from the scf.for loop.
+        `resultSrefs` are the readwrite sref block args.
       }],
       /*retTy=*/"void",
-      /*methodName=*/"emitReductionWriteback",
+      /*methodName=*/"emitResultTileStore",
       /*args=*/(ins
         "OpBuilder &":$b,
         "ValueRange":$reductionResults,

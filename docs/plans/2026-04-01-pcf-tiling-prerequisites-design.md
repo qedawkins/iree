@@ -132,9 +132,9 @@ The **transform** controls:
 - Providing insertion points for init load and writeback.
 
 The **interface** controls:
-- Loop-carried value types (`getReductionIterArgTypes`).
-- Init load emission (`emitReductionInit`).
-- Writeback emission (`emitReductionWriteback`).
+- Loop-carried value types (`getIterArgTypes`).
+- Init load emission (`emitInitTileLoad`).
+- Result tile store emission (`emitResultTileStore`).
 - Tiled implementation (`getDistributedImplementation`).
 - Promoted operand shapes.
 
@@ -142,17 +142,17 @@ The **interface** controls:
 
 ```cpp
 // Returns the types of loop-carried values.
-SmallVector<Type> getReductionIterArgTypes(
+SmallVector<Type> getIterArgTypes(
     OpBuilder &b, const DistributedTilingParams &params);
 
-// Emits the init load. Returns initial values for scf.for iter_args.
-SmallVector<Value> emitReductionInit(
+// Emits the initial tile load. Returns initial values for scf.for iter_args.
+SmallVector<Value> emitInitTileLoad(
     OpBuilder &b, ArrayRef<DistributedOperandInfo> operandInfo,
     ArrayRef<DistributedResultInfo> resultInfo,
     const DistributedTilingParams &params);
 
-// Emits the writeback of reduction results.
-void emitReductionWriteback(
+// Emits the result tile store.
+void emitResultTileStore(
     OpBuilder &b, ValueRange reductionResults,
     ArrayRef<DistributedResultInfo> resultInfo,
     const DistributedTilingParams &params);
