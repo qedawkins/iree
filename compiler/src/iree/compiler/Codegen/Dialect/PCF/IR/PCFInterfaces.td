@@ -331,7 +331,37 @@ def PCF_TilingOpInterface : OpInterface<"PCFTilingOpInterface",
     >,
     InterfaceMethod<
       /*desc=*/[{
+        Checks whether this op can be distributed with the given tile
+        parameters. This is the "match" phase that performs validation
+        without creating any IR.
+
+        Returns success if distribution is feasible, failure otherwise.
+        Callers MUST call this before `getDistributedImplementation` to
+        avoid creating IR on a failure path.
+
+        The default implementation returns success, which is appropriate
+        for ops that can always be distributed.
+      }],
+      /*retTy=*/"LogicalResult",
+      /*methodName=*/"canDistribute",
+      /*args=*/(ins
+        "ArrayRef<OpFoldResult>":$offsets,
+        "ArrayRef<OpFoldResult>":$sizes,
+        "ArrayRef<::mlir::iree_compiler::IREE::PCF::DistributedOperandInfo>":$operandInfo,
+        "ArrayRef<::mlir::iree_compiler::IREE::PCF::DistributedResultInfo>":$resultInfo),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return success();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
         Returns the distributed/tiled implementation of this op.
+        This is the "rewrite" phase that creates IR.
+
+        Callers MUST call `canDistribute` first and only proceed if it
+        succeeds. This method may still return failure for unexpected IR
+        issues, but callers should not rely on this for control flow.
 
         The `offsets` and `sizes` describe the current iteration tile in the
         iteration domain (same semantics as `getTiledImplementation`).

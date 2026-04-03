@@ -142,6 +142,31 @@ struct LinalgOpDistributedTilingModel
     return indices;
   }
 
+  LogicalResult canDistribute(
+      Operation *op, ArrayRef<OpFoldResult> offsets,
+      ArrayRef<OpFoldResult> sizes,
+      ArrayRef<DistributedOperandInfo> operandInfo,
+      ArrayRef<DistributedResultInfo> resultInfo) const {
+    auto linalgOp = cast<linalg::LinalgOp>(op);
+
+    // Check that all result indexing maps have simple dim expressions.
+    // Non-permutation maps prevent computing result tile positions for
+    // sref writes.
+    for (auto [i, info] : llvm::enumerate(resultInfo)) {
+      if (!info.destSref) {
+        continue;
+      }
+      OpOperand *initOperand = linalgOp.getDpsInitOperand(i);
+      AffineMap indexingMap = linalgOp.getMatchingIndexingMap(initOperand);
+      for (AffineExpr expr : indexingMap.getResults()) {
+        if (!isa<AffineDimExpr>(expr)) {
+          return failure();
+        }
+      }
+    }
+    return success();
+  }
+
   FailureOr<TilingResult> getDistributedImplementation(
       Operation *op, OpBuilder &b, ArrayRef<OpFoldResult> offsets,
       ArrayRef<OpFoldResult> sizes,
@@ -224,14 +249,12 @@ struct LinalgOpDistributedTilingModel
         OpOperand *initOperand = linalgOp.getDpsInitOperand(i);
         AffineMap indexingMap = linalgOp.getMatchingIndexingMap(initOperand);
 
+        // canDistribute already verified all result indexing maps have
+        // simple dim expressions.
         SmallVector<OpFoldResult> resultOffsets;
         SmallVector<OpFoldResult> resultSizes;
         for (AffineExpr expr : indexingMap.getResults()) {
-          AffineDimExpr dimExpr = dyn_cast<AffineDimExpr>(expr);
-          if (!dimExpr) {
-            // Non-permutation map — cannot compute result tile position.
-            return failure();
-          }
+          auto dimExpr = cast<AffineDimExpr>(expr);
           unsigned pos = dimExpr.getPosition();
           resultOffsets.push_back(offsets[pos]);
           resultSizes.push_back(sizes[pos]);

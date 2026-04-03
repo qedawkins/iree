@@ -31,24 +31,25 @@ struct PadOpDistributedTilingModel
     return {0};
   }
 
+  LogicalResult canDistribute(
+      Operation *op, ArrayRef<OpFoldResult> offsets,
+      ArrayRef<OpFoldResult> sizes,
+      ArrayRef<DistributedOperandInfo> operandInfo,
+      ArrayRef<DistributedResultInfo> resultInfo) const {
+    // Sref source handling for PadOp is not yet implemented.
+    Value sourceValue = operandInfo[0].value;
+    if (isa<ShapedRefType>(sourceValue.getType())) {
+      return failure();
+    }
+    return success();
+  }
+
   FailureOr<TilingResult> getDistributedImplementation(
       Operation *op, OpBuilder &b, ArrayRef<OpFoldResult> offsets,
       ArrayRef<OpFoldResult> sizes,
       ArrayRef<DistributedOperandInfo> operandInfo,
       ArrayRef<DistributedResultInfo> resultInfo) const {
     Location loc = op->getLoc();
-
-    // If the source operand is an sref, we need to read the appropriate
-    // source tile from it. The pad op's source tile position is derived
-    // from the result tile position minus the padding.
-    Value sourceValue = operandInfo[0].value;
-    if (isa<ShapedRefType>(sourceValue.getType())) {
-      // For pad ops, the source tile is the result tile minus padding.
-      // Delegate to the existing TilingInterface to compute the tile,
-      // but we need to replace the source first.
-      // TODO: Implement proper sref source handling for PadOp.
-      return failure();
-    }
 
     // If the source is already a tensor (tile or full), delegate to the
     // existing TilingInterface implementation.
