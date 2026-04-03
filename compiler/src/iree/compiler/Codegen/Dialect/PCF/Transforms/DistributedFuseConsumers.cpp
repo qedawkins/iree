@@ -169,10 +169,11 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
     Block *currBlock = targetOp->getBlock();
     rewriter.moveOpBefore(targetOp, producerOp);
 
-    [[maybe_unused]] auto reifyOp =
-        cast<ReifyRankedShapedTypeOpInterface>(*targetOp);
-    assert(succeeded(reifyOp.reifyResultShapes(rewriter, outputShapes)) &&
-           "unexpected reify result shapes failed");
+    auto reifyOp = cast<ReifyRankedShapedTypeOpInterface>(*targetOp);
+    LogicalResult reifyResult =
+        reifyOp.reifyResultShapes(rewriter, outputShapes);
+    assert(succeeded(reifyResult) && "unexpected reify result shapes failed");
+    (void)reifyResult;
     if (nextNode) {
       rewriter.moveOpBefore(targetOp, nextNode);
     } else {

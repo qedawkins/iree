@@ -210,14 +210,17 @@ func.func @no_compute(%arg0 : memref<?x?x?xf32>, %arg1 : memref<?x?x?xf32>) {
 
 // -----
 
-// FIXME: matmul_memrefs crashes with assertion failure in replaceOp
-// (memref-based linalg ops have 0 results, PCF tiling expects tensor results).
-// func.func @matmul_memrefs(%0 : memref<?x?xf32>, %1 : memref<?x?xf32>, %2 : memref<?x?xf32>) {
-//   linalg.matmul {lowering_config = #iree_codegen.lowering_config<tile_sizes = [[64, 64, 0]]>}
-//       ins(%0, %1 : memref<?x?xf32>, memref<?x?xf32>)
-//       outs(%2 : memref<?x?xf32>)
-//   return
-// }
+// Memref-based ops are skipped by PCF workgroup tiling (tensor semantics
+// required). Verify they pass through without crashing.
+func.func @matmul_memrefs(%0 : memref<?x?xf32>, %1 : memref<?x?xf32>, %2 : memref<?x?xf32>) {
+  linalg.matmul {lowering_config = #iree_codegen.lowering_config<tile_sizes = [[64, 64, 0]]>}
+      ins(%0, %1 : memref<?x?xf32>, memref<?x?xf32>)
+      outs(%2 : memref<?x?xf32>)
+  return
+}
+// CHECK-LABEL: @matmul_memrefs(
+//   CHECK-NOT:   pcf.loop
+//       CHECK:   linalg.matmul
 
 // -----
 
