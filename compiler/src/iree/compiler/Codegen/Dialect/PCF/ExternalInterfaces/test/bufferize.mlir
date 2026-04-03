@@ -308,3 +308,98 @@ util.func private @replay_bufferize_to_sref(%input: memref<128x256xf16>) {
 // CHECK-LABEL: @replay_bufferize_to_sref
 //  CHECK-SAME:   %[[INPUT:[A-Za-z0-9]+]]: memref<128x256xf16>
 //  CHECK-NEXT:   pcf.to_sref %[[INPUT]] : memref<128x256xf16> -> !pcf.sref<128x256xf16, #pcf.test_scope>
+
+// -----
+
+// Verify that a generic with readonly and readwrite inits bufferizes
+// correctly: both inits get allocated and the readonly init uses `<-`.
+util.func private @bufferize_generic_readonly(%d0: index, %d1: index) {
+  %input = bufferization.alloc_tensor() : tensor<128x256xf16>
+  %output = bufferization.alloc_tensor(%d0, %d1) : tensor<?x?xf32>
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%in_ref <- %input, %out_ref = %output)[%id: index, %count: index]
+         : (!pcf.sref<128x256xf16, #pcf.test_scope>,
+            !pcf.sref<?x?xf32, #pcf.test_scope>)
+        -> (tensor<?x?xf32>) {
+    util.optimization_barrier %in_ref, %out_ref : !pcf.sref<128x256xf16, #pcf.test_scope>, !pcf.sref<?x?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.return
+}
+
+// CHECK-LABEL: @bufferize_generic_readonly(
+//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
+//  CHECK-SAME:   %[[D1:[A-Za-z0-9]+]]: index
+
+// Both get allocations (alloc_tensor -> memref.alloc).
+//   CHECK-DAG:   %[[INPUT_BUF:.+]] = memref.alloc() {alignment = 64 : i64} : memref<128x256xf16>
+//   CHECK-DAG:   %[[OUTPUT_BUF:.+]] = memref.alloc(%[[D0]], %[[D1]]) {alignment = 64 : i64} : memref<?x?xf32>
+//       CHECK:   pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute(%[[IN_REF:[A-Za-z0-9_]+]] <- %[[INPUT_BUF]],
+//  CHECK-SAME:             %[[OUT_REF:[A-Za-z0-9_]+]] = %[[OUTPUT_BUF]])
+//  CHECK-SAME:             [%{{.*}}: index, %{{.*}}: index]
+//  CHECK-NEXT:          : (!pcf.sref<128x256xf16, #pcf.test_scope>,
+//  CHECK-SAME:             !pcf.sref<?x?xf32, #pcf.test_scope>)
+//  CHECK-NEXT:         -> (memref<?x?xf32>) {
+
+// -----
+
+// Verify that a loop with readonly and readwrite inits bufferizes correctly.
+util.func private @bufferize_loop_readonly(%d0: index, %n: index) {
+  %input = bufferization.alloc_tensor() : tensor<64xf16>
+  %output = bufferization.alloc_tensor(%d0) : tensor<?xf32>
+  %0 = pcf.loop scope(#pcf.test_scope) count(%n)
+    execute(%in_ref <- %input, %out_ref = %output)[%id: index]
+         : (!pcf.sref<64xf16, #pcf.test_scope>,
+            !pcf.sref<?xf32, #pcf.test_scope>)
+        -> (tensor<?xf32>) {
+    util.optimization_barrier %in_ref, %out_ref : !pcf.sref<64xf16, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.return
+}
+
+// CHECK-LABEL: @bufferize_loop_readonly(
+//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
+//  CHECK-SAME:   %[[N:[A-Za-z0-9]+]]: index
+
+// Both get allocations (alloc_tensor -> memref.alloc).
+//   CHECK-DAG:   %[[INPUT_BUF:.+]] = memref.alloc() {alignment = 64 : i64} : memref<64xf16>
+//   CHECK-DAG:   %[[OUTPUT_BUF:.+]] = memref.alloc(%[[D0]]) {alignment = 64 : i64} : memref<?xf32>
+//       CHECK:   pcf.loop scope(#pcf.test_scope) count(%[[N]])
+//  CHECK-NEXT:     execute(%[[IN_REF:[A-Za-z0-9_]+]] <- %[[INPUT_BUF]],
+//  CHECK-SAME:             %[[OUT_REF:[A-Za-z0-9_]+]] = %[[OUTPUT_BUF]])
+//  CHECK-SAME:             [%{{.*}}: index]
+//  CHECK-NEXT:          : (!pcf.sref<64xf16, #pcf.test_scope>,
+//  CHECK-SAME:             !pcf.sref<?xf32, #pcf.test_scope>)
+//  CHECK-NEXT:         -> (memref<?xf32>) {
+
+// -----
+
+// Verify that a generic with multiple readonly inits and already-bufferized
+// (memref) inputs handles the replay case correctly.
+util.func private @replay_bufferize_generic_readonly(
+    %input: memref<128x256xf16>, %output: memref<128x128xf32>) {
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%in_ref <- %input, %out_ref = %output)[%id: index, %count: index]
+         : (!pcf.sref<128x256xf16, #pcf.test_scope>,
+            !pcf.sref<128x128xf32, #pcf.test_scope>)
+        -> (memref<128x128xf32>) {
+    util.optimization_barrier %in_ref, %out_ref : !pcf.sref<128x256xf16, #pcf.test_scope>, !pcf.sref<128x128xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.optimization_barrier %0 : memref<128x128xf32>
+  util.return
+}
+
+// CHECK-LABEL: @replay_bufferize_generic_readonly(
+//  CHECK-SAME:   %[[INPUT:[A-Za-z0-9]+]]: memref<128x256xf16>
+//  CHECK-SAME:   %[[OUTPUT:[A-Za-z0-9]+]]: memref<128x128xf32>
+// No allocations needed - both are already memrefs.
+//   CHECK-NOT:   memref.alloc
+//       CHECK:   pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute(%{{.*}} <- %[[INPUT]], %{{.*}} = %[[OUTPUT]])
+//  CHECK-SAME:             [%{{.*}}: index, %{{.*}}: index]
+//  CHECK-NEXT:          : (!pcf.sref<128x256xf16, #pcf.test_scope>,
+//  CHECK-SAME:             !pcf.sref<128x128xf32, #pcf.test_scope>)
+//  CHECK-NEXT:         -> (memref<128x128xf32>) {
