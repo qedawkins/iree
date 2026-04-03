@@ -22,10 +22,13 @@ namespace {
 
 /// Computes the offsets and sizes for a single operand tile given the
 /// iteration domain offsets/sizes and the operand's indexing map.
-/// Returns std::nullopt if the operand is not tiled (all mapped dims have
-/// zero tile size).
-static std::optional<
-    std::pair<SmallVector<OpFoldResult>, SmallVector<OpFoldResult>>>
+///
+/// For simple dim expressions (e.g., d0), the offset/size is directly
+/// mapped. For general affine expressions (e.g., d1 + d4 for convolution),
+/// the offset is computed as expr(offsets) and the size is computed as
+/// expr(offsets + sizes - 1) - expr(offsets) + 1, which correctly handles
+/// strides and dilations.
+static std::pair<SmallVector<OpFoldResult>, SmallVector<OpFoldResult>>
 computeOperandTilePosition(OpBuilder &b, Location loc,
                            linalg::LinalgOp linalgOp, OpOperand &opOperand,
                            ArrayRef<OpFoldResult> offsets,
@@ -37,15 +40,53 @@ computeOperandTilePosition(OpBuilder &b, Location loc,
   operandOffsets.reserve(rank);
   operandSizes.reserve(rank);
 
-  for (AffineExpr expr : indexingMap.getResults()) {
-    // Only handle simple dim expressions for now.
-    AffineDimExpr dimExpr = dyn_cast<AffineDimExpr>(expr);
-    if (!dimExpr) {
-      return std::nullopt;
+  for (auto [r, expr] : llvm::enumerate(indexingMap.getResults())) {
+    // Simple dim expression: direct mapping.
+    if (auto dimExpr = dyn_cast<AffineDimExpr>(expr)) {
+      unsigned pos = dimExpr.getPosition();
+      operandOffsets.push_back(offsets[pos]);
+      operandSizes.push_back(sizes[pos]);
+      continue;
     }
-    unsigned pos = dimExpr.getPosition();
-    operandOffsets.push_back(offsets[pos]);
-    operandSizes.push_back(sizes[pos]);
+
+    // General affine expression (e.g., d1*s + d4*dil for convolution).
+    // Compute offset = expr(offsets).
+    AffineMap subMap = indexingMap.getSubMap({static_cast<unsigned>(r)});
+
+    // Evaluate the expression at the lower bounds (offsets).
+    // First subtract the constant offset: offset = m(lbs) - m(0).
+    SmallVector<Attribute> zeros(offsets.size(), b.getIndexAttr(0));
+    SmallVector<Attribute> mAtZero;
+    [[maybe_unused]] LogicalResult foldRes = subMap.constantFold(zeros, mAtZero);
+    assert(succeeded(foldRes) &&
+           "affine_map with only dims must be evaluable at zero.");
+    int64_t mAtZeroInt =
+        cast<IntegerAttr>(mAtZero[0]).getValue().getSExtValue();
+    OpFoldResult offset = affine::makeComposedFoldedAffineApply(
+        b, loc, subMap.getResult(0) - mAtZeroInt, offsets);
+    operandOffsets.push_back(offset);
+
+    // Compute size = expr(offsets + sizes - 1) - expr(offsets) + 1.
+    // This gives the half-open range size of the operand tile.
+    SmallVector<OpFoldResult> upperBounds;
+    upperBounds.reserve(offsets.size());
+    AffineExpr s0 = getAffineSymbolExpr(0, b.getContext());
+    AffineExpr s1 = getAffineSymbolExpr(1, b.getContext());
+    AffineMap addMinusOneMap = AffineMap::get(0, 2, s0 + s1 - 1, b.getContext());
+    for (auto [off, sz] : llvm::zip_equal(offsets, sizes)) {
+      upperBounds.push_back(affine::makeComposedFoldedAffineApply(
+          b, loc, addMinusOneMap, {off, sz}));
+    }
+    OpFoldResult maxIndex = affine::makeComposedFoldedAffineApply(
+        b, loc, subMap.getResult(0) - mAtZeroInt, upperBounds);
+
+    // size = maxIndex - offset + 1.
+    AffineExpr d0 = getAffineDimExpr(0, b.getContext());
+    AffineExpr d1 = getAffineDimExpr(1, b.getContext());
+    AffineMap sizeMap = AffineMap::get(2, 0, d0 - d1 + 1, b.getContext());
+    OpFoldResult size = affine::makeComposedFoldedAffineApply(
+        b, loc, sizeMap, {maxIndex, offset});
+    operandSizes.push_back(size);
   }
 
   return std::make_pair(operandOffsets, operandSizes);
@@ -135,18 +176,8 @@ struct LinalgOpDistributedTilingModel
 
       // Need to extract a tile. Compute tile position from indexing map.
       OpOperand &opOperand = linalgOp->getOpOperand(i);
-      std::optional<
-          std::pair<SmallVector<OpFoldResult>, SmallVector<OpFoldResult>>>
-          tilePos = computeOperandTilePosition(b, loc, linalgOp, opOperand,
-                                               offsets, sizes);
-      if (!tilePos) {
-        LLVM_DEBUG(llvm::dbgs()
-                   << "operand " << i
-                   << " has non-simple indexing map; cannot compute tile "
-                      "position\n");
-        return failure();
-      }
-      auto &[tileOffsets, tileSizes] = *tilePos;
+      auto [tileOffsets, tileSizes] = computeOperandTilePosition(
+          b, loc, linalgOp, opOperand, offsets, sizes);
 
       // Use a plain OpBuilder for creating slice ops to avoid issues
       // with the greedy rewriter's notification/folding system.
