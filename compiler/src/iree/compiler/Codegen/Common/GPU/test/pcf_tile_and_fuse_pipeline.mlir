@@ -105,5 +105,5 @@ func.func @matmul_mma(%lhs: tensor<256x512xf16>, %rhs: tensor<512x256xf16>,
 // CHECK:   pcf.generic scope(#iree_gpu.subgroup_scope)
 // CHECK:     pcf.generic scope(#iree_gpu.lane_scope)
 // CHECK:       scf.for
-// MMA kind annotated on tiled matmul.
-// CHECK:         linalg.matmul {{.*}}mma_kind = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>
+// MMA kind carried as verified lowering_config attribute.
+// CHECK:         linalg.matmul {{.*}}lowering_config = #iree_gpu.lowering_config<{mma_kind = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>}>

@@ -51,9 +51,10 @@ struct MultiLevelTilingParams {
   /// corresponds to operandsToPromote[i]. If empty, all promoted operands
   /// use DerivedThreadConfig.
   SmallVector<Attribute> promotionTypes;
-  /// If set, use InnerTileDescAttrInterface-based conversion at the lane
-  /// level instead of getDistributedImplementation. This is for MMA/intrinsic
-  /// ops where lane distribution is handled by the inner tile descriptor.
+  /// If set, the MMA intrinsic descriptor (InnerTileDescAttrInterface) is
+  /// placed on tiled ops as a verified lowering_config attribute. A
+  /// downstream pass (e.g., GPUPackToIntrinsics) then packs and converts
+  /// the tiled op to iree_codegen.inner_tiled using this descriptor.
   Attribute mmaKind;
 };
 
