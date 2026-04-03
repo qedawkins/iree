@@ -344,6 +344,11 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
 
   // Count lane-tiled dimensions.
   int64_t numLaneIterators = countTiledDims(laneTileSizes);
+  if (numLaneIterators == 0 && !params.mmaKind) {
+    return rewriter.notifyMatchFailure(
+        target, "ill-formed lowering config: subgroup tiling specified but no "
+                "lane tiling mechanism (lane tile sizes or mma_kind)");
+  }
 
   // === Create outer pcf.generic (subgroup scope) ===
   rewriter.setInsertionPoint(op);
@@ -425,6 +430,12 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
 
     // === Create inner pcf.generic (lane scope) ===
     // No inits/results — captures outer srefs directly.
+    //
+    // When numLaneIterators == 0, the only path here is the MMA path
+    // (mmaKind is set). In this case, lane distribution is handled by
+    // the MMA conversion pass rather than explicit lane tiling. The
+    // inner generic with 1 iterator provides the lane scope context
+    // that the MMA conversion needs to operate within.
     auto laneScope = cast<ScopeAttrInterface>(params.lane.scope);
     GenericOp innerGeneric =
         numLaneIterators > 0
@@ -443,7 +454,8 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
         computeTileOffsetsAndSizes(rewriter, loc, laneTileSizes, sgDomain,
                                    laneIdArgs, laneOffsets, laneSizes);
       } else {
-        // No lane tiling — use full subgroup tile.
+        // MMA path: no explicit lane tiling, use full subgroup tile. The MMA
+        // conversion will distribute work across lanes internally.
         laneOffsets = llvm::to_vector(sgOffsets);
         laneSizes = llvm::to_vector(sgSizes);
       }
