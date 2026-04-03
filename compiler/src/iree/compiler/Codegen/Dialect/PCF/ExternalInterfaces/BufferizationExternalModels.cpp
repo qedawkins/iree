@@ -28,21 +28,46 @@ namespace {
 struct GenericOpInterface
     : BufferizableOpInterface::ExternalModel<GenericOpInterface,
                                              PCF::GenericOp> {
+  /// Returns true if the given operand is a readonly init.
+  static bool isReadonlyInitOperand(PCF::GenericOp genericOp,
+                                    OpOperand &opOperand) {
+    OperandRange readonlyInits = genericOp.getReadonlyInits();
+    if (readonlyInits.empty()) {
+      return false;
+    }
+    int64_t roBegin = readonlyInits.getBeginOperandIndex();
+    int64_t opNum = opOperand.getOperandNumber();
+    return opNum >= roBegin &&
+           opNum < roBegin + static_cast<int64_t>(readonlyInits.size());
+  }
+
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
                               const AnalysisState &state) const {
-    // Parallel ops can be treated as though they never read.
+    auto genericOp = cast<PCF::GenericOp>(op);
+    // Readonly inits are read.
+    if (isReadonlyInitOperand(genericOp, opOperand)) {
+      return true;
+    }
+    // Readwrite inits in parallel ops can be treated as though they never
+    // read.
     return false;
   }
 
   bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
                                const AnalysisState &state) const {
-    // Generic ops must always be assumed to write to a tensor (init) operand.
+    auto genericOp = cast<PCF::GenericOp>(op);
+    // Readonly inits are never written.
+    if (isReadonlyInitOperand(genericOp, opOperand)) {
+      return false;
+    }
+    // Readwrite inits must always be assumed to write.
     return true;
   }
 
   AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
                                       const AnalysisState &state) const {
     auto genericOp = cast<PCF::GenericOp>(op);
+    // Readonly inits have no tied result.
     OpResult tiedResult = genericOp.getTiedResult(opOperand);
     if (!tiedResult) {
       return {};
@@ -58,6 +83,22 @@ struct GenericOpInterface
     auto genericOp = cast<PCF::GenericOp>(op);
     Location loc = genericOp.getLoc();
 
+    // Bufferize readonly inits.
+    SmallVector<Value> newReadonlyInits;
+    newReadonlyInits.reserve(genericOp.getReadonlyInits().size());
+    for (Value init : genericOp.getReadonlyInits()) {
+      if (isa<RankedTensorType>(init.getType())) {
+        FailureOr<Value> newInit = getBuffer(rewriter, init, options, state);
+        if (failed(newInit)) {
+          return op->emitOpError("failed to get readonly init buffer");
+        }
+        newReadonlyInits.push_back(*newInit);
+      } else {
+        newReadonlyInits.push_back(init);
+      }
+    }
+
+    // Bufferize readwrite inits.
     SmallVector<Value> newInits;
     newInits.reserve(genericOp.getInits().size());
     for (Value init : genericOp.getInits()) {
@@ -94,6 +135,11 @@ struct GenericOpInterface
     // need to preserve it from the original op since the execute region's
     // block arguments include leading args from the initialize region.
     newGenericOp.setNumLeadingArgs(genericOp.getNumLeadingArgs());
+
+    // Set readonly init operands and property on the new op.
+    newGenericOp.setNumReadonlyRefs(newReadonlyInits.size());
+    newGenericOp.getReadonlyInitsMutable().assign(newReadonlyInits);
+
     newGenericOp.getRegion().takeBody(genericOp.getRegion());
     newGenericOp.getInitializer().takeBody(genericOp.getInitializer());
 
@@ -146,21 +192,46 @@ struct GenericOpInterface
 
 struct LoopOpInterface
     : BufferizableOpInterface::ExternalModel<LoopOpInterface, PCF::LoopOp> {
+  /// Returns true if the given operand is a readonly init.
+  static bool isReadonlyInitOperand(PCF::LoopOp loopOp,
+                                    OpOperand &opOperand) {
+    OperandRange readonlyInits = loopOp.getReadonlyInits();
+    if (readonlyInits.empty()) {
+      return false;
+    }
+    int64_t roBegin = readonlyInits.getBeginOperandIndex();
+    int64_t opNum = opOperand.getOperandNumber();
+    return opNum >= roBegin &&
+           opNum < roBegin + static_cast<int64_t>(readonlyInits.size());
+  }
+
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
                               const AnalysisState &state) const {
-    // Parallel ops can be treated as though they never read.
+    auto loopOp = cast<PCF::LoopOp>(op);
+    // Readonly inits are read.
+    if (isReadonlyInitOperand(loopOp, opOperand)) {
+      return true;
+    }
+    // Readwrite inits in parallel ops can be treated as though they never
+    // read.
     return false;
   }
 
   bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
                                const AnalysisState &state) const {
-    // Generic ops must always be assumed to write to a tensor (init) operand.
+    auto loopOp = cast<PCF::LoopOp>(op);
+    // Readonly inits are never written.
+    if (isReadonlyInitOperand(loopOp, opOperand)) {
+      return false;
+    }
+    // Readwrite inits must always be assumed to write.
     return true;
   }
 
   AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
                                       const AnalysisState &state) const {
     auto loopOp = cast<PCF::LoopOp>(op);
+    // Readonly inits have no tied result.
     OpResult tiedResult = loopOp.getTiedResult(opOperand);
     if (!tiedResult) {
       return {};
@@ -176,6 +247,22 @@ struct LoopOpInterface
     auto loopOp = cast<PCF::LoopOp>(op);
     Location loc = loopOp.getLoc();
 
+    // Bufferize readonly inits.
+    SmallVector<Value> newReadonlyInits;
+    newReadonlyInits.reserve(loopOp.getReadonlyInits().size());
+    for (Value init : loopOp.getReadonlyInits()) {
+      if (isa<RankedTensorType>(init.getType())) {
+        FailureOr<Value> newInit = getBuffer(rewriter, init, options, state);
+        if (failed(newInit)) {
+          return op->emitOpError("failed to get readonly init buffer");
+        }
+        newReadonlyInits.push_back(*newInit);
+      } else {
+        newReadonlyInits.push_back(init);
+      }
+    }
+
+    // Bufferize readwrite inits.
     SmallVector<Value> newInits;
     newInits.reserve(loopOp.getInits().size());
     for (Value init : loopOp.getInits()) {
@@ -208,6 +295,11 @@ struct LoopOpInterface
         rewriter, loc, newResultTypes, loopOp.getScope(), loopOp.getCount(),
         newInits, loopOp.getDynamicSizes(), loopOp.getIsTied(),
         loopOp.getSyncOnReturn());
+
+    // Set readonly init operands and property on the new op.
+    newLoopOp.setNumReadonlyRefs(newReadonlyInits.size());
+    newLoopOp.getReadonlyInitsMutable().assign(newReadonlyInits);
+
     newLoopOp.getRegion().takeBody(loopOp.getRegion());
 
     // For results with tied inits, use the init buffer directly so

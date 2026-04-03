@@ -12,6 +12,7 @@
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/TypeUtilities.h"
 
@@ -923,16 +924,22 @@ ParseResult LoopOp::parse(OpAsmParser &parser, OperationState &result) {
 
   // Resolve readonly init operands. Shape and element type are inferred from
   // sref types; the init may be either a tensor or a memref (after
-  // bufferization), so try tensor first and fall back to memref.
+  // bufferization), so try tensor first and fall back to memref. We use a
+  // ScopedDiagnosticHandler to suppress the error from the tensor attempt.
   ArrayRef<BlockArgument> readonlyArgs =
       body->getArguments().take_front(numReadonlyRefs);
   for (int64_t i = 0, e = numReadonlyRefs; i < e; ++i) {
     ShapedRefType srefType = cast<ShapedRefType>(readonlyArgs[i].getType());
     Type tensorType =
         RankedTensorType::get(srefType.getShape(), srefType.getElementType());
-    if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
-                                        result.operands))) {
-      continue;
+    {
+      // Suppress the diagnostic if tensor resolution fails.
+      ScopedDiagnosticHandler diagHandler(parser.getContext(),
+                                          [](Diagnostic &) { return success(); });
+      if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
+                                          result.operands))) {
+        continue;
+      }
     }
     Type memrefType =
         MemRefType::get(srefType.getShape(), srefType.getElementType());
@@ -1408,14 +1415,20 @@ ParseResult SharedExecutorOp::parse(OpAsmParser &parser,
 
   // Resolve readonly init operands. Shape and element type are inferred from
   // sref types; the init may be either a tensor or a memref (after
-  // bufferization), so try tensor first and fall back to memref.
+  // bufferization), so try tensor first and fall back to memref. We use a
+  // ScopedDiagnosticHandler to suppress the error from the tensor attempt.
   for (int64_t i = 0, e = readonlyRefArgs.size(); i < e; ++i) {
     ShapedRefType srefType = cast<ShapedRefType>(srefTypes[i]);
     Type tensorType =
         RankedTensorType::get(srefType.getShape(), srefType.getElementType());
-    if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
-                                        result.operands))) {
-      continue;
+    {
+      // Suppress the diagnostic if tensor resolution fails.
+      ScopedDiagnosticHandler diagHandler(parser.getContext(),
+                                          [](Diagnostic &) { return success(); });
+      if (succeeded(parser.resolveOperand(readonlyInits[i], tensorType,
+                                          result.operands))) {
+        continue;
+      }
     }
     Type memrefType =
         MemRefType::get(srefType.getShape(), srefType.getElementType());
