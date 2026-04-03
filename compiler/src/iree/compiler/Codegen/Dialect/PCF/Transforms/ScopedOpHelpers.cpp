@@ -199,32 +199,31 @@ GenericOp addReadonlyAndReadwriteArgs<GenericOp>(
 //===----------------------------------------------------------------------===//
 
 template <>
-LoopOp addReadonlyArgs<LoopOp>(RewriterBase &rewriter, LoopOp loopOp,
-                                ValueRange newReadonlyInits,
-                                SmallVectorImpl<BlockArgument> &newReadonlyRefs) {
+LoopOp
+addReadonlyArgs<LoopOp>(RewriterBase &rewriter, LoopOp loopOp,
+                        ValueRange newReadonlyInits,
+                        SmallVectorImpl<BlockArgument> &newReadonlyRefs) {
   SmallVector<BlockArgument> unusedReadwriteRefs;
-  return addReadonlyAndReadwriteArgs(
-      rewriter, loopOp, newReadonlyInits,
-      /*newReadwriteInits=*/ValueRange(),
-      /*newIsTied=*/ArrayRef<bool>(),
-      /*newDynamicSizes=*/ArrayRef<Value>(),
-      /*newResultTypes=*/TypeRange(),
-      newReadonlyRefs, unusedReadwriteRefs);
+  return addReadonlyAndReadwriteArgs(rewriter, loopOp, newReadonlyInits,
+                                     /*newReadwriteInits=*/ValueRange(),
+                                     /*newIsTied=*/ArrayRef<bool>(),
+                                     /*newDynamicSizes=*/ArrayRef<Value>(),
+                                     /*newResultTypes=*/TypeRange(),
+                                     newReadonlyRefs, unusedReadwriteRefs);
 }
 
 template <>
 GenericOp
 addReadonlyArgs<GenericOp>(RewriterBase &rewriter, GenericOp genericOp,
-                            ValueRange newReadonlyInits,
-                            SmallVectorImpl<BlockArgument> &newReadonlyRefs) {
+                           ValueRange newReadonlyInits,
+                           SmallVectorImpl<BlockArgument> &newReadonlyRefs) {
   SmallVector<BlockArgument> unusedReadwriteRefs;
-  return addReadonlyAndReadwriteArgs(
-      rewriter, genericOp, newReadonlyInits,
-      /*newReadwriteInits=*/ValueRange(),
-      /*newIsTied=*/ArrayRef<bool>(),
-      /*newDynamicSizes=*/ArrayRef<Value>(),
-      /*newResultTypes=*/TypeRange(),
-      newReadonlyRefs, unusedReadwriteRefs);
+  return addReadonlyAndReadwriteArgs(rewriter, genericOp, newReadonlyInits,
+                                     /*newReadwriteInits=*/ValueRange(),
+                                     /*newIsTied=*/ArrayRef<bool>(),
+                                     /*newDynamicSizes=*/ArrayRef<Value>(),
+                                     /*newResultTypes=*/TypeRange(),
+                                     newReadonlyRefs, unusedReadwriteRefs);
 }
 
 } // namespace mlir::iree_compiler::IREE::PCF
