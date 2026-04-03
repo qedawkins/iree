@@ -781,6 +781,63 @@ void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
   }
 }
 
+void GenericOp::build(mlir::OpBuilder &b, mlir::OperationState &result,
+                      TypeRange resultTypes, ScopeAttrInterface scope,
+                      ValueRange readonlyInits, ValueRange inits,
+                      ValueRange dynamicSizes, ArrayRef<bool> isTied,
+                      int64_t numIterators, bool syncOnReturn) {
+  result.addAttribute(GenericOp::getScopeAttrName(result.name), scope);
+  result.addOperands(readonlyInits);
+  result.addOperands(inits);
+  result.addOperands(dynamicSizes);
+  result.addTypes(resultTypes);
+
+  Properties &inherentAttrs = result.getOrAddProperties<Properties>();
+  inherentAttrs.setOperandSegmentSizes(
+      {static_cast<int32_t>(readonlyInits.size()),
+       static_cast<int32_t>(inits.size()),
+       static_cast<int32_t>(dynamicSizes.size())});
+  inherentAttrs.setIsTied(isTied);
+  inherentAttrs.setSyncOnReturn(syncOnReturn);
+  inherentAttrs.setNumIndexArgs(2 * numIterators);
+  inherentAttrs.setNumLeadingArgs(0);
+  inherentAttrs.setNumReadonlyRefs(readonlyInits.size());
+
+  // Add the initializer region.
+  result.addRegion();
+
+  // Add the main region.
+  Region *region = result.addRegion();
+  OpBuilder::InsertionGuard g(b);
+  b.createBlock(region);
+  Block &entryBlock = region->front();
+
+  // Readonly sref args — no sync scope needed since they are never written.
+  for (Value init : readonlyInits) {
+    ShapedType shapedType = cast<ShapedType>(init.getType());
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope),
+        result.location);
+  }
+
+  // Readwrite sref args (with SyncOnReturn semantics).
+  Attribute syncScope = PCF::SyncOnReturnAttr::get(b.getContext());
+  for (Type resultType : resultTypes) {
+    ShapedType shapedType = cast<ShapedType>(resultType);
+    entryBlock.addArgument(
+        PCF::ShapedRefType::get(b.getContext(), shapedType.getShape(),
+                                shapedType.getElementType(), scope, syncScope),
+        result.location);
+  }
+
+  // Thread count/id args.
+  Type indexType = b.getIndexType();
+  for (int64_t i = 0; i < 2 * numIterators; ++i) {
+    entryBlock.addArgument(indexType, result.location);
+  }
+}
+
 bool GenericOp::isRegionRefArg(BlockArgument b) {
   assert(b.getOwner() == &getRegion().front() &&
          "unexpected non-entry block arg");

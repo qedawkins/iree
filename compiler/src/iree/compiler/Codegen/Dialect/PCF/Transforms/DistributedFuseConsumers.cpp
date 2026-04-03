@@ -265,13 +265,15 @@ static void fuseDistributedConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
   }
 
   // Step 9: Check feasibility, then call getDistributedImplementation.
-  assert(succeeded(clonedPCF.canDistribute(iterDomainOffsets, iterDomainSizes,
-                                           operandInfo, resultInfo)) &&
-         "canDistribute check failed unexpectedly during consumer fusion");
+  if (failed(clonedPCF.canDistribute(iterDomainOffsets, iterDomainSizes,
+                                     operandInfo, resultInfo))) {
+    return;
+  }
   FailureOr<TilingResult> tilingResult = clonedPCF.getDistributedImplementation(
       rewriter, iterDomainOffsets, iterDomainSizes, operandInfo, resultInfo);
-  assert(succeeded(tilingResult) &&
-         "unexpected distributed implementation failure");
+  if (failed(tilingResult)) {
+    return;
+  }
 
   // Step 10: Handle returned tiled values. The getDistributedImplementation
   // should have written results to the dest srefs when destSref was set.

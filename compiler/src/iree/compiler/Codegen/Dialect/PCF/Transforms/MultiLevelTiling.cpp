@@ -503,6 +503,7 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
             sgReadwriteRefs, initValues, params);
         if (failed(loopResults)) {
+          rewriter.eraseOp(innerGeneric);
           return failure();
         }
       } else {
@@ -544,6 +545,7 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
         }
         if (failed(target.canDistribute(laneOffsets, laneSizes, operandInfo,
                                         resultInfo))) {
+          rewriter.eraseOp(innerGeneric);
           return rewriter.notifyMatchFailure(target,
                                              "canDistribute check failed");
         }
@@ -551,6 +553,7 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
             target.getDistributedImplementation(
                 rewriter, laneOffsets, laneSizes, operandInfo, resultInfo);
         if (failed(tiledResult)) {
+          rewriter.eraseOp(innerGeneric);
           return rewriter.notifyMatchFailure(
               target, "getDistributedImplementation failed unexpectedly");
         }

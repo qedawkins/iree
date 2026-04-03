@@ -295,13 +295,15 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
     resultInfo.push_back({/*destSref=*/Value()});
 
     // Check feasibility, then call getDistributedImplementation.
-    assert(succeeded(producer.canDistribute(offsets, sizes, operandInfo,
-                                            resultInfo)) &&
-           "canDistribute check failed unexpectedly during producer fusion");
+    if (failed(producer.canDistribute(offsets, sizes, operandInfo,
+                                      resultInfo))) {
+      return;
+    }
     FailureOr<TilingResult> tiledResult = producer.getDistributedImplementation(
         rewriter, offsets, sizes, operandInfo, resultInfo);
-    assert(succeeded(tiledResult) &&
-           "unexpected distributed implementation failure");
+    if (failed(tiledResult)) {
+      return;
+    }
 
     Value replacement = tiledResult->tiledValues[0];
 

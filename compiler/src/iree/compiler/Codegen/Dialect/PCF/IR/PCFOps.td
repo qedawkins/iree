@@ -223,9 +223,15 @@ def GenericOp : PCF_Op<"generic", [
           "ValueRange":$inits, "ValueRange":$dynamic_sizes,
           "ArrayRef<bool>":$is_tied, "int64_t":$num_iterators,
           CArg<"bool", "false">:$sync_on_return)>,
-      // Builder with readonly and readwrite inits.
+      // Builder with readonly and readwrite inits (types inferred from inits).
       OpBuilder<(ins "ScopeAttrInterface":$scope,
           "ValueRange":$readonlyInits, "ValueRange":$inits,
+          "int64_t":$num_iterators,
+          CArg<"bool", "false">:$sync_on_return)>,
+      // Builder with everything including readonly.
+      OpBuilder<(ins "TypeRange":$result_types, "ScopeAttrInterface":$scope,
+          "ValueRange":$readonlyInits, "ValueRange":$inits,
+          "ValueRange":$dynamic_sizes, "ArrayRef<bool>":$is_tied,
           "int64_t":$num_iterators,
           CArg<"bool", "false">:$sync_on_return)>,
   ];

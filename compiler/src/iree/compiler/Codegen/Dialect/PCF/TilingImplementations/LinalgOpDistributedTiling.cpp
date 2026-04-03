@@ -50,6 +50,10 @@ computeOperandTilePosition(OpBuilder &b, Location loc,
     }
 
     // General affine expression (e.g., d1*s + d4*dil for convolution).
+    // This formula is correct for linear affine expressions (sums of
+    // scaled dims with constant offsets). It does not handle dim-dim
+    // products, which do not arise in linalg indexing maps.
+    //
     // Compute offset = expr(offsets).
     AffineMap subMap = indexingMap.getSubMap({static_cast<unsigned>(r)});
 
@@ -345,19 +349,9 @@ struct LinalgOpDistributedTilingModel
         tileSizes.push_back(sizes[pos]);
       }
       if (!validMap) {
-        // Use full sref dimensions as fallback.
-        ShapedRefType srefType = cast<ShapedRefType>(sref.getType());
-        tileOffsets.clear();
-        tileSizes.clear();
-        for (int64_t d = 0, rank = srefType.getRank(); d < rank; ++d) {
-          tileOffsets.push_back(b.getIndexAttr(0));
-          if (srefType.isDynamicDim(d)) {
-            tileSizes.push_back(
-                OpFoldResult(b.getIndexAttr(ShapedType::kDynamic)));
-          } else {
-            tileSizes.push_back(b.getIndexAttr(srefType.getDimSize(d)));
-          }
-        }
+        // Non-permutation maps with dynamic sref dims not yet supported.
+        // The permutation map case is handled above via the main code path.
+        llvm_unreachable("non-permutation output map with dynamic sref dims");
       }
       Value tile = readTileFromSref(b, loc, sref, tileOffsets, tileSizes);
       inits.push_back(tile);
@@ -391,19 +385,9 @@ struct LinalgOpDistributedTilingModel
         tileSizes.push_back(sizes[pos]);
       }
       if (!validMap) {
-        // Non-permutation map — write the full tile at offset 0.
-        ShapedRefType srefType = cast<ShapedRefType>(sref.getType());
-        tileOffsets.clear();
-        tileSizes.clear();
-        for (int64_t d = 0, rank = srefType.getRank(); d < rank; ++d) {
-          tileOffsets.push_back(b.getIndexAttr(0));
-          if (srefType.isDynamicDim(d)) {
-            tileSizes.push_back(
-                OpFoldResult(b.getIndexAttr(ShapedType::kDynamic)));
-          } else {
-            tileSizes.push_back(b.getIndexAttr(srefType.getDimSize(d)));
-          }
-        }
+        // Non-permutation maps with dynamic sref dims not yet supported.
+        // The permutation map case is handled above via the main code path.
+        llvm_unreachable("non-permutation output map with dynamic sref dims");
       }
       int64_t resultRank = cast<ShapedType>(result.getType()).getRank();
       SmallVector<OpFoldResult> strides(resultRank, b.getIndexAttr(1));
