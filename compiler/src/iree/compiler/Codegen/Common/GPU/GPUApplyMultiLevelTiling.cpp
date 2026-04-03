@@ -141,7 +141,8 @@ void GPUApplyMultiLevelTilingPass::runOnOperation() {
     FailureOr<IREE::PCF::GenericOp> result =
         IREE::PCF::applyMultiLevelTiling(rewriter, pcfTilingOp, params);
     if (failed(result)) {
-      op->emitWarning("multi-level tiling failed; leaving op untiled");
+      LLVM_DEBUG(llvm::dbgs() << "multi-level tiling failed for op at "
+                              << op->getLoc() << "; leaving op untiled\n");
     }
   }
 }
