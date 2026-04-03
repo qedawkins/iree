@@ -4,8 +4,13 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+// TODO: This file should be moved to Common/GPU/. Multi-level tiling with
+// subgroup/lane scopes is GPU-specific infrastructure, not PCF-specific.
+
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/GPULoweringConfigUtils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
@@ -166,15 +171,34 @@ buildOperandInfo(RewriterBase &rewriter, Location loc, Operation *op,
   return operandInfo;
 }
 
-/// Callback invoked on each TilingResult inside the reduction loop body.
-/// Can be used to attach attributes (e.g., mma_kind) to the tiled ops.
-using PostTilingCallback =
-    function_ref<void(RewriterBase &rewriter, TilingResult &tiledResult)>;
+/// Sets a verified lowering config carrying the mma_kind on each tiled op.
+/// This replaces duck-typed `setAttr("mma_kind", ...)` with a proper
+/// `iree_gpu.lowering_config` that the downstream GPUPackToIntrinsics pass
+/// can consume via `getMmaKind(loweringConfig)`.
+///
+/// TODO: Instead of deferring to GPUPackToIntrinsics, the MMA conversion
+/// (packing + inner_tiled creation) should happen directly here using
+/// InnerTileDescAttrInterface to derive the distributed types from the
+/// subgroup tile sizes.
+static void setMmaKindOnTiledOps(MLIRContext *ctx,
+                                 ArrayRef<Operation *> tiledOps,
+                                 Attribute mmaKind) {
+  auto kind = cast<Codegen::InnerTileDescAttrInterface>(mmaKind);
+  Builder b(ctx);
+  SmallVector<NamedAttribute> attrs;
+  GPU::setMmaKind(ctx, attrs, kind);
+  IREE::GPU::LoweringConfigAttr config =
+      IREE::GPU::LoweringConfigAttr::get(ctx, b.getDictionaryAttr(attrs));
+  for (Operation *tiledOp : tiledOps) {
+    setLoweringConfig(tiledOp, config);
+  }
+}
 
 /// Builds a nested reduction loop (one scf.for per reduction dimension),
 /// calling getDistributedImplementation inside the innermost loop body.
-/// The |postTilingCb| callback is invoked on the tiled result before
-/// yielding.
+///
+/// If |mmaKind| is set, a verified lowering config with the mma_kind is
+/// placed on each tiled op (rather than a duck-typed discardable attribute).
 ///
 /// Uses scf::buildLoopNest to create a perfect nest over all reduction
 /// dimensions in |reductionDims|. Emits emitResultTileStore after the
@@ -193,7 +217,7 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
     ArrayRef<int64_t> operandToReadwriteIdx,
     ArrayRef<BlockArgument> sgReadonlyRefs,
     ArrayRef<BlockArgument> sgReadwriteRefs, ValueRange initValues,
-    const MultiLevelTilingParams &params, PostTilingCallback postTilingCb) {
+    const MultiLevelTilingParams &params) {
   // Build lower bounds, upper bounds, and steps for each reduction dim.
   SmallVector<Value> lbs, ubs, steps;
   for (int64_t redDim : reductionDims) {
@@ -247,9 +271,10 @@ static FailureOr<SmallVector<Value>> buildReductionLoop(
           return scf::ValueVector(iterArgs.begin(), iterArgs.end());
         }
 
-        // Apply post-tiling modifications (e.g., attaching mma_kind).
-        if (postTilingCb) {
-          postTilingCb(rewriter, *tiledResult);
+        // Set verified lowering config with mma_kind on the tiled ops.
+        if (params.mmaKind) {
+          setMmaKindOnTiledOps(rewriter.getContext(),
+                               tiledResult->tiledOps, params.mmaKind);
         }
 
         return scf::ValueVector(tiledResult->tiledValues.begin(),
@@ -479,24 +504,11 @@ applyMultiLevelTiling(RewriterBase &rewriter, PCFTilingOpInterface target,
       }
 
       if (!reductionDims.empty()) {
-        // Post-tiling callback: attach mma_kind attribute for MMA path.
-        // The lambda must outlive the function_ref, so declare it in the
-        // same scope where buildReductionLoop is called.
-        Attribute mmaKind = params.mmaKind;
-        auto mmaCallback = [mmaKind](RewriterBase & /*rewriter*/,
-                                     TilingResult &tiledResult) {
-          for (Operation *tiledOp : tiledResult.tiledOps) {
-            tiledOp->setAttr("mma_kind", mmaKind);
-          }
-        };
-        PostTilingCallback postTilingCb =
-            mmaKind ? PostTilingCallback(mmaCallback) : nullptr;
-
         FailureOr<SmallVector<Value>> loopResults = buildReductionLoop(
             rewriter, loc, target, op, iterDomain, iterTypes, redTileSizes,
             laneOffsets, laneSizes, reductionDims, tileableSet, dpsInitIndices,
             operandToReadonlyIdx, operandToReadwriteIdx, sgReadonlyRefs,
-            sgReadwriteRefs, initValues, params, postTilingCb);
+            sgReadwriteRefs, initValues, params);
         if (failed(loopResults)) {
           return failure();
         }
