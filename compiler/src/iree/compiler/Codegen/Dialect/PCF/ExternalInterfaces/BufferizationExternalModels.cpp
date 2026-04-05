@@ -24,8 +24,8 @@ namespace mlir::iree_compiler::IREE::PCF {
 namespace {
 
 struct GenericOpInterface
-    : bufferization::BufferizableOpInterface::ExternalModel<
-          GenericOpInterface, PCF::GenericOp> {
+    : bufferization::BufferizableOpInterface::ExternalModel<GenericOpInterface,
+                                                            PCF::GenericOp> {
   /// Returns true if the given operand is a readonly init.
   static bool isReadonlyInitOperand(PCF::GenericOp genericOp,
                                     OpOperand &opOperand) {
@@ -51,8 +51,9 @@ struct GenericOpInterface
     return false;
   }
 
-  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
-                               const bufferization::AnalysisState &state) const {
+  bool
+  bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                          const bufferization::AnalysisState &state) const {
     auto genericOp = cast<PCF::GenericOp>(op);
     // Readonly inits are never written.
     if (isReadonlyInitOperand(genericOp, opOperand)) {
@@ -62,8 +63,9 @@ struct GenericOpInterface
     return true;
   }
 
-  bufferization::AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
-                                      const bufferization::AnalysisState &state) const {
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *op, OpOperand &opOperand,
+                    const bufferization::AnalysisState &state) const {
     auto genericOp = cast<PCF::GenericOp>(op);
     // Readonly inits have no tied result.
     OpResult tiedResult = genericOp.getTiedResult(opOperand);
@@ -86,7 +88,8 @@ struct GenericOpInterface
     newReadonlyInits.reserve(genericOp.getReadonlyInits().size());
     for (Value init : genericOp.getReadonlyInits()) {
       if (isa<RankedTensorType>(init.getType())) {
-        FailureOr<Value> newInit = bufferization::getBuffer(rewriter, init, options, state);
+        FailureOr<Value> newInit =
+            bufferization::getBuffer(rewriter, init, options, state);
         if (failed(newInit)) {
           return op->emitOpError("failed to get readonly init buffer");
         }
@@ -101,7 +104,8 @@ struct GenericOpInterface
     newInits.reserve(genericOp.getInits().size());
     for (Value init : genericOp.getInits()) {
       if (isa<RankedTensorType>(init.getType())) {
-        FailureOr<Value> newInit = bufferization::getBuffer(rewriter, init, options, state);
+        FailureOr<Value> newInit =
+            bufferization::getBuffer(rewriter, init, options, state);
         if (failed(newInit)) {
           return op->emitOpError("failed to get init buffer");
         }
@@ -155,7 +159,8 @@ struct GenericOpInterface
   }
 
   FailureOr<bufferization::BufferLikeType>
-  getBufferType(Operation *op, Value value, const bufferization::BufferizationOptions &options,
+  getBufferType(Operation *op, Value value,
+                const bufferization::BufferizationOptions &options,
                 const bufferization::BufferizationState &state,
                 SmallVector<Value> &invocationStack) const {
     auto genericOp = cast<PCF::GenericOp>(op);
@@ -180,7 +185,8 @@ struct GenericOpInterface
       return failure();
     }
     return cast<bufferization::BufferLikeType>(
-        bufferization::getMemRefTypeWithStaticIdentityLayout(resultType, *memSpace));
+        bufferization::getMemRefTypeWithStaticIdentityLayout(resultType,
+                                                             *memSpace));
   }
 };
 
@@ -211,8 +217,9 @@ struct LoopOpInterface
     return false;
   }
 
-  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
-                               const bufferization::AnalysisState &state) const {
+  bool
+  bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                          const bufferization::AnalysisState &state) const {
     auto loopOp = cast<PCF::LoopOp>(op);
     // Readonly inits are never written.
     if (isReadonlyInitOperand(loopOp, opOperand)) {
@@ -222,8 +229,9 @@ struct LoopOpInterface
     return true;
   }
 
-  bufferization::AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
-                                      const bufferization::AnalysisState &state) const {
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *op, OpOperand &opOperand,
+                    const bufferization::AnalysisState &state) const {
     auto loopOp = cast<PCF::LoopOp>(op);
     // Readonly inits have no tied result.
     OpResult tiedResult = loopOp.getTiedResult(opOperand);
@@ -246,7 +254,8 @@ struct LoopOpInterface
     newReadonlyInits.reserve(loopOp.getReadonlyInits().size());
     for (Value init : loopOp.getReadonlyInits()) {
       if (isa<RankedTensorType>(init.getType())) {
-        FailureOr<Value> newInit = bufferization::getBuffer(rewriter, init, options, state);
+        FailureOr<Value> newInit =
+            bufferization::getBuffer(rewriter, init, options, state);
         if (failed(newInit)) {
           return op->emitOpError("failed to get readonly init buffer");
         }
@@ -261,7 +270,8 @@ struct LoopOpInterface
     newInits.reserve(loopOp.getInits().size());
     for (Value init : loopOp.getInits()) {
       if (isa<RankedTensorType>(init.getType())) {
-        FailureOr<Value> newInit = bufferization::getBuffer(rewriter, init, options, state);
+        FailureOr<Value> newInit =
+            bufferization::getBuffer(rewriter, init, options, state);
         if (failed(newInit)) {
           return op->emitOpError("failed to get init buffer");
         }
@@ -310,7 +320,8 @@ struct LoopOpInterface
   }
 
   FailureOr<bufferization::BufferLikeType>
-  getBufferType(Operation *op, Value value, const bufferization::BufferizationOptions &options,
+  getBufferType(Operation *op, Value value,
+                const bufferization::BufferizationOptions &options,
                 const bufferization::BufferizationState &state,
                 SmallVector<Value> &invocationStack) const {
     auto loopOp = cast<PCF::LoopOp>(op);
@@ -335,7 +346,8 @@ struct LoopOpInterface
       return failure();
     }
     return cast<bufferization::BufferLikeType>(
-        bufferization::getMemRefTypeWithStaticIdentityLayout(resultType, *memSpace));
+        bufferization::getMemRefTypeWithStaticIdentityLayout(resultType,
+                                                             *memSpace));
   }
 };
 
@@ -348,14 +360,16 @@ struct WriteSliceOpInterface
     return true;
   }
 
-  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
-                               const bufferization::AnalysisState &state) const {
+  bool
+  bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                          const bufferization::AnalysisState &state) const {
     // The only valid tensor operand is the source which is only read.
     return false;
   }
 
-  bufferization::AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
-                                      const bufferization::AnalysisState &state) const {
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *op, OpOperand &opOperand,
+                    const bufferization::AnalysisState &state) const {
     return {};
   }
 
@@ -365,9 +379,8 @@ struct WriteSliceOpInterface
     auto writeOp = cast<PCF::WriteSliceOp>(op);
 
     if (isa<RankedTensorType>(writeOp.getSourceType())) {
-      FailureOr<Value> newSrc =
-          bufferization::getBuffer(rewriter, writeOp.getSource(), options,
-                                   state);
+      FailureOr<Value> newSrc = bufferization::getBuffer(
+          rewriter, writeOp.getSource(), options, state);
       if (failed(newSrc)) {
         return failure();
       }
@@ -378,8 +391,8 @@ struct WriteSliceOpInterface
 };
 
 struct ToSrefOpInterface
-    : bufferization::BufferizableOpInterface::ExternalModel<
-          ToSrefOpInterface, PCF::ToSrefOp> {
+    : bufferization::BufferizableOpInterface::ExternalModel<ToSrefOpInterface,
+                                                            PCF::ToSrefOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
                               const bufferization::AnalysisState &state) const {
     // Returns true because the tensor input is consumed to create the sref
@@ -390,14 +403,16 @@ struct ToSrefOpInterface
     return true;
   }
 
-  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
-                               const bufferization::AnalysisState &state) const {
+  bool
+  bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                          const bufferization::AnalysisState &state) const {
     // to_sref is a readonly binding — it never writes.
     return false;
   }
 
-  bufferization::AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
-                                      const bufferization::AnalysisState &state) const {
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *op, OpOperand &opOperand,
+                    const bufferization::AnalysisState &state) const {
     // The sref result aliases the input buffer.
     return {{op->getResult(0), bufferization::BufferRelation::Equivalent,
              /*isDefinite=*/true}};
@@ -410,9 +425,8 @@ struct ToSrefOpInterface
 
     // Get the buffer for the tensor input.
     if (isa<RankedTensorType>(toSrefOp.getInput().getType())) {
-      FailureOr<Value> newInput =
-          bufferization::getBuffer(rewriter, toSrefOp.getInput(), options,
-                                   state);
+      FailureOr<Value> newInput = bufferization::getBuffer(
+          rewriter, toSrefOp.getInput(), options, state);
       if (failed(newInput)) {
         return failure();
       }
@@ -470,7 +484,8 @@ struct ReadSliceOpInterface
         rewriter, readOp.getLoc(), resultType, readOp.getSource(),
         readOp.getMixedOffsets(), readOp.getMixedSizes(),
         readOp.getMixedStrides());
-    bufferization::replaceOpWithBufferizedValues(rewriter, op, getMemrefOp.getResult());
+    bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                 getMemrefOp.getResult());
     return success();
   }
 };

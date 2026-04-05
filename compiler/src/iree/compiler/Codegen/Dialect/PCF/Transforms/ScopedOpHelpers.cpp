@@ -82,9 +82,9 @@ LoopOp addReadonlyAndReadwriteArgs<LoopOp>(
   Attribute syncOnReturn = SyncOnReturnAttr::get(context);
   for (Type resultType : newResultTypes) {
     ShapedType shapedType = cast<ShapedType>(resultType);
-    ShapedRefType srefType = ShapedRefType::get(context, shapedType.getShape(),
-                                                shapedType.getElementType(),
-                                                loopOp.getScope(), syncOnReturn);
+    ShapedRefType srefType = ShapedRefType::get(
+        context, shapedType.getShape(), shapedType.getElementType(),
+        loopOp.getScope(), syncOnReturn);
     BlockArgument arg = body->insertArgument(readwriteInsertIdx, srefType, loc);
     newReadwriteRefs.push_back(arg);
     ++readwriteInsertIdx;

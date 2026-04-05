@@ -295,8 +295,8 @@ fuseDistributedProducerImpl(RewriterBase &rewriter, OpTy scopedOp,
     resultInfo.push_back({/*destSref=*/Value()});
 
     // Check feasibility, then call getDistributedImplementation.
-    if (failed(producer.canDistribute(offsets, sizes, operandInfo,
-                                      resultInfo))) {
+    if (failed(
+            producer.canDistribute(offsets, sizes, operandInfo, resultInfo))) {
       return;
     }
     FailureOr<TilingResult> tiledResult = producer.getDistributedImplementation(
