@@ -14,6 +14,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/TilingImplementations/RegisterAll.h"
 #include "iree/compiler/Codegen/Dialect/PCF/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Interfaces/PartitionableLoopsInterface.h"
+#include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtDialect.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -211,6 +212,21 @@ void TileAndDistributeToWorkgroupsUsingPCFPass::runOnOperation() {
   if (failed(loopOp)) {
     tilableOp->emitOpError("failed to tile to PCF loop");
     return signalPassFailure();
+  }
+
+  // Create a workgroup count hint to launch all workgroups along x (matching
+  // the `linearize=true` scope chosen above).
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(*loopOp);
+    SmallVector<OpFoldResult> counts =
+        llvm::to_vector_of<OpFoldResult>(loopOp->getCount());
+    if (failed(createWorkgroupCountHint(rewriter, loopOp->getLoc(), counts,
+                                        /*maxWorkgroupParallelDims=*/1,
+                                        /*reverse=*/false))) {
+      loopOp->emitOpError("failed to create workgroup count hint");
+      return signalPassFailure();
+    }
   }
 
   // Fuse producers greedily.

@@ -635,15 +635,17 @@ public:
     return pipelineAttr.getValue();
   }
 
-  /// Returns true if the given function op has a VectorDistribute lowering
-  /// pipeline and is suitable for the experimental staged pipeline.
-  /// Dispatches with dynamic shapes are excluded because the pre-bufferization
-  /// distribution path does not yet handle dynamic tensor dimensions.
+  /// Returns true if the given function op has a VectorDistribute or
+  /// TileAndFuse lowering pipeline and is suitable for the experimental
+  /// staged pipeline. Dispatches with dynamic shapes are excluded because
+  /// the pre-bufferization distribution path does not yet handle dynamic
+  /// tensor dimensions.
   static bool hasStagedPipeline(Operation *op) {
     std::optional<IREE::GPU::LoweringPipeline> pipeline =
         getStagedPipelineKind(op);
     if (!pipeline ||
-        *pipeline != IREE::GPU::LoweringPipeline::VectorDistribute) {
+        (*pipeline != IREE::GPU::LoweringPipeline::VectorDistribute &&
+         *pipeline != IREE::GPU::LoweringPipeline::TileAndFuse)) {
       return false;
     }
     // Check for dispatches that can't be handled by the staged pipeline.
@@ -676,6 +678,27 @@ public:
     return true;
   }
 
+  /// Returns true if |op| is on the staged VectorDistribute path.
+  static bool hasStagedVectorDistributePipeline(Operation *op) {
+    if (!hasStagedPipeline(op)) {
+      return false;
+    }
+    std::optional<IREE::GPU::LoweringPipeline> pipeline =
+        getStagedPipelineKind(op);
+    return pipeline &&
+           *pipeline == IREE::GPU::LoweringPipeline::VectorDistribute;
+  }
+
+  /// Returns true if |op| is on the staged TileAndFuse path.
+  static bool hasStagedTileAndFusePipeline(Operation *op) {
+    if (!hasStagedPipeline(op)) {
+      return false;
+    }
+    std::optional<IREE::GPU::LoweringPipeline> pipeline =
+        getStagedPipelineKind(op);
+    return pipeline && *pipeline == IREE::GPU::LoweringPipeline::TileAndFuse;
+  }
+
   /// Builds the experimental staged pass pipeline. This splits the
   /// ConfigurationControlledTranslation phase into staged sub-phases with
   /// module-level break points:
@@ -692,24 +715,22 @@ public:
     modulePM.addPass(createLowerExecutableUsingTransformDialectPass());
 
     // Phase 1: func(Workgroup distribution).
-    // For VectorDistribute pipelines, run only workgroup tiling + PCF
-    // conversion. For all other pipelines (including TileAndFuse), run
-    // their full native pipeline via LLVMGPULowerExecutableTargetPass.
+    // Both VectorDistribute and TileAndFuse staged pipelines tile directly
+    // to pcf.loop at workgroup scope. All other pipelines run their full
+    // native pipeline via LLVMGPULowerExecutableTargetPass.
     {
       LLVMGPULowerExecutableTargetPassOptions lowerOpts;
       lowerOpts.forROCDL = true;
 
       MultiPipelineNest nest(modulePM);
 
-      // VectorDistribute: workgroup distribution only.
+      // Staged pipelines: direct PCF workgroup tiling.
       OpPassManager &stagedFuncPM = nest.nestIf(
           [](Operation *op) { return hasStagedPipeline(op); },
           func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
-      stagedFuncPM.addPass(
-          createTileAndDistributeToWorkgroupsWithReordering(false));
+      stagedFuncPM.addPass(createTileAndDistributeToWorkgroupsUsingPCFPass());
       stagedFuncPM.addPass(createConfigTrackingCanonicalizerPass());
       stagedFuncPM.addPass(createCSEPass());
-      stagedFuncPM.addPass(createConvertWorkgroupForallToPCFPass());
 
       // All other pipelines: run their full native pipeline.
       OpPassManager &defaultFuncPM = nest.nestIf(
@@ -729,15 +750,18 @@ public:
     // workgroup and subgroup distribution.
 
     // --- func(Subgroup + lane distribution) ---
-    // Pipeline-specific distribution to subgroup + lane scopes.
-    // Currently supports VectorDistribute only.
+    // Pipeline-specific distribution to subgroup + lane scopes. The two
+    // staged paths represent opposite ends of a spectrum: VectorDistribute
+    // distributes right away (wrap in shared_executor, distribute via the
+    // PCF distribution interface), while TileAndFuse does everything in
+    // one shot (multi-level tiling producing nested pcf.generic directly).
     {
       MultiPipelineNest nest(modulePM);
 
       // VectorDistribute path: wrap workgroup-scoped PCF ops in
-      // shared_executor with thread scope.
+      // shared_executor with thread scope, then distribute.
       OpPassManager &vdFuncPM = nest.nestIf(
-          [](Operation *op) { return hasStagedPipeline(op); },
+          [](Operation *op) { return hasStagedVectorDistributePipeline(op); },
           func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
       vdFuncPM.addPass(createGPUWrapInSharedExecutorPass());
 
@@ -760,6 +784,15 @@ public:
       // via the PCF distribution interface, then lower shared_executor to
       // pcf.generic. Workgroup/subgroup sizes are read from translation_info.
       vdFuncPM.addPass(createGPUDistributeSharedExecutorPass());
+
+      // TileAndFuse path: apply subgroup+lane+reduction tiling in one shot
+      // via multi-level tiling. No shared_executor wrapping.
+      OpPassManager &tfFuncPM = nest.nestIf(
+          [](Operation *op) { return hasStagedTileAndFusePipeline(op); },
+          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
+      tfFuncPM.addPass(createGPUApplyMultiLevelTilingPass());
+      tfFuncPM.addPass(createConfigTrackingCanonicalizerPass());
+      tfFuncPM.addPass(createCSEPass());
 
       nest.commitPass();
     }
