@@ -592,9 +592,9 @@ public:
         });
       }
     }
-    passManager.addPass(createSpecializeExportsPass());
-    buildLLVMGPUCodegenCommonConfigurationPassPipeline(passManager);
+    buildCodegenConfigurationPreProcessingPassPipeline(passManager);
     OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
+    buildLLVMGPUCodegenCommonConfigurationPassPipeline(modulePassManager);
     if (targetOptions.enableTensorUKernels) {
       modulePassManager.addPass(
           IREE::ROCM::createApplyBuiltinPDLPatternsDriverPass());
@@ -654,11 +654,16 @@ public:
     // attribute since dynamic shapes may have been resolved by then.
     auto funcOp = cast<FunctionOpInterface>(op);
     StringRef excludeAttrName = "__iree_exclude_staged_pipeline__";
+    StringRef includeAttrName = "__iree_staged_pipeline__";
+    // Check cached decision from Phase 1. Avoids re-walking shapes
+    // after PCF tiling introduces dynamic shapes from boundary clamping.
     if (funcOp->hasAttr(excludeAttrName)) {
       return false;
     }
-    // Walk for dynamic tensor shapes. If found, mark the function so later
-    // phases also exclude it.
+    if (funcOp->hasAttr(includeAttrName)) {
+      return true;
+    }
+    // First time: walk for dynamic tensor shapes. Cache the result.
     bool hasDynamicShapes = false;
     funcOp->walk([&](Operation *inner) -> WalkResult {
       for (Type type : inner->getResultTypes()) {
@@ -675,6 +680,7 @@ public:
       funcOp->setAttr(excludeAttrName, UnitAttr::get(funcOp->getContext()));
       return false;
     }
+    funcOp->setAttr(includeAttrName, UnitAttr::get(funcOp->getContext()));
     return true;
   }
 
@@ -724,17 +730,40 @@ public:
 
       MultiPipelineNest nest(modulePM);
 
-      // Staged pipelines: direct PCF workgroup tiling.
-      OpPassManager &stagedFuncPM = nest.nestIf(
-          [](Operation *op) { return hasStagedPipeline(op); },
+      // VectorDistribute staged: forall-based workgroup tiling then
+      // convert the outer forall to pcf.loop. This preserves
+      // tensor.extract_slice semantics that the VD pre-bufferize
+      // passes (padding, simplification) need to operate on.
+      OpPassManager &vdStagedFuncPM = nest.nestIf(
+          [](Operation *op) {
+            return hasStagedVectorDistributePipeline(op);
+          },
           func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
-      stagedFuncPM.addPass(createTileAndDistributeToWorkgroupsUsingPCFPass());
-      stagedFuncPM.addPass(createConfigTrackingCanonicalizerPass());
-      stagedFuncPM.addPass(createCSEPass());
+      vdStagedFuncPM.addPass(
+          createTileAndDistributeToWorkgroupsWithReordering(false));
+      vdStagedFuncPM.addPass(createConfigTrackingCanonicalizerPass());
+      vdStagedFuncPM.addPass(createCSEPass());
+      vdStagedFuncPM.addPass(createConvertWorkgroupForallToPCFPass());
 
-      // All other pipelines: run their full native pipeline.
+      // TileAndFuse staged: direct PCF workgroup tiling. Uses
+      // pcf.read_slice/write_slice directly since TaF doesn't go
+      // through VD pre-bufferize passes.
+      OpPassManager &tfStagedFuncPM = nest.nestIf(
+          [](Operation *op) {
+            return hasStagedTileAndFusePipeline(op);
+          },
+          func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
+      tfStagedFuncPM.addPass(createTileAndDistributeToWorkgroupsUsingPCFPass());
+      tfStagedFuncPM.addPass(createConfigTrackingCanonicalizerPass());
+      tfStagedFuncPM.addPass(createCSEPass());
+
+      // All other FUNCTION pipelines: run their full native pipeline.
+      // The condition must also check isa<FunctionOpInterface> to avoid
+      // matching non-function module children (like dispatch_config ops).
       OpPassManager &defaultFuncPM = nest.nestIf(
-          [](Operation *op) { return !hasStagedPipeline(op); },
+          [](Operation *op) {
+            return isa<FunctionOpInterface>(op) && !hasStagedPipeline(op);
+          },
           func::FuncOp::getOperationName(), TypeID::get<func::FuncOp>());
       defaultFuncPM.addPass(createLLVMGPULowerExecutableTargetPass(lowerOpts));
 
@@ -849,9 +878,9 @@ public:
         .addPass(createVerifyWorkgroupDistributionPass)
         .addPass(createRemoveIndexHintsPass);
 
-    // Reconcile workgroup counts.
-    passManager.addPass(createReconcileTranslationInfoPass());
-    passManager.addPass(createResolveWorkgroupCountHintsPass());
+    // Reconcile workgroup counts (ModuleOp-scoped passes).
+    modulePM.addPass(createReconcileTranslationInfoPass());
+    modulePM.addPass(createResolveWorkgroupCountHintsPass());
   }
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
@@ -888,11 +917,16 @@ public:
               .addPass(createRemoveIndexHintsPass);
         }
         {
-          passManager.addPass(createReconcileTranslationInfoPass());
-          passManager.addPass(createResolveWorkgroupCountHintsPass());
+          OpPassManager &modulePM = passManager.nest<ModuleOp>();
+          modulePM.addPass(createReconcileTranslationInfoPass());
+          modulePM.addPass(createResolveWorkgroupCountHintsPass());
         }
       }
     }
+
+    // Post-processing: propagate dispatch_config into export count regions
+    // and erase the dispatch_config ops.
+    buildCodegenTranslationPostProcessingPassPipeline(passManager);
 
     // Phase 2: LLVMTranslation.
     // Covers PCF lowering, linalg-to-loops, buffer optimizations, address
