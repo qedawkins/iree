@@ -924,10 +924,6 @@ public:
       }
     }
 
-    // Post-processing: propagate dispatch_config into export count regions
-    // and erase the dispatch_config ops.
-    buildCodegenTranslationPostProcessingPassPipeline(passManager);
-
     // Phase 2: LLVMTranslation.
     // Covers PCF lowering, linalg-to-loops, buffer optimizations, address
     // computation, and the final ROCDL conversion + kernel annotation.
@@ -945,6 +941,14 @@ public:
       }
       addLowerToLLVMGPUPasses(modulePM, /*forROCDL=*/true, preserveDebugInfo);
     }
+
+    // Post-processing: propagate dispatch_config into export count regions
+    // and erase the dispatch_config ops. Matches upstream ordering where
+    // this runs after buildLLVMGPUCodegenPassPipeline. dispatch_config ops
+    // survive ROCDL conversion (markOpRecursivelyLegal) so their bodies
+    // retain pre-LLVM ops at this point. ROCDLAnnotateKernelForTranslation
+    // (inside addLowerToLLVMGPUPasses) has already read dispatch_config.
+    buildCodegenTranslationPostProcessingPassPipeline(passManager);
 
     LLVM_DEBUG({
       llvm::dbgs() << "Using ROCDL pass pipeline:\n";
