@@ -28,7 +28,8 @@ func.func @test_1d_thread_mapping(%init: tensor<64xf32>) -> tensor<64xf32> {
 //       CHECK:     %[[END_UNCLAMPED:.+]] = arith.addi %[[START]], %[[TILE_SIZE]]
 //       CHECK:     %[[END:.+]] = arith.minui %[[END_UNCLAMPED]]
 //       CHECK:     scf.forall (%[[IV:.+]]) = (%[[START]]) to (%[[END]])
-//       CHECK:       pcf.write_slice %{{.+}} into %[[REF]][%[[IV]]]
+//       CHECK:       %[[SLICE:.+]] = tensor.extract_slice %[[INIT]][%[[IV]]] [1] [1]
+//       CHECK:       pcf.write_slice %[[SLICE]] into %[[REF]][%[[IV]]] [1] [1]
 //       CHECK:     pcf.return
 //       CHECK:   pcf.return
 //       CHECK: return %[[RESULT]]
@@ -57,6 +58,38 @@ func.func @test_2d_thread_mapping(%init: tensor<64x128xf32>) -> tensor<64x128xf3
 //       CHECK:     %[[TOTAL_COUNT:.+]] = arith.muli %[[NUM_SUBGROUPS]], %[[SUBGROUP_SIZE]]
 //       CHECK:     scf.forall (%[[IV:.+]]) =
 //       CHECK:       %[[INDICES:.+]]:2 = affine.delinearize_index %[[IV]] into (64, 128)
-//       CHECK:       pcf.write_slice %{{.+}} into %[[REF]][%[[INDICES]]#0, %[[INDICES]]#1]
+//       CHECK:       %[[SLICE:.+]] = tensor.extract_slice %[[INIT]][%[[INDICES]]#0, %[[INDICES]]#1] [1, 1] [1, 1]
+//       CHECK:       pcf.write_slice %[[SLICE]] into %[[REF]][%[[INDICES]]#0, %[[INDICES]]#1]
+//       CHECK:     pcf.return
+//       CHECK:   pcf.return
+
+// -----
+
+// Permuted mapping: dim0 uses linear_dim_0 and dim1 uses linear_dim_1.
+// The delinearize basis and slice indices must be permuted accordingly.
+
+func.func @test_2d_thread_mapping_permuted(%init: tensor<4x8xf32>) -> tensor<4x8xf32> {
+  %result = scf.forall (%i, %j) in (4, 8) shared_outs(%out = %init) -> tensor<4x8xf32> {
+    %slice = tensor.extract_slice %out[%i, %j] [1, 1] [1, 1] : tensor<4x8xf32> to tensor<1x1xf32>
+    scf.forall.in_parallel {
+      tensor.parallel_insert_slice %slice into %out[%i, %j] [1, 1] [1, 1] : tensor<1x1xf32> into tensor<4x8xf32>
+    }
+  } {mapping = [#gpu.thread<linear_dim_0>, #gpu.thread<linear_dim_1>]}
+  return %result : tensor<4x8xf32>
+}
+
+// CHECK-LABEL: func.func @test_2d_thread_mapping_permuted
+//  CHECK-SAME:   %[[INIT:[A-Za-z0-9_]+]]: tensor<4x8xf32>
+//       CHECK: pcf.generic
+//  CHECK-SAME:   scope(#iree_gpu.subgroup_scope)
+//       CHECK:   execute(%[[REF:.+]] = %[[INIT]])[%[[SUBGROUP_ID:.+]]: index, %[[NUM_SUBGROUPS:.+]]: index]
+//       CHECK:   pcf.generic
+//  CHECK-SAME:     scope(#iree_gpu.lane_scope)
+//       CHECK:     execute[%[[LANE_ID:.+]]: index, %[[SUBGROUP_SIZE:.+]]: index]
+//       CHECK:     %[[LIN_ID:.+]] = affine.linearize_index [%[[SUBGROUP_ID]], %[[LANE_ID]]] by (%[[NUM_SUBGROUPS]], %[[SUBGROUP_SIZE]])
+//       CHECK:     scf.forall (%[[IV:.+]]) =
+//       CHECK:       %[[INDICES:.+]]:2 = affine.delinearize_index %[[IV]] into (8, 4)
+//       CHECK:       %[[SLICE:.+]] = tensor.extract_slice %[[INIT]][%[[INDICES]]#1, %[[INDICES]]#0] [1, 1] [1, 1]
+//       CHECK:       pcf.write_slice %[[SLICE]] into %[[REF]][%[[INDICES]]#1, %[[INDICES]]#0]
 //       CHECK:     pcf.return
 //       CHECK:   pcf.return

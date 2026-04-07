@@ -189,3 +189,174 @@ func.func @vector_multi_mma_with_permutation_of_wrong_size(%lhs: vector<2x3x4xf1
   } : vector<2x3x4xf16>, vector<3x5x4xf16> into vector<2x5x4xf32>
   return %0 : vector<2x5x4xf32>
 }
+
+// -----
+
+func.func @coalesced_gather_dma_source_kind_mismatch_tensor_init(
+    %source: memref<4x32xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  // expected-error @+1 {{source must be tensor when init is tensor}}
+  %0 = iree_gpu.coalesced_gather_dma %source into %dest lane(%lane)
+    : memref<4x32xf32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+  return %0 : tensor<4x32xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_source_kind_mismatch_memref_init(
+    %source: tensor<4x32xf32>, %dest: memref<4x32xf32>, %lane: index) {
+  // expected-error @+1 {{source must be memref when init is memref}}
+  iree_gpu.coalesced_gather_dma %source into %dest lane(%lane)
+    : tensor<4x32xf32>, memref<4x32xf32>, index
+  return
+}
+
+// -----
+
+func.func @coalesced_gather_dma_memref_form_vector_index(
+    %idx0: vector<4xi32>, %source: memref<64x32xf32>, %dest: memref<4x32xf32>, %lane: index) {
+  // expected-error @+1 {{expected memref index operand 0 when init is memref}}
+  iree_gpu.coalesced_gather_dma %source[%idx0] into %dest lane(%lane)
+    : memref<64x32xf32>, vector<4xi32>, memref<4x32xf32>, index
+  return
+}
+
+// -----
+
+func.func @coalesced_gather_dma_too_many_indices(
+    %idx0: vector<4xi32>, %idx1: vector<4xi32>, %idx2: vector<4xi32>,
+    %source: tensor<4x4xf32>, %dest: tensor<4x4xf32>, %lane: index) -> tensor<4x4xf32> {
+  // expected-error @+1 {{number of indices (3) cannot exceed destination rank (2)}}
+  %0 = iree_gpu.coalesced_gather_dma %source[%idx0, %idx1, %idx2] into %dest lane(%lane)
+    : tensor<4x4xf32>, vector<4xi32>, vector<4xi32>, vector<4xi32>, tensor<4x4xf32>, index -> tensor<4x4xf32>
+  return %0 : tensor<4x4xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_indices_exceed_source_rank(
+    %idx0: vector<4xi32>, %idx1: vector<4xi32>,
+    %source: tensor<64xf32>, %dest: tensor<4x8xf32>, %lane: index) -> tensor<4x8xf32> {
+  // expected-error @+1 {{number of indices (2) cannot exceed source rank (1)}}
+  %0 = iree_gpu.coalesced_gather_dma %source[%idx0, %idx1] into %dest lane(%lane)
+    : tensor<64xf32>, vector<4xi32>, vector<4xi32>, tensor<4x8xf32>, index -> tensor<4x8xf32>
+  return %0 : tensor<4x8xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_dynamic_index_shape(
+    %idx0: tensor<?xi32>, %source: tensor<4x32xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  // expected-error @+1 {{expected index 0 to have static shape}}
+  %0 = iree_gpu.coalesced_gather_dma %source[%idx0] into %dest lane(%lane)
+    : tensor<4x32xf32>, tensor<?xi32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+  return %0 : tensor<4x32xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_non_1d_index(
+    %idx0: vector<2x4xi32>, %source: tensor<4x32xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  // expected-error @+1 {{expected index 0 to be a 1-D tensor or vector}}
+  %0 = iree_gpu.coalesced_gather_dma %source[%idx0] into %dest lane(%lane)
+    : tensor<4x32xf32>, vector<2x4xi32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+  return %0 : tensor<4x32xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_non_1d_index_1(
+    %idx0: vector<4xi32>, %idx1: vector<2x4xi32>,
+    %source: tensor<64x32xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  // expected-error @+1 {{expected index 1 to be a 1-D tensor or vector}}
+  %0 = iree_gpu.coalesced_gather_dma %source[%idx0, %idx1] into %dest lane(%lane)
+    : tensor<64x32xf32>, vector<4xi32>, vector<2x4xi32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+  return %0 : tensor<4x32xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_index_length_mismatch(
+    %idx0: vector<4xi32>, %idx1: vector<5xi32>,
+    %source: tensor<64x128xf32>, %dest: tensor<4x128xf32>, %lane: index) -> tensor<4x128xf32> {
+  // expected-error @+1 {{expected all index vectors to have the same length; index 1 has length 5 but expected 4}}
+  %0 = iree_gpu.coalesced_gather_dma %source[%idx0, %idx1] into %dest lane(%lane)
+    : tensor<64x128xf32>, vector<4xi32>, vector<5xi32>, tensor<4x128xf32>, index -> tensor<4x128xf32>
+  return %0 : tensor<4x128xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_batch_size_mismatch(
+    %idx0: vector<5xi32>, %source: tensor<64x128xf32>, %dest: tensor<4x128xf32>, %lane: index) -> tensor<4x128xf32> {
+  // expected-error @+1 {{expected batch size (length of index vectors: 5) to match first destination dimension (4)}}
+  %0 = iree_gpu.coalesced_gather_dma %source[%idx0] into %dest lane(%lane)
+    : tensor<64x128xf32>, vector<5xi32>, tensor<4x128xf32>, index -> tensor<4x128xf32>
+  return %0 : tensor<4x128xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_unindexed_dim_mismatch(
+    %source: tensor<4x16xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  // expected-error @+1 {{expected unindexed dimension 1 to have same length in source (16) and destination (32)}}
+  %0 = iree_gpu.coalesced_gather_dma %source into %dest lane(%lane)
+    : tensor<4x16xf32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+  return %0 : tensor<4x32xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_source_rank_too_small(
+    %source: tensor<4xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  // expected-error @+1 {{expected source to have at least 2 dimensions when destination has rank 2}}
+  %0 = iree_gpu.coalesced_gather_dma %source into %dest lane(%lane)
+    : tensor<4xf32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+  return %0 : tensor<4x32xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_in_bounds_size_mismatch(
+    %source: tensor<4x32xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  // expected-error @+1 {{in_bounds array size (1) must match init rank (2)}}
+  %0 = iree_gpu.coalesced_gather_dma %source into %dest lane(%lane)
+    in_bounds [true]
+    : tensor<4x32xf32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+  return %0 : tensor<4x32xf32>
+}
+
+// -----
+
+func.func @coalesced_gather_dma_in_bounds_size_mismatch_precedes_dim_check(
+    %source: tensor<4x16xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  // expected-error @+1 {{in_bounds array size (1) must match init rank (2)}}
+  %0 = iree_gpu.coalesced_gather_dma %source into %dest lane(%lane)
+    in_bounds [true]
+    : tensor<4x16xf32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+  return %0 : tensor<4x32xf32>
+}
+
+// -----
+
+func.func @dma_copy_source_not_sref(
+    %source: tensor<4x4xf16>, %dest: !pcf.sref<4x4xf16, #pcf.sequential>) {
+  // expected-error @+1 {{source and dest must be pcf.sref types}}
+  iree_gpu.dma_copy %source[0, 0] [4, 4] [1, 1]
+                    to %dest[0, 0] [4, 4] [1, 1]
+                    : tensor<4x4xf16>
+                    -> !pcf.sref<4x4xf16, #pcf.sequential>
+  return
+}
+
+// -----
+
+func.func @dma_copy_element_type_mismatch(
+    %source: !pcf.sref<4x4xf16, #pcf.test_scope>,
+    %dest: !pcf.sref<4x4xf32, #pcf.sequential>) {
+  // expected-error @+1 {{source element type 'f16' does not match dest element type 'f32'}}
+  iree_gpu.dma_copy %source[0, 0] [4, 4] [1, 1]
+                    to %dest[0, 0] [4, 4] [1, 1]
+                    : !pcf.sref<4x4xf16, #pcf.test_scope>
+                    -> !pcf.sref<4x4xf32, #pcf.sequential>
+  return
+}

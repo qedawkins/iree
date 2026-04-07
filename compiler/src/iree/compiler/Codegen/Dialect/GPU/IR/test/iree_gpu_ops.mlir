@@ -171,6 +171,24 @@ func.func @coalesced_gather_dma_copy(%source: tensor<32x128xf32>, %dest: tensor<
 
 // -----
 
+func.func @coalesced_gather_dma_in_bounds_oob_allowed(%source: tensor<4x16xf32>, %dest: tensor<4x32xf32>, %lane: index) -> tensor<4x32xf32> {
+  %c1 = arith.constant 1 : index
+  %result = scf.forall (%i) in (%c1) shared_outs(%out = %dest) -> (tensor<4x32xf32>) {
+    scf.forall.in_parallel {
+      iree_gpu.coalesced_gather_dma %source into %out lane(%lane) in_bounds [true, false]
+        : tensor<4x16xf32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+    }
+  }
+  return %result : tensor<4x32xf32>
+}
+
+// CHECK-LABEL: func @coalesced_gather_dma_in_bounds_oob_allowed
+//       CHECK:   scf.forall
+//       CHECK:     scf.forall.in_parallel
+//       CHECK:       iree_gpu.coalesced_gather_dma %{{.+}} into %{{.+}} lane(%{{.+}}) in_bounds [true, false] : tensor<4x16xf32>, tensor<4x32xf32>, index -> tensor<4x32xf32>
+
+// -----
+
 func.func @coalesced_gather_dma_copy_memref(%source: memref<1x32xf32, strided<[128, 1], offset: ?>>, %dest: memref<1x32xf32, strided<[128, 1], offset: ?>, #gpu.address_space<workgroup>>, %lane: index) {
   iree_gpu.coalesced_gather_dma %source into %dest lane(%lane)
     : memref<1x32xf32, strided<[128, 1], offset: ?>>, memref<1x32xf32, strided<[128, 1], offset: ?>, #gpu.address_space<workgroup>>, index
@@ -197,3 +215,21 @@ func.func @coalesced_gather_dma_tensor_indices(%idx0: tensor<64xi32>, %source: t
 //       CHECK:   scf.forall
 //       CHECK:     scf.forall.in_parallel
 //       CHECK:       iree_gpu.coalesced_gather_dma %{{.+}}[%{{.+}}] into %{{.+}} lane(%{{.+}}) : tensor<4096xf32>, tensor<64xi32>, tensor<64xf32>, index -> tensor<64xf32>
+
+// -----
+
+func.func @dma_copy_basic(
+    %source: !pcf.sref<128x256xf16, #pcf.test_scope>,
+    %dest: !pcf.sref<128x256xf16, #pcf.sequential>,
+    %off0: index, %off1: index, %sz0: index, %sz1: index) {
+  iree_gpu.dma_copy %source[%off0, %off1] [%sz0, %sz1] [1, 1]
+                    to %dest[0, 0] [%sz0, %sz1] [1, 1]
+                    : !pcf.sref<128x256xf16, #pcf.test_scope>
+                    -> !pcf.sref<128x256xf16, #pcf.sequential>
+  return
+}
+
+// CHECK-LABEL: func @dma_copy_basic
+//       CHECK:   iree_gpu.dma_copy %[[SRC:[A-Za-z0-9_]+]] [%[[OFF0:[A-Za-z0-9_]+]], %[[OFF1:[A-Za-z0-9_]+]]] [%[[SZ0:[A-Za-z0-9_]+]], %[[SZ1:[A-Za-z0-9_]+]]] [1, 1]
+//  CHECK-SAME:   to %[[DST:[A-Za-z0-9_]+]] [0, 0] [%[[SZ0]], %[[SZ1]]] [1, 1]
+//  CHECK-SAME:   : !pcf.sref<128x256xf16, #pcf.test_scope> -> !pcf.sref<128x256xf16, #pcf.sequential>

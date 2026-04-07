@@ -279,6 +279,21 @@ LogicalResult CoalescedGatherDMAOp::verify() {
 
   OperandRange indices = getIndices();
 
+  // Index container type follows init semantics:
+  // - Tensor form: tensor/vector index operands.
+  // - Memref form: memref index operands.
+  for (auto [i, indexVal] : llvm::enumerate(indices)) {
+    Type indexTy = indexVal.getType();
+    if (hasTensor && !isa<RankedTensorType, VectorType>(indexTy)) {
+      return emitOpError("expected tensor/vector index operand ")
+             << i << " when init is tensor";
+    }
+    if (hasMemRef && !isa<MemRefType>(indexTy)) {
+      return emitOpError("expected memref index operand ")
+             << i << " when init is memref";
+    }
+  }
+
   if (indices.size() > initShape.size()) {
     return emitOpError("number of indices (")
            << indices.size() << ") cannot exceed destination rank ("
@@ -338,6 +353,14 @@ LogicalResult CoalescedGatherDMAOp::verify() {
   // Verify the contiguous (non-indexed) dimensions match between source and
   // dest, unless in_bounds allows OOB reads for that dimension.
   std::optional<ArrayAttr> inBoundsAttr = getInBounds();
+  if (inBoundsAttr) {
+    int64_t initRank = initShapedType.getRank();
+    if (static_cast<int64_t>(inBoundsAttr->size()) != initRank) {
+      return emitOpError("in_bounds array size (")
+             << inBoundsAttr->size() << ") must match init rank (" << initRank
+             << ")";
+    }
+  }
   for (auto [dim, size] : llvm::enumerate(initShape)) {
     if (dim >= sourceShape.size()) {
       return emitOpError("expected source to have at least ")
@@ -370,16 +393,6 @@ LogicalResult CoalescedGatherDMAOp::verify() {
       return emitOpError("expected unindexed dimension ")
              << dim << " to have same length in source (" << sourceDim
              << ") and destination (" << size << ')';
-    }
-  }
-
-  // Validate in_bounds attribute if present.
-  if (std::optional<ArrayAttr> inBoundsAttr = getInBounds()) {
-    int64_t initRank = initShapedType.getRank();
-    if (static_cast<int64_t>(inBoundsAttr->size()) != initRank) {
-      return emitOpError("in_bounds array size (")
-             << inBoundsAttr->size() << ") must match init rank (" << initRank
-             << ")";
     }
   }
 
