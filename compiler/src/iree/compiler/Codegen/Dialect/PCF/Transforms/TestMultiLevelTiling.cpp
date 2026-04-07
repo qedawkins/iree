@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
 namespace mlir::iree_compiler::IREE::PCF {
@@ -22,6 +23,48 @@ namespace mlir::iree_compiler::IREE::PCF {
 
 namespace {
 
+static constexpr StringLiteral kLoweringConfigAttrName = "lowering_config";
+static constexpr StringLiteral kSubgroupTilesKey = "subgroup";
+static constexpr StringLiteral kLaneTilesKey = "lane";
+static constexpr StringLiteral kReductionTilesKey = "reduction";
+
+static FailureOr<SmallVector<OpFoldResult>>
+parseTileSizes(IRRewriter &rewriter, Operation *op, DictionaryAttr config,
+               StringRef key, int64_t rank) {
+  SmallVector<OpFoldResult> parsedTiles(rank, rewriter.getIndexAttr(0));
+  Attribute levelAttr = config.get(key);
+  if (!levelAttr) {
+    return parsedTiles;
+  }
+
+  SmallVector<int64_t> rawTiles;
+  if (auto denseArray = dyn_cast<DenseI64ArrayAttr>(levelAttr)) {
+    rawTiles.assign(denseArray.asArrayRef().begin(),
+                    denseArray.asArrayRef().end());
+  } else if (auto arrayAttr = dyn_cast<ArrayAttr>(levelAttr)) {
+    rawTiles.reserve(arrayAttr.size());
+    for (Attribute attr : arrayAttr) {
+      auto intAttr = dyn_cast<IntegerAttr>(attr);
+      if (!intAttr) {
+        op->emitOpError() << "'" << kLoweringConfigAttrName << "." << key
+                          << "' expects integer elements";
+        return failure();
+      }
+      rawTiles.push_back(intAttr.getInt());
+    }
+  } else {
+    op->emitOpError() << "'" << kLoweringConfigAttrName << "." << key
+                      << "' expects an integer array";
+    return failure();
+  }
+
+  for (int64_t i = 0, e = std::min<int64_t>(rank, rawTiles.size()); i < e;
+       ++i) {
+    parsedTiles[i] = rewriter.getIndexAttr(rawTiles[i]);
+  }
+  return parsedTiles;
+}
+
 struct TestMultiLevelTilingPass final
     : impl::TestMultiLevelTilingPassBase<TestMultiLevelTilingPass> {
   using TestMultiLevelTilingPassBase::TestMultiLevelTilingPassBase;
@@ -29,41 +72,52 @@ struct TestMultiLevelTilingPass final
     attachAllDistributedTilingModels(&getContext());
 
     IRRewriter rewriter(&getContext());
-
-    // Build tile size OFRs from options.
-    SmallVector<OpFoldResult> sgTiles =
-        llvm::map_to_vector(subgroupTileSizes, [&](int64_t s) -> OpFoldResult {
-          return rewriter.getIndexAttr(s);
-        });
-    SmallVector<OpFoldResult> laneTiles =
-        llvm::map_to_vector(laneTileSizes, [&](int64_t s) -> OpFoldResult {
-          return rewriter.getIndexAttr(s);
-        });
-    SmallVector<OpFoldResult> redTiles =
-        llvm::map_to_vector(reductionTileSizes, [&](int64_t s) -> OpFoldResult {
-          return rewriter.getIndexAttr(s);
-        });
-
-    // Use sequential scopes for testing.
-    ScopeAttrInterface sgScope = PCF::SequentialAttr::get(&getContext());
-    ScopeAttrInterface laneScope = PCF::SequentialAttr::get(&getContext());
-
-    MultiLevelTilingParams params;
-    params.subgroup.scope = sgScope;
-    params.subgroup.tileSizes = sgTiles;
-    params.lane.scope = laneScope;
-    params.lane.tileSizes = laneTiles;
-    params.reductionTileSizes = redTiles;
-
-    // Walk and tile all PCFTilingOpInterface ops.
+    SmallVector<PCFTilingOpInterface> targets;
     getOperation()->walk([&](Operation *op) {
       auto tilingOp = dyn_cast<PCFTilingOpInterface>(op);
       if (!tilingOp) {
         return;
       }
-      rewriter.setInsertionPoint(op);
-      (void)applyMultiLevelTiling(rewriter, tilingOp, params);
+      if (op->hasAttr(kLoweringConfigAttrName)) {
+        targets.push_back(tilingOp);
+      }
     });
+
+    for (PCFTilingOpInterface target : targets) {
+      Operation *op = target.getOperation();
+      auto config = dyn_cast_or_null<DictionaryAttr>(
+          op->getAttr(kLoweringConfigAttrName));
+      if (!config) {
+        op->emitOpError() << "'" << kLoweringConfigAttrName
+                          << "' must be a DictionaryAttr in this test pass";
+        return signalPassFailure();
+      }
+
+      int64_t rank = cast<TilingInterface>(op).getLoopIteratorTypes().size();
+      FailureOr<SmallVector<OpFoldResult>> subgroupTiles =
+          parseTileSizes(rewriter, op, config, kSubgroupTilesKey, rank);
+      FailureOr<SmallVector<OpFoldResult>> laneTiles =
+          parseTileSizes(rewriter, op, config, kLaneTilesKey, rank);
+      FailureOr<SmallVector<OpFoldResult>> reductionTiles =
+          parseTileSizes(rewriter, op, config, kReductionTilesKey, rank);
+      if (failed(subgroupTiles) || failed(laneTiles) ||
+          failed(reductionTiles)) {
+        return signalPassFailure();
+      }
+
+      MultiLevelTilingParams params;
+      params.subgroup.scope = PCF::SequentialAttr::get(&getContext());
+      params.subgroup.tileSizes = std::move(*subgroupTiles);
+      params.lane.scope = PCF::SequentialAttr::get(&getContext());
+      params.lane.tileSizes = std::move(*laneTiles);
+      params.reductionTileSizes = std::move(*reductionTiles);
+
+      rewriter.setInsertionPoint(op);
+      if (failed(applyMultiLevelTiling(rewriter, target, params))) {
+        op->emitOpError("failed to apply test multi-level tiling");
+        return signalPassFailure();
+      }
+    }
   }
 };
 
