@@ -52,9 +52,8 @@ struct MultiLevelTilingParams {
   /// use DerivedThreadConfig.
   SmallVector<Attribute> promotionTypes;
   /// If set, the MMA intrinsic descriptor (InnerTileDescAttrInterface) is
-  /// placed on tiled ops as a verified lowering_config attribute. A
-  /// downstream pass (e.g., GPUPackToIntrinsics) then packs and converts
-  /// the tiled op to iree_codegen.inner_tiled using this descriptor.
+  /// used by applyMultiLevelTiling's MMA path to pack contraction-like tiled
+  /// ops, convert them to iree_codegen.inner_tiled, and distribute them.
   Attribute mmaKind;
 };
 

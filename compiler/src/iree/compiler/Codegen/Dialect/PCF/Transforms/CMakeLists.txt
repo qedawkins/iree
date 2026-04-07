@@ -41,7 +41,6 @@ iree_cc_library(
     "FusePCFWrites.cpp"
     "FuseProducers.cpp"
     "LowerStructuralPCF.cpp"
-    "MultiLevelTiling.cpp"
     "Passes.cpp"
     "ResolveTokens.cpp"
     "ScopedOpHelpers.cpp"
@@ -79,8 +78,7 @@ iree_cc_library(
     MLIRTransformUtils
     MLIRTransforms
     MLIRVectorDialect
-    iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
-    iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
+    iree::compiler::Codegen::Common::GPU::PCFMultiLevelTiling
     iree::compiler::Codegen::Dialect::PCF::IR
     iree::compiler::Codegen::Dialect::PCF::TilingImplementations
     iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect

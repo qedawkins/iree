@@ -42,6 +42,28 @@ iree_cc_library(
 
 iree_cc_library(
   NAME
+    PCFMultiLevelTiling
+  SRCS
+    "PCFMultiLevelTiling.cpp"
+  DEPS
+    LLVMSupport
+    MLIRAffineDialect
+    MLIRArithDialect
+    MLIRArithUtils
+    MLIRDestinationStyleOpInterface
+    MLIRIR
+    MLIRLinalgDialect
+    MLIRSCFDialect
+    MLIRSupport
+    MLIRTilingInterface
+    iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
+    iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
+    iree::compiler::Codegen::Dialect::PCF::IR
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
     CommonGPUPasses
   HDRS
     "GPUPCFDistribution.h"
@@ -105,6 +127,7 @@ iree_cc_library(
   DEPS
     ::PassHeaders
     ::PassesIncGen
+    ::PCFMultiLevelTiling
     LLVMSupport
     MLIRAMDGPUDialect
     MLIRAMDGPUUtils
