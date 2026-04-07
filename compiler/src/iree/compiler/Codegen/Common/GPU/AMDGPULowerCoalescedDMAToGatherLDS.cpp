@@ -152,15 +152,16 @@ computeTransferSegments(int64_t totalElements, int64_t elementBits,
 ///
 /// Index computation rules for each dimension:
 ///
-/// | Condition        | dstIdx       | srcIdx                              |
-/// |------------------|--------------|-------------------------------------|
-/// | Gather dimension | dstDimOffset | load(indices[dim][srcDimOffset])    |
-/// | Non-gather       | dstDimOffset | srcDimOffset                        |
+/// | Condition        | dstIdx       | srcIdx                                |
+/// |------------------|--------------|---------------------------------------|
+/// | Gather dimension | dstDimOffset | load(indices[dim][batchOffset])       |
+/// | Non-gather       | dstDimOffset | srcDimOffset                          |
 ///
 /// Where:
 ///   - srcDimOffset: position with lane offset (divergent per lane)
 ///   - dstDimOffset: position without lane offset (uniform across subgroup)
-///   - indices[dim]: index memref mapping dest positions to source positions
+///   - batchOffset: first destination dimension offset (uniform)
+///   - indices[dim]: index memref mapping batch positions to source positions
 static std::pair<SmallVector<Value>, SmallVector<Value>>
 generateGatherIndices(OpBuilder &rewriter, Location loc,
                       ValueRange srcDimOffsets, ValueRange dstDimOffsets,
@@ -168,6 +169,12 @@ generateGatherIndices(OpBuilder &rewriter, Location loc,
   SmallVector<Value> srcIndices;
   SmallVector<Value> dstIndices;
   size_t numIndexDims = indices.size();
+  Value batchOffset;
+  if (numIndexDims > 0) {
+    assert(!dstDimOffsets.empty() &&
+           "expected non-empty destination offsets with gather indices");
+    batchOffset = dstDimOffsets.front();
+  }
 
   for (auto [dim, srcDimOffset, dstDimOffset] :
        llvm::enumerate(srcDimOffsets, dstDimOffsets)) {
@@ -178,9 +185,13 @@ generateGatherIndices(OpBuilder &rewriter, Location loc,
     Value srcIdx;
     if (dim < numIndexDims) {
       // Gather dimension: load the source index from the index memref.
-      // Use srcDimOffset (with lane offset) to look up the index.
+      // Use batchOffset so all indexed dimensions share the same batch domain.
       srcIdx = memref::LoadOp::create(rewriter, loc, indices[dim],
-                                      ValueRange{srcDimOffset});
+                                      ValueRange{batchOffset});
+      if (!srcIdx.getType().isIndex()) {
+        srcIdx = arith::IndexCastOp::create(rewriter, loc,
+                                            rewriter.getIndexType(), srcIdx);
+      }
     } else {
       // Non-gather dimension: use srcDimOffset directly (with lane offset).
       srcIdx = srcDimOffset;

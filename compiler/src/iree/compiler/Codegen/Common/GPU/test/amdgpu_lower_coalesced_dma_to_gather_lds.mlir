@@ -363,8 +363,8 @@ func.func @lower_coalesced_copy_dma_wide_forall_2d(
 #translation_32 = #iree_codegen.translation_info<pipeline = #iree_gpu.pipeline<TileAndFuse> workgroup_size = [32, 1, 1] subgroup_size = 32>
 
 // Test gather 2D with indices.
-// Source indices use srcDimOffset (with lane offset) for index lookup.
-// Destination indices use dstDimOffset (uniform, no lane offset).
+// Gather indices use the batch offset (first destination dimension), so all
+// indexed dimensions share the same per-row lookup domain.
 // CHECK-LABEL: func.func @lower_coalesced_gather_dma_with_indices
 // CHECK-SAME:    %[[SRC:[a-zA-Z0-9]+]]: memref<1024x128xf32, #amdgpu.address_space<fat_raw_buffer>>
 // CHECK-SAME:    %[[IDX:[a-zA-Z0-9]+]]: memref<2xindex>
@@ -382,12 +382,12 @@ func.func @lower_coalesced_gather_dma_with_indices(
     // CHECK: %[[C4:[a-zA-Z0-9_]+]] = arith.constant 4
     // CHECK: %[[LANE_OFFSET:[a-zA-Z0-9_]+]] = arith.muli %[[LANE_ID]], %[[C4]]
     //
-    // Transfer 1: load row_indices using srcDimOffset (with lane offset)
+    // Transfer 1: load row_indices using batch offset (dstDimOffset#0)
     // CHECK: %[[C0:.+]] = arith.constant 0 : index
     // CHECK: %[[SRC_LIN0:.+]] = arith.addi %[[C0]], %[[LANE_OFFSET]]
     // CHECK: %[[SRC_DELIN0:.+]]:2 = affine.delinearize_index %[[SRC_LIN0]] into (2, 128)
     // CHECK: %[[DST_DELIN0:.+]]:2 = affine.delinearize_index %[[C0]] into (2, 128)
-    // CHECK: %[[LOADED_ROW0:.+]] = memref.load %[[IDX]][%[[SRC_DELIN0]]#0]
+    // CHECK: %[[LOADED_ROW0:.+]] = memref.load %[[IDX]][%[[DST_DELIN0]]#0]
     // CHECK: amdgpu.gather_to_lds %[[SRC]][%[[LOADED_ROW0]], %[[SRC_DELIN0]]#1], %[[DST]][%[[DST_DELIN0]]#0, %[[DST_DELIN0]]#1] : vector<4xf32>
     //
     // Transfer 2: linearOffset = 128
@@ -395,10 +395,41 @@ func.func @lower_coalesced_gather_dma_with_indices(
     // CHECK: %[[SRC_LIN128:.+]] = arith.addi %[[C128]], %[[LANE_OFFSET]]
     // CHECK: %[[SRC_DELIN128:.+]]:2 = affine.delinearize_index %[[SRC_LIN128]] into (2, 128)
     // CHECK: %[[DST_DELIN128:.+]]:2 = affine.delinearize_index %[[C128]] into (2, 128)
-    // CHECK: %[[LOADED_ROW1:.+]] = memref.load %[[IDX]][%[[SRC_DELIN128]]#0]
+    // CHECK: %[[LOADED_ROW1:.+]] = memref.load %[[IDX]][%[[DST_DELIN128]]#0]
     // CHECK: amdgpu.gather_to_lds %[[SRC]][%[[LOADED_ROW1]], %[[SRC_DELIN128]]#1], %[[DST]][%[[DST_DELIN128]]#0, %[[DST_DELIN128]]#1] : vector<4xf32>
     // CHECK-NOT: iree_gpu.coalesced_gather_dma
     iree_gpu.coalesced_gather_dma %source[%row_indices] into %dest lane(%arg6) : memref<1024x128xf32, #amdgpu.address_space<fat_raw_buffer>>, memref<2xindex>, memref<2x128xf32, #gpu.address_space<workgroup>>, index
+  } {mapping = [#gpu.thread<linear_dim_0>]}
+  return
+}
+
+// CHECK-LABEL: func.func @lower_coalesced_gather_dma_with_i32_indices
+// CHECK-SAME:    %[[SRC:[a-zA-Z0-9]+]]: memref<1024x128xf32, #amdgpu.address_space<fat_raw_buffer>>
+// CHECK-SAME:    %[[IDX:[a-zA-Z0-9]+]]: memref<1xi32>
+// CHECK-SAME:    %[[DST:[a-zA-Z0-9]+]]: memref<1x128xf32, #gpu.address_space<workgroup>>
+func.func @lower_coalesced_gather_dma_with_i32_indices(
+    %source: memref<1024x128xf32, #amdgpu.address_space<fat_raw_buffer>>,
+    %row_indices: memref<1xi32>,
+    %dest: memref<1x128xf32, #gpu.address_space<workgroup>>)
+  attributes {
+    hal.executable.target = #executable_target_rocm_hsaco_fb,
+    translation_info = #translation_32} {
+  // CHECK: scf.forall (%[[LANE_ID:[a-zA-Z0-9]+]]) in (32)
+  scf.forall (%arg6) in (32) {
+    // CHECK: %[[C4:[a-zA-Z0-9_]+]] = arith.constant 4
+    // CHECK: %[[LANE_OFFSET:[a-zA-Z0-9_]+]] = arith.muli %[[LANE_ID]], %[[C4]]
+    // CHECK: %[[C0:.+]] = arith.constant 0 : index
+    // CHECK: %[[SRC_LIN0:.+]] = arith.addi %[[C0]], %[[LANE_OFFSET]]
+    // CHECK: %[[SRC_DELIN0:.+]]:2 = affine.delinearize_index %[[SRC_LIN0]] into (1, 128)
+    // CHECK: %[[DST_DELIN0:.+]]:2 = affine.delinearize_index %[[C0]] into (1, 128)
+    // CHECK: %[[LOADED_I32:.+]] = memref.load %[[IDX]][%[[DST_DELIN0]]#0] : memref<1xi32>
+    // CHECK: %[[LOADED_INDEX:.+]] = arith.index_cast %[[LOADED_I32]] : i32 to index
+    // CHECK: amdgpu.gather_to_lds %[[SRC]][%[[LOADED_INDEX]], %[[SRC_DELIN0]]#1], %[[DST]][%[[DST_DELIN0]]#0, %[[DST_DELIN0]]#1] : vector<4xf32>
+    // CHECK-NOT: iree_gpu.coalesced_gather_dma
+    iree_gpu.coalesced_gather_dma %source[%row_indices] into %dest lane(%arg6) :
+      memref<1024x128xf32, #amdgpu.address_space<fat_raw_buffer>>,
+      memref<1xi32>,
+      memref<1x128xf32, #gpu.address_space<workgroup>>, index
   } {mapping = [#gpu.thread<linear_dim_0>]}
   return
 }
@@ -444,7 +475,7 @@ func.func @gather_iterates_over_dest_shape_not_source(
     // CHECK: %[[SRC_LIN0:.+]] = arith.addi %[[C0]], %[[LANE_OFFSET]]
     // CHECK: %[[SRC_DELIN0:.+]]:2 = affine.delinearize_index %[[SRC_LIN0]] into (3, 128)
     // CHECK: %[[DST_DELIN0:.+]]:2 = affine.delinearize_index %[[C0]] into (3, 128)
-    // CHECK: %[[LOADED_ROW0:.+]] = memref.load %[[IDX]][%[[SRC_DELIN0]]#0]
+    // CHECK: %[[LOADED_ROW0:.+]] = memref.load %[[IDX]][%[[DST_DELIN0]]#0]
     // CHECK: amdgpu.gather_to_lds %[[SRC]][%[[LOADED_ROW0]], %[[SRC_DELIN0]]#1], %[[DST]][%[[DST_DELIN0]]#0, %[[DST_DELIN0]]#1] : vector<4xf32>
     //
     // Transfer 2: linearOffset = 128
@@ -452,7 +483,7 @@ func.func @gather_iterates_over_dest_shape_not_source(
     // CHECK: %[[SRC_LIN128:.+]] = arith.addi %[[C128]], %[[LANE_OFFSET]]
     // CHECK: %[[SRC_DELIN128:.+]]:2 = affine.delinearize_index %[[SRC_LIN128]] into (3, 128)
     // CHECK: %[[DST_DELIN128:.+]]:2 = affine.delinearize_index %[[C128]] into (3, 128)
-    // CHECK: %[[LOADED_ROW1:.+]] = memref.load %[[IDX]][%[[SRC_DELIN128]]#0]
+    // CHECK: %[[LOADED_ROW1:.+]] = memref.load %[[IDX]][%[[DST_DELIN128]]#0]
     // CHECK: amdgpu.gather_to_lds %[[SRC]][%[[LOADED_ROW1]], %[[SRC_DELIN128]]#1], %[[DST]][%[[DST_DELIN128]]#0, %[[DST_DELIN128]]#1] : vector<4xf32>
     //
     // Transfer 3: linearOffset = 256
@@ -460,7 +491,7 @@ func.func @gather_iterates_over_dest_shape_not_source(
     // CHECK: %[[SRC_LIN256:.+]] = arith.addi %[[C256]], %[[LANE_OFFSET]]
     // CHECK: %[[SRC_DELIN256:.+]]:2 = affine.delinearize_index %[[SRC_LIN256]] into (3, 128)
     // CHECK: %[[DST_DELIN256:.+]]:2 = affine.delinearize_index %[[C256]] into (3, 128)
-    // CHECK: %[[LOADED_ROW2:.+]] = memref.load %[[IDX]][%[[SRC_DELIN256]]#0]
+    // CHECK: %[[LOADED_ROW2:.+]] = memref.load %[[IDX]][%[[DST_DELIN256]]#0]
     // CHECK: amdgpu.gather_to_lds %[[SRC]][%[[LOADED_ROW2]], %[[SRC_DELIN256]]#1], %[[DST]][%[[DST_DELIN256]]#0, %[[DST_DELIN256]]#1] : vector<4xf32>
     // CHECK-NOT: amdgpu.gather_to_lds
     // CHECK-NOT: iree_gpu.coalesced_gather_dma
@@ -919,7 +950,7 @@ func.func @lower_3d_partial_contiguous_mixed_dma(
 // For a 1D gather from source[1024] to dest[256] with 32 lanes:
 //   - 32 lanes * 4 elements/lane = 128 elements per transfer
 //   - 256 / 128 = 2 transfers needed
-//   - Each lane loads indices[srcDimOffset] (with lane offset) for source lookup
+//   - Each lane loads indices[dstDimOffset] from the shared batch domain
 //   - Dest uses uniform offset (dstDimOffset, no lane offset)
 //
 // CHECK-LABEL: func.func @lower_coalesced_gather_dma_innermost_1d
@@ -935,12 +966,12 @@ func.func @lower_coalesced_gather_dma_innermost_1d(
     // CHECK: %[[C4:[a-zA-Z0-9_]+]] = arith.constant 4
     // CHECK: %[[LANE_OFFSET:[a-zA-Z0-9_]+]] = arith.muli %[[LANE_ID]], %[[C4]]
     //
-    // Transfer 1: src has lane offset for index lookup, dst is uniform
+    // Transfer 1: source gather loads from batch offset, dst is uniform
     // CHECK: %[[C0:.+]] = arith.constant 0 : index
     // CHECK: %[[SRC_LIN0:.+]] = arith.addi %[[C0]], %[[LANE_OFFSET]]
     // CHECK: %[[SRC_DELIN0:.+]] = affine.delinearize_index %[[SRC_LIN0]] into (256)
     // CHECK: %[[DST_DELIN0:.+]] = affine.delinearize_index %[[C0]] into (256)
-    // CHECK: %[[LOADED0:.+]] = memref.load %{{.+}}[%[[SRC_DELIN0]]]
+    // CHECK: %[[LOADED0:.+]] = memref.load %{{.+}}[%[[DST_DELIN0]]]
     // CHECK: amdgpu.gather_to_lds %{{.+}}[%[[LOADED0]]], %{{.+}}[%[[DST_DELIN0]]]
     //
     // Transfer 2: linearOffset = 128
@@ -948,7 +979,7 @@ func.func @lower_coalesced_gather_dma_innermost_1d(
     // CHECK: %[[SRC_LIN128:.+]] = arith.addi %[[C128]], %[[LANE_OFFSET]]
     // CHECK: %[[SRC_DELIN128:.+]] = affine.delinearize_index %[[SRC_LIN128]] into (256)
     // CHECK: %[[DST_DELIN128:.+]] = affine.delinearize_index %[[C128]] into (256)
-    // CHECK: %[[LOADED128:.+]] = memref.load %{{.+}}[%[[SRC_DELIN128]]]
+    // CHECK: %[[LOADED128:.+]] = memref.load %{{.+}}[%[[DST_DELIN128]]]
     // CHECK: amdgpu.gather_to_lds %{{.+}}[%[[LOADED128]]], %{{.+}}[%[[DST_DELIN128]]]
     //
     // CHECK-NOT: amdgpu.gather_to_lds
