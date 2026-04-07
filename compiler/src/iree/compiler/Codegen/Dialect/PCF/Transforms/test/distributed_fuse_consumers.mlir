@@ -71,15 +71,71 @@ func.func @fuse_elementwise_consumer(%input: tensor<16x32xf32>,
 // CHECK-LABEL: @fuse_elementwise_consumer
 //  CHECK-SAME: (%[[INPUT:.+]]: tensor<16x32xf32>, %[[DEST:.+]]: tensor<16x32xf32>)
 //       CHECK: %[[CST:.+]] = arith.constant dense<2.{{0*}}e+00>
-//       CHECK: pcf.generic scope(#pcf.test_scope)
-//       CHECK:   execute(%{{.+}} <- %[[INPUT]], %{{.+}} <- %[[CST]], %{{.+}} = %[[DEST]], %{{.+}} = %[[DEST]])
-//       CHECK:     pcf.read_slice %{{.+}}[%{{.+}}, %{{.+}}] [4, 8]
-//       CHECK:     pcf.read_slice %{{.+}}[%{{.+}}, %{{.+}}] [4, 8]
-//       CHECK:     linalg.generic
+//       CHECK: %[[GENERIC:.+]]:2 = pcf.generic scope(#pcf.test_scope)
+//       CHECK:   execute(%[[IN_REF:.+]] <- %[[INPUT]], %[[CST_REF:.+]] <- %[[CST]], %[[ADD_OUT_REF:.+]] = %[[DEST]], %[[MUL_OUT_REF:.+]] = %[[DEST]])
+//       CHECK:     %[[IN_TILE:.+]] = pcf.read_slice %[[IN_REF]]
+//       CHECK:     %[[DEST_TILE:.+]] = pcf.read_slice %[[ADD_OUT_REF]]
+//       CHECK:     %[[ADD_TILE:.+]] = linalg.generic
 //       CHECK:       arith.addf
-//       CHECK:     pcf.read_slice %{{.+}}[%{{.+}}, %{{.+}}] [4, 8]
-//       CHECK:     linalg.generic
+//       CHECK:     %[[CST_TILE:.+]] = pcf.read_slice %[[CST_REF]]
+//       CHECK:     %[[MUL_TILE:.+]] = linalg.generic
+//  CHECK-SAME:       ins(%[[CST_TILE]]
+//  CHECK-SAME:       outs(%[[ADD_TILE]]
 //       CHECK:       arith.mulf
-//       CHECK:     pcf.write_slice
-//       CHECK:     pcf.write_slice
+//       CHECK:     pcf.write_slice %[[MUL_TILE]] into %[[MUL_OUT_REF]]
+//       CHECK:     pcf.write_slice %[[ADD_TILE]] into %[[ADD_OUT_REF]]
 //       CHECK:     pcf.return
+
+// -----
+
+// Consumer under control flow: fuse into the distributed op and preserve
+// branch semantics by selecting between fused generic results.
+func.func @consumer_inside_if_not_fused(
+    %input: tensor<16x32xf32>, %dest: tensor<16x32xf32>, %cond: i1)
+    -> tensor<16x32xf32> {
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%in_ref <- %input, %out_ref = %dest)
+         [%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<16x32xf32, #pcf.test_scope>,
+            !pcf.sref<16x32xf32, sync(#pcf.test_scope)>)
+        -> (tensor<16x32xf32>) {
+    %tile = pcf.read_slice %in_ref[%id0, %id1] [4, 8] [1, 1]
+        : !pcf.sref<16x32xf32, #pcf.test_scope> to tensor<4x8xf32>
+    pcf.write_slice %tile into %out_ref[%id0, %id1] [4, 8] [1, 1]
+        : tensor<4x8xf32> into !pcf.sref<16x32xf32, sync(#pcf.test_scope)>
+    pcf.return
+  }
+  %cst = arith.constant dense<2.0> : tensor<16x32xf32>
+  %result = scf.if %cond -> tensor<16x32xf32> {
+    %mul = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%cst : tensor<16x32xf32>) outs(%0 : tensor<16x32xf32>) {
+    ^bb0(%in: f32, %out: f32):
+      %m = arith.mulf %in, %out : f32
+      linalg.yield %m : f32
+    } -> tensor<16x32xf32>
+    scf.yield %mul : tensor<16x32xf32>
+  } else {
+    scf.yield %0 : tensor<16x32xf32>
+  }
+  return %result : tensor<16x32xf32>
+}
+
+// CHECK-LABEL: @consumer_inside_if_not_fused
+//       CHECK:   %[[CST:.+]] = arith.constant dense<2.{{0*}}e+00>
+//       CHECK:   %[[GENERIC:.+]]:2 = pcf.generic scope(#pcf.test_scope)
+//       CHECK:     execute(%{{.+}} <- %{{.+}}, %{{.+}} <- %[[CST]], %{{.+}} = %{{.+}}, %{{.+}} = %{{.+}})
+//       CHECK:       %[[DEST_TILE:.+]] = pcf.read_slice %{{.+}}
+//       CHECK:       %[[CST_TILE:.+]] = pcf.read_slice %{{.+}}
+//       CHECK:       %[[MUL_TILE:.+]] = linalg.generic
+//  CHECK-SAME:         ins(%[[CST_TILE]]
+//  CHECK-SAME:         outs(%[[DEST_TILE]]
+//       CHECK:       pcf.write_slice %[[MUL_TILE]]
+//       CHECK:       pcf.write_slice %[[DEST_TILE]]
+//       CHECK:   %[[SELECT:.+]] = scf.if %{{.+}} -> (tensor<16x32xf32>) {
+//       CHECK:     scf.yield %[[GENERIC]]#1 : tensor<16x32xf32>
+//       CHECK:   } else {
+//       CHECK:     scf.yield %[[GENERIC]]#0 : tensor<16x32xf32>
+//       CHECK:   return %[[SELECT]]

@@ -93,3 +93,42 @@ func.func @keep_producer_with_other_uses(%dest: tensor<8x16xf32>) -> (tensor<8x1
 //       CHECK:    linalg.fill ins(%[[CST]]
 //       CHECK:    pcf.return
 //       CHECK:  return %[[GENERIC]], %[[FILL]]
+
+// -----
+
+// Producer from control flow is not directly fusible. Keep the scf.if producer
+// outside and do not synthesize a tiled linalg.fill inside the generic body.
+func.func @producer_from_if_not_fused(%dest: tensor<8x16xf32>, %cond: i1) -> tensor<8x16xf32> {
+  %cst = arith.constant 0.0 : f32
+  %selected = scf.if %cond -> tensor<8x16xf32> {
+    %fill = linalg.fill ins(%cst : f32) outs(%dest : tensor<8x16xf32>) -> tensor<8x16xf32>
+    scf.yield %fill : tensor<8x16xf32>
+  } else {
+    scf.yield %dest : tensor<8x16xf32>
+  }
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%ref = %selected)[%id0: index, %id1: index, %n0: index, %n1: index]
+         : (!pcf.sref<8x16xf32, sync(#pcf.test_scope)>)
+        -> (tensor<8x16xf32>) {
+    %slice = pcf.read_slice %ref[%id0, %id1] [4, 8] [1, 1]
+        : !pcf.sref<8x16xf32, sync(#pcf.test_scope)> to tensor<4x8xf32>
+    %result = linalg.exp ins(%slice : tensor<4x8xf32>) outs(%slice : tensor<4x8xf32>) -> tensor<4x8xf32>
+    pcf.write_slice %result into %ref[%id0, %id1] [4, 8] [1, 1]
+        : tensor<4x8xf32> into !pcf.sref<8x16xf32, sync(#pcf.test_scope)>
+    pcf.return
+  }
+  return %0 : tensor<8x16xf32>
+}
+
+// CHECK-LABEL: @producer_from_if_not_fused
+//       CHECK:  %[[CST:.+]] = arith.constant 0.000000e+00 : f32
+//       CHECK:  %[[SELECTED:.+]] = scf.if %{{.+}} -> (tensor<8x16xf32>) {
+//       CHECK:    %[[FILL:.+]] = linalg.fill ins(%[[CST]]
+//       CHECK:    scf.yield %[[FILL]]
+//       CHECK:  %[[GENERIC:.+]] = pcf.generic scope(#pcf.test_scope)
+//       CHECK:    execute(%[[REF:.+]] = %[[SELECTED]])
+//       CHECK:    %[[READ:.+]] = pcf.read_slice %[[REF]]
+//   CHECK-NOT:    linalg.fill
+//       CHECK:    %[[EXP:.+]] = linalg.exp ins(%[[READ]]
+//       CHECK:    pcf.write_slice %[[EXP]] into %[[REF]]
+//       CHECK:  return %[[GENERIC]]

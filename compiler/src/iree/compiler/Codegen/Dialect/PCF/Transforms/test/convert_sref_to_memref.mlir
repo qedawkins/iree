@@ -208,7 +208,7 @@ util.func private @convert_tensor_write_slice(%arg0: memref<?x?xi32>) {
 //  CHECK-NEXT:     execute[{{.*}}] {
 //   CHECK-DAG:     %[[SRC:.+]] = arith.constant dense<0> : tensor<3x4xi32>
 //   CHECK-DAG:     %[[SV:.+]] = memref.subview %[[ARG0]][1, 2] [3, 4] [1, 1] : memref<?x?xi32> to memref<3x4xi32, strided<[?, 1], offset: ?>>
-//       CHECK:     iree_codegen.store_to_buffer %[[SRC]], %[[SV]]
+//       CHECK:     bufferization.materialize_in_destination %[[SRC]] in writable %[[SV]]
 //       CHECK:     pcf.return
 
 // -----
@@ -385,7 +385,7 @@ func.func @convert_tensor_read_slice(%arg0: memref<?x?xi32>) {
 //       CHECK:   pcf.generic
 //  CHECK-NEXT:     execute[{{.*}}] {
 //   CHECK-DAG:     %[[SV:.+]] = memref.subview %[[ARG0]][1, 2] [3, 4] [1, 1] : memref<?x?xi32> to memref<3x4xi32, strided<[?, 1], offset: ?>>
-//   CHECK-DAG:     %[[DST:.+]] = iree_codegen.load_from_buffer %[[SV]] : memref<3x4xi32, strided<[?, 1], offset: ?>> -> tensor<3x4xi32>
+//   CHECK-DAG:     %[[DST:.+]] = bufferization.to_tensor %[[SV]] : memref<3x4xi32, strided<[?, 1], offset: ?>> to tensor<3x4xi32>
 //       CHECK:     util.optimization_barrier %[[DST]]
 //       CHECK:     pcf.return
 
@@ -434,7 +434,7 @@ func.func @convert_tensor_read_slice_no_tied_init(%dim_0: index, %dim_1: index) 
 //       CHECK:   pcf.generic
 //  CHECK-NEXT:     execute[{{.*}}] {
 //   CHECK-DAG:     %[[SV:.+]] = memref.subview %[[ALLOC]][1, 2] [3, 4] [1, 1] : memref<?x?xi32> to memref<3x4xi32, strided<[?, 1], offset: ?>>
-//   CHECK-DAG:     %[[DST:.+]] = iree_codegen.load_from_buffer %[[SV]] : memref<3x4xi32, strided<[?, 1], offset: ?>> -> tensor<3x4xi32>
+//   CHECK-DAG:     %[[DST:.+]] = bufferization.to_tensor %[[SV]] : memref<3x4xi32, strided<[?, 1], offset: ?>> to tensor<3x4xi32>
 //       CHECK:     util.optimization_barrier %[[DST]]
 //       CHECK:     pcf.return
 

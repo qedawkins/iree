@@ -4,7 +4,6 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCF.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
@@ -21,10 +20,12 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributeInterfaces.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -69,7 +70,7 @@ struct ConvertSRefToMemRefPass final
     : impl::ConvertSRefToMemRefPassBase<ConvertSRefToMemRefPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
     // Direct dialect deps.
-    registry.insert<iree_compiler::IREE::Codegen::IREECodegenDialect,
+    registry.insert<bufferization::BufferizationDialect,
                     iree_compiler::IREE::PCF::PCFDialect,
                     iree_compiler::IREE::VectorExt::IREEVectorExtDialect,
                     arith::ArithDialect, memref::MemRefDialect,
@@ -866,7 +867,8 @@ struct ConvertLoopOp final : OpConversionPattern<PCF::LoopOp> {
 
 /// Converts a `pcf.write_slice` to a write to the analysis yielded memref
 /// destination. The flavor of write is determined by the input type:
-/// 1. Tensor types are written using `iree_codegen.store_to_buffer`.
+/// 1. Tensor types are written using
+/// `bufferization.materialize_in_destination`.
 /// 2. Vector types are written using `vector.transfer_write`.
 /// 3. Memref types are written with a `memref.copy`.
 struct ConvertWriteSliceOp final : OpConversionPattern<PCF::WriteSliceOp> {
@@ -881,8 +883,11 @@ struct ConvertWriteSliceOp final : OpConversionPattern<PCF::WriteSliceOp> {
         writeOp.getMixedStrides());
     return llvm::TypeSwitch<Type, LogicalResult>(writeOp.getSourceType())
         .Case([&](RankedTensorType tensor) {
-          rewriter.replaceOpWithNewOp<IREE::Codegen::StoreToBufferOp>(
-              writeOp, writeOp.getSource(), destSlice);
+          rewriter
+              .replaceOpWithNewOp<bufferization::MaterializeInDestinationOp>(
+                  writeOp, TypeRange{}, writeOp.getSource(), destSlice,
+                  /*restrict=*/UnitAttr(),
+                  /*writable=*/rewriter.getUnitAttr());
           return success();
         })
         .Case([&](MemRefType memref) {
@@ -911,7 +916,7 @@ struct ConvertWriteSliceOp final : OpConversionPattern<PCF::WriteSliceOp> {
 
 /// Converts a `pcf.read_slice` to a read from the analysis yielded memref
 /// source. The flavor of read is determined by the result type:
-/// 1. Tensor types are read using `iree_codegen.load_from_buffer`.
+/// 1. Tensor types are read using `bufferization.to_tensor`.
 /// 2. Vector types are read using `vector.transfer_read`.
 struct ConvertReadSliceOp final : OpConversionPattern<PCF::ReadSliceOp> {
   using Base::Base;
@@ -925,8 +930,11 @@ struct ConvertReadSliceOp final : OpConversionPattern<PCF::ReadSliceOp> {
         readOp.getMixedStrides());
     return llvm::TypeSwitch<Type, LogicalResult>(readOp.getResultType())
         .Case([&](RankedTensorType tensor) {
-          rewriter.replaceOpWithNewOp<IREE::Codegen::LoadFromBufferOp>(
-              readOp, tensor, sourceSlice);
+          Value toTensor = bufferization::ToTensorOp::create(
+              rewriter, readOp.getLoc(), tensor, sourceSlice,
+              /*restrict=*/UnitAttr(),
+              /*writable=*/UnitAttr());
+          rewriter.replaceOp(readOp, toTensor);
           return success();
         })
         .Case([&](VectorType vector) {

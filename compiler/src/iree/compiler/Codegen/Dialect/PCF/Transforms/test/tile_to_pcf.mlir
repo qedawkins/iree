@@ -193,16 +193,18 @@ func.func @tile_multi_result(%src: tensor<16x32xf32>,
 //  CHECK-SAME:   %[[DEST0:[A-Za-z0-9_]+]]: tensor<16x32xf32>
 //  CHECK-SAME:   %[[DEST1:[A-Za-z0-9_]+]]: tensor<16x32xf32>
 //       CHECK:  %[[LOOP:.+]]:2 = pcf.loop scope(#pcf.sequential)
-//       CHECK:    execute(%{{.+}} <- %[[SRC]], %{{.+}} = %[[DEST0]], %{{.+}} = %[[DEST1]])
+//       CHECK:    execute(%[[IN_REF:.+]] <- %[[SRC]], %[[OUT0_REF:.+]] = %[[DEST0]], %[[OUT1_REF:.+]] = %[[DEST1]])
 //       CHECK:         : (!pcf.sref<16x32xf32, #pcf.sequential>,
 //  CHECK-SAME:            !pcf.sref<16x32xf32, sync(#pcf.sequential)>,
 //  CHECK-SAME:            !pcf.sref<16x32xf32, sync(#pcf.sequential)>)
 //       CHECK:        -> (tensor<16x32xf32>, tensor<16x32xf32>) {
-//       CHECK:      pcf.read_slice
-//       CHECK:      pcf.read_slice
-//       CHECK:      pcf.read_slice
-//       CHECK:      linalg.generic
-//       CHECK:      pcf.write_slice
-//       CHECK:      pcf.write_slice
+//       CHECK:      %[[IN_TILE:.+]] = pcf.read_slice %[[IN_REF]]
+//       CHECK:      %[[OUT0_TILE:.+]] = pcf.read_slice %[[OUT0_REF]]
+//       CHECK:      %[[OUT1_TILE:.+]] = pcf.read_slice %[[OUT1_REF]]
+//       CHECK:      %[[TILED:.+]]:2 = linalg.generic
+//  CHECK-SAME:        ins(%[[IN_TILE]]
+//  CHECK-SAME:        outs(%[[OUT0_TILE]], %[[OUT1_TILE]]
+//       CHECK:      pcf.write_slice %[[TILED]]#1 into %[[OUT1_REF]]
+//       CHECK:      pcf.write_slice %[[TILED]]#0 into %[[OUT0_REF]]
 //       CHECK:      pcf.return
 //       CHECK:  return %[[LOOP]]#0, %[[LOOP]]#1

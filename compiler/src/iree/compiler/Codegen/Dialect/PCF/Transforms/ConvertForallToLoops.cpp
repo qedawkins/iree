@@ -4,7 +4,6 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCF.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFAttrs.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFOps.h"
@@ -33,15 +32,15 @@ namespace mlir::iree_compiler::IREE::PCF {
 
 namespace {
 
-/// Returns true if the forall op has LocalMappingAttr mapping attributes,
-/// or the mapping is empty/not present.
-static bool hasEmptyOrLocalMapping(scf::ForallOp forallOp) {
+/// Returns true if the forall op has either no mapping or only mapping attrs
+/// implementing DeviceMappingAttrInterface.
+static bool hasEmptyOrDeviceMapping(scf::ForallOp forallOp) {
   std::optional<ArrayAttr> mapping = forallOp.getMapping();
   if (!mapping || mapping->empty()) {
     return true;
   }
   return llvm::all_of(mapping.value(),
-                      llvm::IsaPred<IREE::Codegen::LocalMappingAttr>);
+                      llvm::IsaPred<DeviceMappingAttrInterface>);
 }
 
 struct ConvertForallToLoopsPass final
@@ -52,11 +51,10 @@ struct ConvertForallToLoopsPass final
 void ConvertForallToLoopsPass::runOnOperation() {
   SmallVector<scf::ForallOp> opsToConvert;
   getOperation()->walk([&](scf::ForallOp forallOp) {
-    // Empty mapping, no mapping, and local mapping all map to `pcf.sequential`.
-    // If it is a local mapping, then the lowering pattern will automatically
-    // handle any mapping permutation based on the mapping attribute's relative
-    // id.
-    if (hasEmptyOrLocalMapping(forallOp)) {
+    // Empty mapping and unmapped foralls both lower to `pcf.sequential`.
+    // Any mapping with well-defined processor IDs is lowered by respecting the
+    // relative mapping IDs in the permutation logic below.
+    if (hasEmptyOrDeviceMapping(forallOp)) {
       opsToConvert.push_back(forallOp);
     }
   });

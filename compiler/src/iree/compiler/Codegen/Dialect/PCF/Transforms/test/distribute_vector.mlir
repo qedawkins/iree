@@ -20,9 +20,16 @@
 // to_simd converts back at the boundary.
 //
 // CHECK-LABEL: util.func private @vector_distribute_in_cluster
-// CHECK: arith.constant dense<0.000000e+00> : vector<1x1x1x1x16x16xf32>
+// CHECK: %[[DIST_CST:.+]] = arith.constant dense<0.000000e+00> : vector<1x1x1x1x16x16xf32>
 // CHECK: scf.index_switch
-// CHECK: iree_vector_ext.to_simd {{.*}} : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
+// CHECK: case 0 {
+// CHECK:   %[[SIMD:.+]] = iree_vector_ext.to_simd %[[DIST_CST]] : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
+// CHECK:   "test.use"(%[[SIMD]]) : (vector<16x16xf32>) -> ()
+// CHECK:   scf.yield
+// CHECK: }
+// CHECK: default {
+// CHECK-NOT: "test.use"
+// CHECK: }
 // CHECK-NOT: tile_group
 util.func private @vector_distribute_in_cluster(
     %tg: !pcf.threadgroup<#pcf.test_scope>, %k: index) {
@@ -58,9 +65,23 @@ util.func private @vector_distribute_in_cluster(
 // ops and layout anchors. Both get distributed independently.
 //
 // CHECK-LABEL: util.func private @two_clusters_distributed
-// CHECK-DAG: arith.constant dense<1.000000e+00> : vector<1x1x1x1x16x16xf32>
+// CHECK-DAG: %[[RIGHT_CST:.+]] = arith.constant dense<2.000000e+00> : vector<16x16xf32>
+// CHECK-DAG: %[[LEFT_DIST_CST:.+]] = arith.constant dense<1.000000e+00> : vector<1x1x1x1x16x16xf32>
 // CHECK: scf.index_switch
-// CHECK: iree_vector_ext.to_simd {{.*}} : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
+// CHECK: case 0 {
+// CHECK:   %[[LEFT_SIMD:.+]] = iree_vector_ext.to_simd %[[LEFT_DIST_CST]] : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
+// CHECK:   "test.use_left"(%[[LEFT_SIMD]]) : (vector<16x16xf32>) -> ()
+// CHECK-NOT: "test.use_right"
+// CHECK:   scf.yield
+// CHECK: }
+// CHECK: default {
+// CHECK-NOT: "test.use_left"
+// CHECK:   %[[RIGHT_DIST0:.+]] = iree_vector_ext.to_simt %[[RIGHT_CST]] : vector<16x16xf32> -> vector<1x1x1x1x16x16xf32>
+// CHECK:   %[[RIGHT_DIST1:.+]] = iree_vector_ext.to_simt %[[RIGHT_CST]] : vector<16x16xf32> -> vector<1x1x1x1x16x16xf32>
+// CHECK:   %[[RIGHT_SUM:.+]] = arith.addf %[[RIGHT_DIST0]], %[[RIGHT_DIST1]] : vector<1x1x1x1x16x16xf32>
+// CHECK:   %[[RIGHT_SIMD:.+]] = iree_vector_ext.to_simd %[[RIGHT_SUM]] : vector<1x1x1x1x16x16xf32> -> vector<16x16xf32>
+// CHECK:   "test.use_right"(%[[RIGHT_SIMD]]) : (vector<16x16xf32>) -> ()
+// CHECK: }
 // CHECK-NOT: tile_group
 util.func private @two_clusters_distributed(
     %tg: !pcf.threadgroup<#pcf.test_scope>, %k: index) {
