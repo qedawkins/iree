@@ -213,8 +213,8 @@ static void composeWriteSlicesIntoGeneric(RewriterBase &rewriter,
     unsigned resultIdx = loopResult.getResultNumber();
 
     BlockArgument genericRefArg =
-        genericOp.getRegionRefArgs()[resultToRefArgIdx[resultIdx]];
-    BlockArgument movedRefArg = loopOp.getRegionRefArgs()[resultIdx];
+        genericOp.getResultRefArgs()[resultToRefArgIdx[resultIdx]];
+    BlockArgument movedRefArg = loopOp.getResultRefArgs()[resultIdx];
 
     // Compose all write_slice ops that write to this ref arg.
     for (Operation *user : llvm::make_early_inc_range(movedRefArg.getUsers())) {

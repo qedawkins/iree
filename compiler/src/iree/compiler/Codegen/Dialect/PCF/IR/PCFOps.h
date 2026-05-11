@@ -10,6 +10,7 @@
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFDialect.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/PCF/IR/PCFTypes.h"
+#include "llvm/ADT/STLExtras.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"

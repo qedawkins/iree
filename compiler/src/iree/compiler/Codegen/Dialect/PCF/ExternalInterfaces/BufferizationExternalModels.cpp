@@ -25,17 +25,31 @@ using namespace mlir::bufferization;
 
 namespace {
 
+static bool isOperandInRange(OpOperand &operand, OperandRange range) {
+  if (range.empty()) {
+    return false;
+  }
+  int64_t operandNumber = operand.getOperandNumber();
+  int64_t begin = range.getBeginOperandIndex();
+  return operandNumber >= begin &&
+         operandNumber < begin + static_cast<int64_t>(range.size());
+}
+
 struct GenericOpInterface
     : BufferizableOpInterface::ExternalModel<GenericOpInterface,
                                              PCF::GenericOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
                               const AnalysisState &state) const {
-    // Parallel ops can be treated as though they never read.
-    return false;
+    auto genericOp = cast<PCF::GenericOp>(op);
+    return isOperandInRange(opOperand, genericOp.getReadonlyArgs());
   }
 
   bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
                                const AnalysisState &state) const {
+    auto genericOp = cast<PCF::GenericOp>(op);
+    if (isOperandInRange(opOperand, genericOp.getReadonlyArgs())) {
+      return false;
+    }
     // Generic ops must always be assumed to write to a tensor (init) operand.
     return true;
   }
@@ -57,6 +71,21 @@ struct GenericOpInterface
                           BufferizationState &state) const {
     auto genericOp = cast<PCF::GenericOp>(op);
     Location loc = genericOp.getLoc();
+
+    SmallVector<Value> newReadonlyArgs;
+    newReadonlyArgs.reserve(genericOp.getReadonlyArgs().size());
+    for (Value readonlyArg : genericOp.getReadonlyArgs()) {
+      if (isa<RankedTensorType>(readonlyArg.getType())) {
+        FailureOr<Value> newReadonlyArg =
+            getBuffer(rewriter, readonlyArg, options, state);
+        if (failed(newReadonlyArg)) {
+          return op->emitOpError("failed to get readonly buffer");
+        }
+        newReadonlyArgs.push_back(*newReadonlyArg);
+      } else {
+        newReadonlyArgs.push_back(readonlyArg);
+      }
+    }
 
     SmallVector<Value> newInits;
     newInits.reserve(genericOp.getInits().size());
@@ -87,9 +116,10 @@ struct GenericOpInterface
     }
 
     auto newGenericOp = PCF::GenericOp::create(
-        rewriter, loc, newResultTypes, genericOp.getScope(), newInits,
-        genericOp.getDynamicSizes(), genericOp.getIsTied(),
-        genericOp.getNumIterators(), genericOp.getSyncOnReturn());
+        rewriter, loc, newResultTypes, genericOp.getScope(), newReadonlyArgs,
+        newInits, genericOp.getDynamicSizes(), genericOp.getIsReadonly(),
+        genericOp.getIsTied(), genericOp.getNumIterators(),
+        genericOp.getSyncOnReturn());
     // The builder doesn't set num_leading_args (it defaults to 0), but we
     // need to preserve it from the original op since the execute region's
     // block arguments include leading args from the initialize region.
@@ -148,12 +178,16 @@ struct LoopOpInterface
     : BufferizableOpInterface::ExternalModel<LoopOpInterface, PCF::LoopOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
                               const AnalysisState &state) const {
-    // Parallel ops can be treated as though they never read.
-    return false;
+    auto loopOp = cast<PCF::LoopOp>(op);
+    return isOperandInRange(opOperand, loopOp.getReadonlyArgs());
   }
 
   bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
                                const AnalysisState &state) const {
+    auto loopOp = cast<PCF::LoopOp>(op);
+    if (isOperandInRange(opOperand, loopOp.getReadonlyArgs())) {
+      return false;
+    }
     // Generic ops must always be assumed to write to a tensor (init) operand.
     return true;
   }
@@ -175,6 +209,21 @@ struct LoopOpInterface
                           BufferizationState &state) const {
     auto loopOp = cast<PCF::LoopOp>(op);
     Location loc = loopOp.getLoc();
+
+    SmallVector<Value> newReadonlyArgs;
+    newReadonlyArgs.reserve(loopOp.getReadonlyArgs().size());
+    for (Value readonlyArg : loopOp.getReadonlyArgs()) {
+      if (isa<RankedTensorType>(readonlyArg.getType())) {
+        FailureOr<Value> newReadonlyArg =
+            getBuffer(rewriter, readonlyArg, options, state);
+        if (failed(newReadonlyArg)) {
+          return op->emitOpError("failed to get readonly buffer");
+        }
+        newReadonlyArgs.push_back(*newReadonlyArg);
+      } else {
+        newReadonlyArgs.push_back(readonlyArg);
+      }
+    }
 
     SmallVector<Value> newInits;
     newInits.reserve(loopOp.getInits().size());
@@ -206,8 +255,8 @@ struct LoopOpInterface
 
     auto newLoopOp = PCF::LoopOp::create(
         rewriter, loc, newResultTypes, loopOp.getScope(), loopOp.getCount(),
-        newInits, loopOp.getDynamicSizes(), loopOp.getIsTied(),
-        loopOp.getSyncOnReturn());
+        newReadonlyArgs, newInits, loopOp.getDynamicSizes(),
+        loopOp.getIsReadonly(), loopOp.getIsTied(), loopOp.getSyncOnReturn());
     newLoopOp.getRegion().takeBody(loopOp.getRegion());
 
     // For results with tied inits, use the init buffer directly so

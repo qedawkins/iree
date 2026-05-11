@@ -48,6 +48,54 @@ util.func private @convert_generic_with_alloc(%d0: index, %d1: index, %d2: index
 
 // -----
 
+util.func private @convert_generic_with_readonly(%src: memref<4xf32>, %dst: memref<4xf32>) {
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%src_ref <- %src : memref<4xf32>, %dst_ref = %dst)[%id: index, %n: index]
+         : (!pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>)
+        -> (memref<4xf32>) {
+    util.optimization_barrier %src_ref, %dst_ref : !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.optimization_barrier %0 : memref<4xf32>
+  util.return
+}
+
+// CHECK-LABEL: @convert_generic_with_readonly
+//  CHECK-SAME:     %[[SRC:[A-Za-z0-9_]+]]: memref<4xf32>
+//  CHECK-SAME:     %[[DST:[A-Za-z0-9_]+]]: memref<4xf32>
+//       CHECK:   pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute[{{.*}}] {
+//  CHECK-NEXT:     util.optimization_barrier %[[SRC]], %[[DST]]
+//  CHECK-NEXT:     pcf.return
+//       CHECK:   util.optimization_barrier %[[DST]]
+
+// -----
+
+util.func private @convert_generic_with_interleaved_readonly(%src: memref<4xf32>, %dst: memref<?xf32>, %d0: index) {
+  %0:2 = pcf.generic scope(#pcf.test_scope)
+    execute(%dst_ref = %dst, %src_ref <- %src : memref<4xf32>, %tmp_ref)[%id: index, %n: index]
+         : (!pcf.sref<?xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>)
+        -> (memref<?xf32>, memref<?xf32>{%d0}) {
+    util.optimization_barrier %dst_ref, %src_ref, %tmp_ref : !pcf.sref<?xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.optimization_barrier %0#0, %0#1 : memref<?xf32>, memref<?xf32>
+  util.return
+}
+
+// CHECK-LABEL: @convert_generic_with_interleaved_readonly
+//  CHECK-SAME:     %[[SRC:[A-Za-z0-9_]+]]: memref<4xf32>
+//  CHECK-SAME:     %[[DST:[A-Za-z0-9_]+]]: memref<?xf32>
+//  CHECK-SAME:     %[[D0:[A-Za-z0-9_]+]]: index
+//  CHECK-DAG:    %[[ALLOC:.+]] = memref.alloc(%[[D0]]) {alignment = 16 : i64} : memref<?xf32>
+//       CHECK:   pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute[{{.*}}] {
+//  CHECK-NEXT:     util.optimization_barrier %[[DST]], %[[SRC]], %[[ALLOC]]
+//  CHECK-NEXT:     pcf.return
+//       CHECK:   util.optimization_barrier %[[DST]], %[[ALLOC]]
+
+// -----
+
 util.func private @inline_generic_initializer(%arg0: memref<?x?xi32, strided<[?, 1]>, 3>) {
   %0 = pcf.generic scope(#pcf.test_scope)
     initialize {
@@ -142,6 +190,55 @@ util.func private @convert_loop_with_alloc(%d0: index, %d1: index, %d2: index, %
 //  CHECK-NEXT:     util.optimization_barrier %[[ALLOC]], %[[ALLOC1]]
 //  CHECK-NEXT:     pcf.return
 //       CHECK:   util.optimization_barrier %[[ALLOC]], %[[ALLOC1]]
+
+// -----
+
+util.func private @convert_loop_with_readonly(%src: memref<4xf32>, %dst: memref<4xf32>, %n: index) {
+  %0 = pcf.loop scope(#pcf.test_scope) count(%n)
+    execute(%src_ref <- %src : memref<4xf32>, %dst_ref = %dst)[%id: index]
+         : (!pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>)
+        -> (memref<4xf32>) {
+    util.optimization_barrier %src_ref, %dst_ref : !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.optimization_barrier %0 : memref<4xf32>
+  util.return
+}
+
+// CHECK-LABEL: @convert_loop_with_readonly
+//  CHECK-SAME:     %[[SRC:[A-Za-z0-9_]+]]: memref<4xf32>
+//  CHECK-SAME:     %[[DST:[A-Za-z0-9_]+]]: memref<4xf32>
+//       CHECK:   pcf.loop scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute[{{.*}}] {
+//  CHECK-NEXT:     util.optimization_barrier %[[SRC]], %[[DST]]
+//  CHECK-NEXT:     pcf.return
+//       CHECK:   util.optimization_barrier %[[DST]]
+
+// -----
+
+util.func private @convert_loop_with_interleaved_readonly(%src: memref<4xf32>, %dst: memref<?xf32>, %d0: index, %n: index) {
+  %0:2 = pcf.loop scope(#pcf.test_scope) count(%n)
+    execute(%dst_ref = %dst, %src_ref <- %src : memref<4xf32>, %tmp_ref)[%id: index]
+         : (!pcf.sref<?xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>)
+        -> (memref<?xf32>, memref<?xf32>{%d0}) {
+    util.optimization_barrier %dst_ref, %src_ref, %tmp_ref : !pcf.sref<?xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.optimization_barrier %0#0, %0#1 : memref<?xf32>, memref<?xf32>
+  util.return
+}
+
+// CHECK-LABEL: @convert_loop_with_interleaved_readonly
+//  CHECK-SAME:     %[[SRC:[A-Za-z0-9_]+]]: memref<4xf32>
+//  CHECK-SAME:     %[[DST:[A-Za-z0-9_]+]]: memref<?xf32>
+//  CHECK-SAME:     %[[D0:[A-Za-z0-9_]+]]: index
+//  CHECK-SAME:     %[[N:[A-Za-z0-9_]+]]: index
+//  CHECK-DAG:    %[[ALLOC:.+]] = memref.alloc(%[[D0]]) {alignment = 16 : i64} : memref<?xf32>
+//       CHECK:   pcf.loop scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute[{{.*}}] {
+//  CHECK-NEXT:     util.optimization_barrier %[[DST]], %[[SRC]], %[[ALLOC]]
+//  CHECK-NEXT:     pcf.return
+//       CHECK:   util.optimization_barrier %[[DST]], %[[ALLOC]]
 
 // -----
 

@@ -115,6 +115,22 @@ def GenericOp : PCF_Op<"generic", [
     2. Allocated by the op itself - dynamic sizes must be provided for
        untied results with dynamic dimensions.
 
+    The execute region's ref arguments are described by two masks. The
+    `is_readonly` mask has one entry per execute-region ref argument, in region
+    argument order. A true entry denotes a readonly ref argument bound with
+    `<-` to the next `readonly_args` operand. A false entry denotes a
+    readwrite result ref argument and consumes the next result position. The
+    `is_tied` mask has one entry per result, in result order. A true entry
+    denotes a readwrite result ref argument bound with `=` to the next `inits`
+    operand. A false entry denotes a result ref argument allocated by the op,
+    with dynamic dimensions supplied by `dynamic_sizes` when needed.
+
+    Readonly ref arguments do not produce results and cannot be tied. They may
+    appear before, after, or between readwrite result ref arguments, but each
+    individual execute-region ref argument is either readonly or readwrite. The
+    body may read through a readonly ref argument but the operand does not alias
+    any op result and is not written back when the op completes.
+
     Basic example with tied results:
     ```mlir
       %0 = ... : tensor<4x8xf32>
@@ -122,6 +138,18 @@ def GenericOp : PCF_Op<"generic", [
         execute(%ref = %0)[%id: index, %num_workers: index]
              : (!pcf.sref<4x8xf32, #foo.scope>) -> (tensor<4x8xf32>) {
         // Each worker can read/write %ref.
+        pcf.return
+      }
+    ```
+
+    Example with an interleaved readonly argument:
+    ```mlir
+      %src = ... : tensor<4x8xf32>
+      %dst = ... : tensor<4x8xf32>
+      %result = pcf.generic scope(#foo.scope)
+        execute(%dst_ref = %dst, %src_ref <- %src : tensor<4x8xf32>)[%id: index, %num_workers: index]
+             : (!pcf.sref<4x8xf32, #foo.scope>, !pcf.sref<4x8xf32, #foo.scope>) -> (tensor<4x8xf32>) {
+        // %src_ref is readonly input state. %dst_ref is the tied result state.
         pcf.return
       }
     ```
@@ -152,8 +180,9 @@ def GenericOp : PCF_Op<"generic", [
     ```
   }];
   let arguments = (ins PCF_ScopeAttrInterface:$scope,
+      Variadic<AnyRankedTensorOrMemRef>:$readonly_args,
       Variadic<AnyRankedTensorOrMemRef>:$inits, Variadic<Index>:$dynamic_sizes,
-      ArrayProp<BoolProp>:$is_tied,
+      ArrayProp<BoolProp>:$is_readonly, ArrayProp<BoolProp>:$is_tied,
       DefaultValuedProp<BoolProp, "false">:$sync_on_return,
       IntProp<"int64_t">:$num_index_args, IntProp<"int64_t">:$num_leading_args);
 
@@ -168,9 +197,12 @@ def GenericOp : PCF_Op<"generic", [
     `scope` `(` $scope `)`
     (`initialize` $initializer^)?
     custom<ParallelExecutionBody>($inits,
+                                  $readonly_args,
                                   type($inits),
+                                  type($readonly_args),
                                   $dynamic_sizes,
                                   type($results),
+                                  $is_readonly,
                                   $is_tied,
                                   $region,
                                   $num_leading_args,
@@ -196,6 +228,12 @@ def GenericOp : PCF_Op<"generic", [
       // Builder with everything.
       OpBuilder<(ins "TypeRange":$result_types, "ScopeAttrInterface":$scope,
           "ValueRange":$inits, "ValueRange":$dynamic_sizes,
+          "ArrayRef<bool>":$is_tied, "int64_t":$num_iterators,
+          CArg<"bool", "false">:$sync_on_return)>,
+      // Builder with everything, including readonly arguments.
+      OpBuilder<(ins "TypeRange":$result_types, "ScopeAttrInterface":$scope,
+          "ValueRange":$readonly_args, "ValueRange":$inits,
+          "ValueRange":$dynamic_sizes, "ArrayRef<bool>":$is_readonly,
           "ArrayRef<bool>":$is_tied, "int64_t":$num_iterators,
           CArg<"bool", "false">:$sync_on_return)>,
   ];
@@ -229,22 +267,34 @@ def GenericOp : PCF_Op<"generic", [
       return getIdAndCountArgsMutable();
     }
     MutableArrayRef<BlockArgument> getRegionRefArgsMutable() {
-      return getRegion().getArguments().drop_front(getNumLeadingArgs()).take_front(getNumResults());
+      return getRegion().getArguments().drop_front(getNumLeadingArgs()).take_front(getIsReadonly().size());
     }
     ArrayRef<BlockArgument> getRegionRefArgs() {
       return getRegionRefArgsMutable();
     }
+    SmallVector<BlockArgument> getResultRefArgs() {
+      SmallVector<BlockArgument> resultRefArgs;
+      for (auto [arg, isReadonly] : llvm::zip_equal(getRegionRefArgs(), getIsReadonly())) {
+        if (!isReadonly) {
+          resultRefArgs.push_back(arg);
+        }
+      }
+      return resultRefArgs;
+    }
 
     bool isRegionRefArg(BlockArgument b);
+    bool isReadonlyArg(BlockArgument b);
     bool isInitializedArg(BlockArgument b) {
       assert(b.getOwner() == &getRegion().front() && "unexpected non-entry block arg");
       return b.getArgNumber() < getNumLeadingArgs();
     }
+    OpOperand *getReadonlyOperand(BlockArgument b);
+    int64_t getResultIndex(BlockArgument b);
     SmallVector<int64_t> getInitTiedResultIndices();
     OpResult getTiedResult(OpOperand &operand);
     OpResult getTiedResult(BlockArgument b) {
-      assert(isRegionRefArg(b) && "unexpected non region ref arg");
-      return (*this)->getOpResult(b.getArgNumber() - getNumLeadingArgs());
+      assert(isRegionRefArg(b) && !isReadonlyArg(b) && "unexpected non result ref arg");
+      return (*this)->getOpResult(getResultIndex(b));
     }
     OpOperand *getTiedInit(int64_t i);
     ShapedType getResultType(int64_t i) {
@@ -287,6 +337,15 @@ def LoopOp : PCF_Op<"loop", [
     2. Allocated by the op itself - dynamic sizes must be provided for
        untied results with dynamic dimensions.
 
+    The execute region's ref arguments follow the same readonly/result
+    contract as `pcf.generic`. The `is_readonly` mask has one entry per
+    execute-region ref argument, in region argument order. True entries bind
+    readonly ref arguments to `readonly_args` operands with `<-`; false entries
+    bind readwrite result ref arguments to result positions. The `is_tied` mask
+    has one entry per result and only describes readwrite result ref arguments.
+    Readonly ref arguments do not produce results, cannot be tied, and may be
+    interleaved with readwrite result ref arguments.
+
     Basic example with 1D iteration:
     ```mlir
       %n = ... : index
@@ -295,6 +354,19 @@ def LoopOp : PCF_Op<"loop", [
         execute(%ref = %0)[%id: index]
              : (!pcf.sref<4x8xf32, #foo.scope>) -> (tensor<4x8xf32>) {
         // %id ranges from 0 to %n-1.
+        pcf.return
+      }
+    ```
+
+    Example with an interleaved readonly argument:
+    ```mlir
+      %n = ... : index
+      %src = ... : tensor<4x8xf32>
+      %dst = ... : tensor<4x8xf32>
+      %result = pcf.loop scope(#foo.scope) count(%n)
+        execute(%dst_ref = %dst, %src_ref <- %src : tensor<4x8xf32>)[%id: index]
+             : (!pcf.sref<4x8xf32, #foo.scope>, !pcf.sref<4x8xf32, #foo.scope>) -> (tensor<4x8xf32>) {
+        // %src_ref is readonly input state. %dst_ref is the tied result state.
         pcf.return
       }
     ```
@@ -311,8 +383,9 @@ def LoopOp : PCF_Op<"loop", [
     ```
   }];
   let arguments = (ins PCF_ScopeAttrInterface:$scope, Variadic<Index>:$count,
+      Variadic<AnyRankedTensorOrMemRef>:$readonly_args,
       Variadic<AnyRankedTensorOrMemRef>:$inits, Variadic<Index>:$dynamic_sizes,
-      ArrayProp<BoolProp>:$is_tied,
+      ArrayProp<BoolProp>:$is_readonly, ArrayProp<BoolProp>:$is_tied,
       DefaultValuedProp<BoolProp, "false">:$sync_on_return);
 
   let results = (outs Variadic<AnyRankedTensorOrMemRef>:$results);
@@ -323,9 +396,12 @@ def LoopOp : PCF_Op<"loop", [
     `scope` `(` $scope `)`
     `count` `(` $count `)`
     custom<ParallelExecutionBody>($inits,
+                                  $readonly_args,
                                   type($inits),
+                                  type($readonly_args),
                                   $dynamic_sizes,
                                   type($results),
+                                  $is_readonly,
                                   $is_tied,
                                   $region)
     prop-dict attr-dict
@@ -349,6 +425,12 @@ def LoopOp : PCF_Op<"loop", [
       OpBuilder<(ins "TypeRange":$result_types, "ScopeAttrInterface":$scope,
           "ValueRange":$count, "ValueRange":$inits, "ValueRange":$dynamic_sizes,
           "ArrayRef<bool>":$is_tied, CArg<"bool", "false">:$sync_on_return)>,
+      // Builder with everything, including readonly arguments.
+      OpBuilder<(ins "TypeRange":$result_types, "ScopeAttrInterface":$scope,
+          "ValueRange":$count, "ValueRange":$readonly_args,
+          "ValueRange":$inits, "ValueRange":$dynamic_sizes,
+          "ArrayRef<bool>":$is_readonly, "ArrayRef<bool>":$is_tied,
+          CArg<"bool", "false">:$sync_on_return)>,
   ];
 
   let extraClassDeclaration = [{
@@ -362,16 +444,29 @@ def LoopOp : PCF_Op<"loop", [
       return getIdArgsMutable();
     }
     MutableArrayRef<BlockArgument> getRegionRefArgsMutable() {
-      return getRegion().getArguments().take_front(getNumResults());
+      return getRegion().getArguments().take_front(getIsReadonly().size());
     }
     ArrayRef<BlockArgument> getRegionRefArgs() {
       return getRegionRefArgsMutable();
     }
+    SmallVector<BlockArgument> getResultRefArgs() {
+      SmallVector<BlockArgument> resultRefArgs;
+      for (auto [arg, isReadonly] : llvm::zip_equal(getRegionRefArgs(), getIsReadonly())) {
+        if (!isReadonly) {
+          resultRefArgs.push_back(arg);
+        }
+      }
+      return resultRefArgs;
+    }
 
+    bool isReadonlyArg(BlockArgument b);
+    OpOperand *getReadonlyOperand(BlockArgument b);
+    int64_t getResultIndex(BlockArgument b);
     SmallVector<int64_t> getInitTiedResultIndices();
     OpResult getTiedResult(OpOperand &operand);
     OpResult getTiedResult(BlockArgument b) {
-      return (*this)->getOpResult(b.getArgNumber());
+      assert(!isReadonlyArg(b) && "unexpected readonly ref arg");
+      return (*this)->getOpResult(getResultIndex(b));
     }
     OpOperand *getTiedInit(int64_t i);
     ShapedType getResultType(int64_t i) {

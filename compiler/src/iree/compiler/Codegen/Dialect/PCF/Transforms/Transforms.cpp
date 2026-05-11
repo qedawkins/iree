@@ -137,16 +137,14 @@ static LogicalResult replaceReadSliceOps(RewriterBase &rewriter, OpTy op,
   return success();
 }
 
-PCF::GenericOp cloneWithNewResultTypes(RewriterBase &rewriter,
-                                       PCF::GenericOp genericOp,
-                                       TypeRange newResultTypes,
-                                       ArrayRef<Value> newTiedArgs,
-                                       ArrayRef<Value> newDynamicSizes,
-                                       ArrayRef<bool> newIsTied) {
+PCF::GenericOp cloneWithNewResultTypes(
+    RewriterBase &rewriter, PCF::GenericOp genericOp, TypeRange newResultTypes,
+    ArrayRef<Value> newTiedArgs, ArrayRef<Value> newDynamicSizes,
+    ArrayRef<bool> newIsReadonly, ArrayRef<bool> newIsTied) {
   auto newGenericOp = PCF::GenericOp::create(
       rewriter, genericOp.getLoc(), newResultTypes, genericOp.getScope(),
-      newTiedArgs, newDynamicSizes, newIsTied, genericOp.getNumIterators(),
-      genericOp.getSyncOnReturn());
+      genericOp.getReadonlyArgs(), newTiedArgs, newDynamicSizes, newIsReadonly,
+      newIsTied, genericOp.getNumIterators(), genericOp.getSyncOnReturn());
   newGenericOp.getRegion().takeBody(genericOp.getRegion());
   newGenericOp.getInitializer().takeBody(genericOp.getInitializer());
   newGenericOp.setNumLeadingArgs(genericOp.getNumLeadingArgs());
@@ -157,11 +155,12 @@ PCF::LoopOp cloneWithNewResultTypes(RewriterBase &rewriter, PCF::LoopOp loopOp,
                                     TypeRange newResultTypes,
                                     ArrayRef<Value> newTiedArgs,
                                     ArrayRef<Value> newDynamicSizes,
+                                    ArrayRef<bool> newIsReadonly,
                                     ArrayRef<bool> newIsTied) {
-  auto newLoopOp =
-      PCF::LoopOp::create(rewriter, loopOp.getLoc(), newResultTypes,
-                          loopOp.getScope(), loopOp.getCount(), newTiedArgs,
-                          newDynamicSizes, newIsTied, loopOp.getSyncOnReturn());
+  auto newLoopOp = PCF::LoopOp::create(
+      rewriter, loopOp.getLoc(), newResultTypes, loopOp.getScope(),
+      loopOp.getCount(), loopOp.getReadonlyArgs(), newTiedArgs, newDynamicSizes,
+      newIsReadonly, newIsTied, loopOp.getSyncOnReturn());
   newLoopOp.getRegion().takeBody(loopOp.getRegion());
   return newLoopOp;
 }
@@ -182,7 +181,7 @@ static LogicalResult dropUnusedResults(RewriterBase &rewriter, OpTy op) {
   for (OpResult result : op->getResults()) {
     int64_t resultNum = result.getResultNumber();
     bool isTied = op.getIsTied()[resultNum];
-    BlockArgument regionArg = op.getRegionRefArgs()[resultNum];
+    BlockArgument regionArg = op.getResultRefArgs()[resultNum];
     // First verify that the result is droppable.
     SetVector<Operation *> opsToErase;
     SetVector<Operation *> opsToReplace;
@@ -232,8 +231,15 @@ static LogicalResult dropUnusedResults(RewriterBase &rewriter, OpTy op) {
     return failure();
   }
 
-  OpTy newOp = cloneWithNewResultTypes(rewriter, op, newResultTypes,
-                                       newTiedArgs, newDynamicSizes, newIsTied);
+  SmallVector<bool> newIsReadonly(op.getIsReadonly());
+  int64_t firstRegionRefArg = op.getRegionRefArgs().front().getArgNumber();
+  for (unsigned bbArgIndex : llvm::reverse(blockArgsToDrop)) {
+    newIsReadonly.erase(newIsReadonly.begin() + bbArgIndex - firstRegionRefArg);
+  }
+
+  OpTy newOp =
+      cloneWithNewResultTypes(rewriter, op, newResultTypes, newTiedArgs,
+                              newDynamicSizes, newIsReadonly, newIsTied);
 
   // Erase the block arguments associated with the dropped results. Iterate in
   // reverse so that we don't have to update the argument indices as we go.

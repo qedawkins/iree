@@ -180,7 +180,7 @@ static LogicalResult
 lookupProducerSlices(OpResult result,
                      SmallVectorImpl<PCF::WriteSliceOp> &slices) {
   OpTy owner = cast<OpTy>(result.getOwner());
-  Value tiedArg = owner.getRegionRefArgs()[result.getResultNumber()];
+  Value tiedArg = owner.getResultRefArgs()[result.getResultNumber()];
   auto srefType = cast<PCF::ShapedRefType>(tiedArg.getType());
   if (!srefType.isReturnOnlySync()) {
     return failure();
@@ -470,6 +470,8 @@ static PCF::LoopOp addResults(RewriterBase &rewriter, PCF::LoopOp loopOp,
   llvm::append_range(newDynamicSizes, dynamicSizes);
   SmallVector<Value> newTiedArgs(loopOp.getInits());
   llvm::append_range(newTiedArgs, tiedArgs);
+  SmallVector<bool> newIsReadonly(loopOp.getIsReadonly());
+  newIsReadonly.append(resultTypes.size(), false);
 
   int64_t numOriginalResults = loopOp->getNumResults();
 
@@ -477,10 +479,10 @@ static PCF::LoopOp addResults(RewriterBase &rewriter, PCF::LoopOp loopOp,
   // + 1 because we want the new args to go at the end.
   int64_t newArgIndex = loopOp.getRegionRefArgs().back().getArgNumber() + 1;
 
-  auto newLoopOp =
-      PCF::LoopOp::create(rewriter, loopOp.getLoc(), newResultTypes,
-                          loopOp.getScope(), loopOp.getCount(), newTiedArgs,
-                          newDynamicSizes, newIsTied, loopOp.getSyncOnReturn());
+  auto newLoopOp = PCF::LoopOp::create(
+      rewriter, loopOp.getLoc(), newResultTypes, loopOp.getScope(),
+      loopOp.getCount(), loopOp.getReadonlyArgs(), newTiedArgs, newDynamicSizes,
+      newIsReadonly, newIsTied, loopOp.getSyncOnReturn());
   newLoopOp.getRegion().takeBody(loopOp.getRegion());
 
   // Add the new region arguments with parent sync scope.
@@ -506,17 +508,20 @@ addResults(RewriterBase &rewriter, PCF::GenericOp genericOp,
   llvm::append_range(newDynamicSizes, dynamicSizes);
   SmallVector<Value> newTiedArgs(genericOp.getInits());
   llvm::append_range(newTiedArgs, tiedArgs);
+  SmallVector<bool> newIsReadonly(genericOp.getIsReadonly());
+  newIsReadonly.append(resultTypes.size(), false);
 
   int64_t numOriginalResults = genericOp->getNumResults();
 
   // Get the index of the last region ref arg before moving the body over.
   // + 1 because we want the new args to go at the end.
-  int64_t newArgIndex = genericOp.getRegionRefArgs().back().getArgNumber() + 1;
+  int64_t newArgIndex =
+      genericOp.getRegionRefArgs().back().getArgNumber() + 1;
 
   auto newGenericOp = PCF::GenericOp::create(
       rewriter, genericOp.getLoc(), newResultTypes, genericOp.getScope(),
-      newTiedArgs, newDynamicSizes, newIsTied, genericOp.getNumIterators(),
-      genericOp.getSyncOnReturn());
+      genericOp.getReadonlyArgs(), newTiedArgs, newDynamicSizes, newIsReadonly,
+      newIsTied, genericOp.getNumIterators(), genericOp.getSyncOnReturn());
   newGenericOp.getRegion().takeBody(genericOp.getRegion());
   newGenericOp.getInitializer().takeBody(genericOp.getInitializer());
   newGenericOp.setNumLeadingArgs(genericOp.getNumLeadingArgs());
@@ -635,8 +640,12 @@ static void fuseTilableConsumerImpl(RewriterBase &rewriter, OpTy producerOp,
 
   OpTy newRegionOp = addResults(rewriter, producerOp, isTied, tiedArgs,
                                 dynamicSizes, resultTypes);
+  SmallVector<Value> allResultRefArgs;
+  for (BlockArgument arg : newRegionOp.getResultRefArgs()) {
+    allResultRefArgs.push_back(arg);
+  }
   ValueRange newResultDests =
-      newRegionOp.getRegionRefArgs().take_back(resultTypes.size());
+      ValueRange(allResultRefArgs).take_back(resultTypes.size());
   ValueRange replacements =
       newRegionOp.getResults().take_back(resultTypes.size());
 
@@ -809,24 +818,27 @@ fuseExtractSliceIntoProducerImpl(RewriterBase &rewriter, OpTy producerOp,
 
   // Clone the producer op with updated result types and dynamic sizes.
   OpTy newOp;
+  SmallVector<bool> newIsReadonly(producerOp.getIsReadonly());
   if constexpr (std::is_same_v<OpTy, PCF::LoopOp>) {
     newOp = PCF::LoopOp::create(
         rewriter, producerOp.getLoc(), newResultTypes, producerOp.getScope(),
-        producerOp.getCount(), newInits, newDynamicSizes,
-        producerOp.getIsTied(), producerOp.getSyncOnReturn());
+        producerOp.getCount(), producerOp.getReadonlyArgs(), newInits,
+        newDynamicSizes, newIsReadonly, producerOp.getIsTied(),
+        producerOp.getSyncOnReturn());
     newOp.getRegion().takeBody(producerOp.getRegion());
   } else {
     newOp = PCF::GenericOp::create(
         rewriter, producerOp.getLoc(), newResultTypes, producerOp.getScope(),
-        newInits, newDynamicSizes, producerOp.getIsTied(),
-        producerOp.getNumIterators(), producerOp.getSyncOnReturn());
+        producerOp.getReadonlyArgs(), newInits, newDynamicSizes, newIsReadonly,
+        producerOp.getIsTied(), producerOp.getNumIterators(),
+        producerOp.getSyncOnReturn());
     newOp.getRegion().takeBody(producerOp.getRegion());
     newOp.getInitializer().takeBody(producerOp.getInitializer());
     newOp.setNumLeadingArgs(producerOp.getNumLeadingArgs());
   }
 
   // Update the region ref arg type to match the new result size.
-  Value newRefArg = newOp.getRegionRefArgs()[resultIdx];
+  Value newRefArg = newOp.getResultRefArgs()[resultIdx];
   auto oldSrefType = cast<PCF::ShapedRefType>(newRefArg.getType());
   auto newSrefType = PCF::ShapedRefType::get(
       rewriter.getContext(), extractedType.getShape(),
@@ -1175,16 +1187,19 @@ fuseCollapseShapeIntoProducerImpl(RewriterBase &rewriter, OpTy producerOp,
 
   // Clone the producer op with updated result type.
   OpTy newOp;
+  SmallVector<bool> newIsReadonly(producerOp.getIsReadonly());
   if constexpr (std::is_same_v<OpTy, PCF::LoopOp>) {
     newOp = PCF::LoopOp::create(
         rewriter, producerLoc, newResultTypes, producerOp.getScope(),
-        producerOp.getCount(), newInits, newDynamicSizes,
-        producerOp.getIsTied(), producerOp.getSyncOnReturn());
+        producerOp.getCount(), producerOp.getReadonlyArgs(), newInits,
+        newDynamicSizes, newIsReadonly, producerOp.getIsTied(),
+        producerOp.getSyncOnReturn());
     newOp.getRegion().takeBody(producerOp.getRegion());
   } else {
     newOp = PCF::GenericOp::create(
-        rewriter, producerLoc, newResultTypes, producerOp.getScope(), newInits,
-        newDynamicSizes, producerOp.getIsTied(), producerOp.getNumIterators(),
+        rewriter, producerLoc, newResultTypes, producerOp.getScope(),
+        producerOp.getReadonlyArgs(), newInits, newDynamicSizes, newIsReadonly,
+        producerOp.getIsTied(), producerOp.getNumIterators(),
         producerOp.getSyncOnReturn());
     newOp.getRegion().takeBody(producerOp.getRegion());
     newOp.getInitializer().takeBody(producerOp.getInitializer());
@@ -1192,7 +1207,7 @@ fuseCollapseShapeIntoProducerImpl(RewriterBase &rewriter, OpTy producerOp,
   }
 
   // Update the region ref arg type to match the collapsed shape.
-  Value newRefArg = newOp.getRegionRefArgs()[resultIdx];
+  Value newRefArg = newOp.getResultRefArgs()[resultIdx];
   auto oldSrefType = cast<PCF::ShapedRefType>(newRefArg.getType());
   auto newSrefType = PCF::ShapedRefType::get(
       rewriter.getContext(), collapsedType.getShape(),

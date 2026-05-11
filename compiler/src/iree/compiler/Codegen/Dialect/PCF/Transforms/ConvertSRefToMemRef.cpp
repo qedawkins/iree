@@ -345,8 +345,15 @@ ChangeStatus StridedLayoutValueElement::updateBlockArgument(
         llvm::TypeSwitch<Operation *, bool>(bbArg.getOwner()->getParentOp())
             .Case([&](PCF::GenericOp genericOp) {
               if (genericOp.isRegionRefArg(bbArg)) {
-                auto resultType = dyn_cast<MemRefType>(
-                    genericOp.getTiedResult(bbArg).getType());
+                Type refMaterializedType;
+                if (genericOp.isReadonlyArg(bbArg)) {
+                  refMaterializedType =
+                      genericOp.getReadonlyOperand(bbArg)->get().getType();
+                } else {
+                  refMaterializedType =
+                      genericOp.getTiedResult(bbArg).getType();
+                }
+                auto resultType = dyn_cast<MemRefType>(refMaterializedType);
                 if (!resultType ||
                     !isDefaultOrStrided(resultType.getLayout())) {
                   genericOp->emitOpError(
@@ -375,8 +382,18 @@ ChangeStatus StridedLayoutValueElement::updateBlockArgument(
               return true;
             })
             .Case([&](PCF::LoopOp loopOp) {
-              auto resultType =
-                  dyn_cast<MemRefType>(loopOp.getTiedResult(bbArg).getType());
+              if (bbArg.getArgNumber() >=
+                  static_cast<int64_t>(loopOp.getRegionRefArgs().size())) {
+                return false;
+              }
+              Type refMaterializedType;
+              if (loopOp.isReadonlyArg(bbArg)) {
+                refMaterializedType =
+                    loopOp.getReadonlyOperand(bbArg)->get().getType();
+              } else {
+                refMaterializedType = loopOp.getTiedResult(bbArg).getType();
+              }
+              auto resultType = dyn_cast<MemRefType>(refMaterializedType);
               if (!resultType || !isDefaultOrStrided(resultType.getLayout())) {
                 loopOp->emitOpError(
                     "unexpected non-strided or default memref result type ")
@@ -667,7 +684,15 @@ struct ConvertGenericOp final : OpConversionPattern<PCF::GenericOp> {
       rewriter.inlineBlockBefore(&initializerBlock, newEntry,
                                  newEntry->begin());
     }
-    newArgs.append(replacements);
+    int64_t currReadonlyArg = 0;
+    int64_t currResultArg = 0;
+    for (bool isReadonly : genericOp.getIsReadonly()) {
+      if (isReadonly) {
+        newArgs.push_back(adaptor.getReadonlyArgs()[currReadonlyArg++]);
+      } else {
+        newArgs.push_back(replacements[currResultArg++]);
+      }
+    }
     llvm::append_range(newArgs, newGenericOp.getRegion().getArguments());
     // Inline the entry block into the new region.
     Block *entryBlock = &genericOp.getRegion().front();
@@ -741,7 +766,16 @@ struct ConvertLoopOp final : OpConversionPattern<PCF::LoopOp> {
     auto newLoopOp =
         PCF::LoopOp::create(rewriter, loc, loopOp.getScope(), loopOp.getCount(),
                             loopOp.getSyncOnReturn());
-    SmallVector<Value> newArgs(replacements);
+    SmallVector<Value> newArgs;
+    int64_t currReadonlyArg = 0;
+    int64_t currResultArg = 0;
+    for (bool isReadonly : loopOp.getIsReadonly()) {
+      if (isReadonly) {
+        newArgs.push_back(adaptor.getReadonlyArgs()[currReadonlyArg++]);
+      } else {
+        newArgs.push_back(replacements[currResultArg++]);
+      }
+    }
     newArgs.append(newLoopOp.getRegion().getArguments().begin(),
                    newLoopOp.getRegion().getArguments().end());
     Block *entryBlock = &loopOp.getRegion().front();

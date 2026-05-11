@@ -56,6 +56,61 @@ util.func private @replay_bufferize_generic(%0: memref<?xi32>, %1: memref<?xi32>
 
 // -----
 
+util.func private @bufferize_generic_readonly(%d0: index) {
+  %src = bufferization.alloc_tensor() : tensor<4xf32>
+  %dst = bufferization.alloc_tensor(%d0) : tensor<?xf32>
+  %0 = pcf.generic scope(#pcf.test_scope)
+    execute(%src_ref <- %src : tensor<4xf32>, %dst_ref = %dst)[%id: index, %n: index]
+         : (!pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>)
+        -> (tensor<?xf32>) {
+    util.optimization_barrier %src_ref, %dst_ref : !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.return
+}
+
+// CHECK-LABEL: @bufferize_generic_readonly
+//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
+//   CHECK-DAG:   %[[SRC:.+]] = memref.alloc() {alignment = 64 : i64} : memref<4xf32>
+//   CHECK-DAG:   %[[DST:.+]] = memref.alloc(%[[D0]]) {alignment = 64 : i64} : memref<?xf32>
+//       CHECK:   pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute(%[[SRC_REF:[A-Za-z0-9_]+]] <- %[[SRC]] : memref<4xf32>,
+//  CHECK-SAME:             %[[DST_REF:[A-Za-z0-9_]+]] = %[[DST]])
+//  CHECK-SAME:             [%{{.*}}: index, %{{.*}}: index]
+//  CHECK-NEXT:          : (!pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>)
+//  CHECK-NEXT:         -> (memref<?xf32>) {
+
+// -----
+
+util.func private @bufferize_generic_interleaved_readonly(%d0: index) {
+  %src = bufferization.alloc_tensor() : tensor<4xf32>
+  %dst = bufferization.alloc_tensor(%d0) : tensor<?xf32>
+  %0:2 = pcf.generic scope(#pcf.test_scope)
+    execute(%dst_ref = %dst, %src_ref <- %src : tensor<4xf32>, %tmp_ref)[%id: index, %n: index]
+         : (!pcf.sref<?xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>)
+        -> (tensor<?xf32>, tensor<?xf32>{%d0}) {
+    util.optimization_barrier %id, %n, %dst_ref, %src_ref, %tmp_ref : index, index, !pcf.sref<?xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.return
+}
+
+// CHECK-LABEL: @bufferize_generic_interleaved_readonly
+//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
+//   CHECK-DAG:   %[[SRC:.+]] = memref.alloc() {alignment = 64 : i64} : memref<4xf32>
+//   CHECK-DAG:   %[[DST:.+]] = memref.alloc(%[[D0]]) {alignment = 64 : i64} : memref<?xf32>
+//       CHECK:   pcf.generic scope(#pcf.test_scope)
+//  CHECK-NEXT:     execute(%[[DST_REF:[A-Za-z0-9_]+]] = %[[DST]],
+//  CHECK-SAME:             %[[SRC_REF:[A-Za-z0-9_]+]] <- %[[SRC]] : memref<4xf32>,
+//  CHECK-SAME:             %[[TMP_REF:[A-Za-z0-9_]+]])
+//  CHECK-SAME:             [%{{.*}}: index, %{{.*}}: index]
+//  CHECK-NEXT:          : (!pcf.sref<?xf32, #pcf.test_scope>,
+//  CHECK-SAME:             !pcf.sref<4xf32, #pcf.test_scope>,
+//  CHECK-SAME:             !pcf.sref<?xf32, #pcf.test_scope>)
+//  CHECK-NEXT:         -> (memref<?xf32>, memref<?xf32>{%[[D0]]}) {
+
+// -----
+
 util.func private @bufferize_generic_mixed(%d0: index, %d1: index, %d2: index, %1: memref<?xi32, "foo">) {
   %0 = bufferization.alloc_tensor(%d0) : tensor<?xi32>
   %2:4 = pcf.generic scope(#pcf.test_scope)
@@ -160,6 +215,60 @@ util.func private @bufferize_loop_mixed(%d0: index, %d1: index, %d2: index, %1: 
 //  CHECK-NEXT:         -> (memref<?xi32>, memref<?xi32>{%[[D1]]}, memref<?xi32>{%[[D2]]}, memref<?xi32, "foo">) {
 //       CHECK:       pcf.return
 //  CHECK-NEXT:     }
+
+// -----
+
+util.func private @bufferize_loop_readonly(%d0: index, %n: index) {
+  %src = bufferization.alloc_tensor() : tensor<4xf32>
+  %dst = bufferization.alloc_tensor(%d0) : tensor<?xf32>
+  %0 = pcf.loop scope(#pcf.test_scope) count(%n)
+    execute(%src_ref <- %src : tensor<4xf32>, %dst_ref = %dst)[%id: index]
+         : (!pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>)
+        -> (tensor<?xf32>) {
+    util.optimization_barrier %src_ref, %dst_ref : !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.return
+}
+
+// CHECK-LABEL: @bufferize_loop_readonly
+//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
+//   CHECK-DAG:   %[[SRC:.+]] = memref.alloc() {alignment = 64 : i64} : memref<4xf32>
+//   CHECK-DAG:   %[[DST:.+]] = memref.alloc(%[[D0]]) {alignment = 64 : i64} : memref<?xf32>
+//       CHECK:   pcf.loop scope(#pcf.test_scope) count
+//  CHECK-NEXT:     execute(%[[SRC_REF:[A-Za-z0-9_]+]] <- %[[SRC]] : memref<4xf32>,
+//  CHECK-SAME:             %[[DST_REF:[A-Za-z0-9_]+]] = %[[DST]])
+//  CHECK-SAME:             [%{{.*}}: index]
+
+// -----
+
+util.func private @bufferize_loop_interleaved_readonly(%d0: index, %n: index) {
+  %src = bufferization.alloc_tensor() : tensor<4xf32>
+  %dst = bufferization.alloc_tensor(%d0) : tensor<?xf32>
+  %0:2 = pcf.loop scope(#pcf.test_scope) count(%n)
+    execute(%dst_ref = %dst, %src_ref <- %src : tensor<4xf32>, %tmp_ref)[%id: index]
+         : (!pcf.sref<?xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>)
+        -> (tensor<?xf32>, tensor<?xf32>{%d0}) {
+    util.optimization_barrier %id, %dst_ref, %src_ref, %tmp_ref : index, !pcf.sref<?xf32, #pcf.test_scope>, !pcf.sref<4xf32, #pcf.test_scope>, !pcf.sref<?xf32, #pcf.test_scope>
+    pcf.return
+  }
+  util.return
+}
+
+// CHECK-LABEL: @bufferize_loop_interleaved_readonly
+//  CHECK-SAME:   %[[D0:[A-Za-z0-9]+]]: index
+//  CHECK-SAME:   %[[N:[A-Za-z0-9]+]]: index
+//   CHECK-DAG:   %[[SRC:.+]] = memref.alloc() {alignment = 64 : i64} : memref<4xf32>
+//   CHECK-DAG:   %[[DST:.+]] = memref.alloc(%[[D0]]) {alignment = 64 : i64} : memref<?xf32>
+//       CHECK:   pcf.loop scope(#pcf.test_scope) count
+//  CHECK-NEXT:     execute(%[[DST_REF:[A-Za-z0-9_]+]] = %[[DST]],
+//  CHECK-SAME:             %[[SRC_REF:[A-Za-z0-9_]+]] <- %[[SRC]] : memref<4xf32>,
+//  CHECK-SAME:             %[[TMP_REF:[A-Za-z0-9_]+]])
+//  CHECK-SAME:             [%{{.*}}: index]
+//  CHECK-NEXT:          : (!pcf.sref<?xf32, #pcf.test_scope>,
+//  CHECK-SAME:             !pcf.sref<4xf32, #pcf.test_scope>,
+//  CHECK-SAME:             !pcf.sref<?xf32, #pcf.test_scope>)
+//  CHECK-NEXT:         -> (memref<?xf32>, memref<?xf32>{%[[D0]]}) {
 
 // -----
 

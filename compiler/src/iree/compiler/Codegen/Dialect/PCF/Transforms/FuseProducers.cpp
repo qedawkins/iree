@@ -77,7 +77,7 @@ static LogicalResult
 lookupConsumerSlices(OpResult result,
                      SmallVectorImpl<PCF::ReadSliceOp> &slices) {
   OpTy owner = cast<OpTy>(result.getOwner());
-  Value tiedArg = owner.getRegionRefArgs()[result.getResultNumber()];
+  Value tiedArg = owner.getResultRefArgs()[result.getResultNumber()];
 
   // Collect all read_slice ops on this sref arg. Write_slice users are
   // allowed but not tracked. Any other user type prevents fusion.

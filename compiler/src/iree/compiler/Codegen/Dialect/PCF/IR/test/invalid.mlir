@@ -40,8 +40,20 @@ util.func private @sync_scope_mismatch(%dim: index) {
 
 // -----
 
+util.func private @readonly_token_illegal(%src: tensor<?xi32>) {
+// expected-error@+1 {{readonly region ref argument at index 0 must not have a token or sync scope}}
+  pcf.generic scope(#pcf.test_scope)
+    execute(%ref <- %src : tensor<?xi32>)[%id: index, %n: index]
+         : (!pcf.sref<?xi32, #pcf.test_scope, i32>) {
+    pcf.return
+  }
+  util.return
+}
+
+// -----
+
 util.func private @arg_shape_mismatch(%dim: index) {
-// expected-error@+1 {{region arg at index 0 with type '!pcf.sref<3xi32, #pcf.test_scope>' shape mismatch with tied result of type 'tensor<?xi32>'}}
+// expected-error@+1 {{region arg at index 0 with type '!pcf.sref<3xi32, #pcf.test_scope>' shape mismatch with tied operand/result of type 'tensor<?xi32>'}}
   pcf.generic scope(#pcf.test_scope)
     execute(%ref)[%id: index, %n: index]
          : (!pcf.sref<3xi32, #pcf.test_scope>)
